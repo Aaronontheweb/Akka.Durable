@@ -3,4 +3,8 @@
     <TargetFramework>$(NetLibVersion)</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Akka.Serialization.V2" />
+    <PackageReference Include="Akka.Streams" />
+  </ItemGroup>
 </Project>
