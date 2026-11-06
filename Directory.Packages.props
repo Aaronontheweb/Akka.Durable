@@ -2,22 +2,23 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <!-- Nuget package versions -->
-    <AkkaHostingVersion>1.6.0-beta5</AkkaHostingVersion>
-    <XunitVersion>2.9.3</XunitVersion>
+    <AkkaVersion>1.6.0-beta5</AkkaVersion>
+    <XunitVersion>4.0.2</XunitVersion>
     <XunitRunnerVersion>3.1.5</XunitRunnerVersion>
     <TestSdkVersion>18.11.0</TestSdkVersion>
   </PropertyGroup>
   <!-- App dependencies -->
   <ItemGroup>
-    <PackageVersion Include="Akka.Cluster.Hosting" Version="1.6.0-beta5" />
-    <PackageVersion Include="Akka.Hosting" Version="$(AkkaHostingVersion)" />
+    <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Akka.Hosting" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
   </ItemGroup>
   <!-- Test dependencies -->
   <ItemGroup>
-    <PackageVersion Include="Akka.TestKit.Xunit2" Version="$(AkkaHostingVersion)" />
+    <PackageVersion Include="Akka.TestKit.Xunit" Version="$(AkkaVersion)" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="$(TestSdkVersion)" />
-    <PackageVersion Include="xunit" Version="$(XunitVersion)" />
+    <PackageVersion Include="xunit.v3" Version="$(XunitVersion)" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="$(XunitRunnerVersion)" />
   </ItemGroup>
   <!-- SourceLink support for all Akka.NET projects -->
