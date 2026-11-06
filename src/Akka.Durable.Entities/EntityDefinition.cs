@@ -7,10 +7,15 @@ namespace Akka.Durable.Entities;
 /// </summary>
 public readonly record struct EntityTypeName(string Value);
 
+public readonly record struct DecisionContext(
+    EntityId EntityId,
+    EntityTypeName EntityType,
+    DateTimeOffset UtcNow);
+
 public sealed record EntityDefinition<TState, TCommand, TEvent>(
     EntityTypeName TypeName,
     Func<EntityId, TState> InitialState,
-    Func<TState, TCommand, Decision<TEvent>> Decide,
+    Func<TState, TCommand, DecisionContext, Decision<TEvent>> Decide,
     Func<TState, TEvent, TState> Evolve,
     EntityOptions? Options);
     
@@ -25,6 +30,12 @@ public sealed record EntityOptions
     // Optional override. Otherwise derived from TypeName + EntityId.
     public Func<EntityId, EntityTypeName, string> PersistenceIdFactory
     { get; init; } =  DefaultPersistenceIdFactory;
+    
+    /// <summary>
+    /// For asynchronous effects, this is the default task budget.
+    /// </summary>
+    public TimeSpan EffectTimeout { get; init; } =
+        TimeSpan.FromSeconds(30);
 
     // Snapshot and retention policy
     public int SnapshotEvery { get; init; } = 100;

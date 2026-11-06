@@ -30,7 +30,18 @@ public sealed record StopEffect;
 // not treated as a domain failure.
 public sealed record RunEffect(
     Func<IServiceProvider, CancellationToken, Task<object?>> ExecuteAsync,
-    Func<Exception, object>? OnFailure = null);
+    Func<Exception, object>? OnFailure = null,
+    TimeSpan? Timeout = null);
+
+/// <summary>
+/// Asynchronous, non-blocking activity.
+/// </summary>
+/// <param name="ExecuteAsync"></param>
+/// <param name="OnFailure"></param>
+public sealed record PipeToEffect(
+    Func<IServiceProvider, CancellationToken, Task<object>> ExecuteAsync,
+    Func<Exception, object> OnFailure,
+    TimeSpan? Timeout = null);
 
 public union EntityEffect(
     ReplyEffect,
@@ -40,7 +51,8 @@ public union EntityEffect(
     CancelTimerEffect,
     UnstashAllEffect,
     StopEffect,
-    RunEffect);
+    RunEffect,
+    PipeToEffect);
 
 public sealed record Handled<TEvent>(
     ImmutableArray<TEvent> Events,
@@ -65,6 +77,12 @@ public sealed record Handled<TEvent>(
         TimeSpan delay,
         object message) =>
         Add(new ScheduleEffect(key, delay, message));
+    
+    public Handled<TEvent> Schedule(string key,
+        TimeSpan initialDelay,
+        TimeSpan interval,
+        object message) =>
+        Add(new ScheduleRecurringEffect(key, initialDelay, interval, message));
 
     public Handled<TEvent> CancelTimer(string key) =>
         Add(new CancelTimerEffect(key));
@@ -81,16 +99,17 @@ public sealed record Handled<TEvent>(
     // The service is resolved by the framework, not by the decider.
     public Handled<TEvent> Run<TService>(
         Func<TService, CancellationToken, Task> action,
-        Func<Exception, object>? onFailure = null)
+        Func<Exception, object>? onFailure = null,
+        TimeSpan? timeout = null)
         where TService : notnull =>
         Add(new RunEffect(
             async (services, ct) =>
             {
                 var service = services.GetRequiredService<TService>();
-                await action(service, ct).ConfigureAwait(false);
+                await action(service, ct);
                 return null;
             },
-            onFailure));
+            onFailure, timeout));
 
     // Best-effort async effect whose result becomes a normal entity message.
     // The framework interprets the effect and sends that message through the
@@ -98,16 +117,32 @@ public sealed record Handled<TEvent>(
     public Handled<TEvent> Run<TService, TResult>(
         Func<TService, CancellationToken, Task<TResult>> action,
         Func<TResult, object> onSuccess,
-        Func<Exception, object> onFailure)
+        Func<Exception, object> onFailure,
+        TimeSpan? timeout = null)
         where TService : notnull =>
         Add(new RunEffect(
             async (services, ct) =>
             {
                 var service = services.GetRequiredService<TService>();
-                var result = await action(service, ct).ConfigureAwait(false);
+                var result = await action(service, ct);
                 return onSuccess(result);
             },
-            onFailure));
+            onFailure, timeout));
+    
+    // Concurrent execution
+    public Handled<TEvent> PipeTo<TService, TResult>(
+        Func<TService, CancellationToken, Task<TResult>> action,
+        Func<TResult, object> onSuccess,
+        Func<Exception, object> onFailure,
+        TimeSpan? timeout = null)
+        where TService : notnull =>
+        Add(new PipeToEffect(
+            async (services, ct) =>
+            {
+                var service = services.GetRequiredService<TService>();
+                return onSuccess(await action(service, ct));
+            },
+            onFailure, timeout));
 }
 
 public union Decision<TEvent>(Handled<TEvent>, Ignored, Unhandled, Stashed);
