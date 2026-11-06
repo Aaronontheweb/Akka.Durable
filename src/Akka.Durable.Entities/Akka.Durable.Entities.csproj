@@ -9,6 +9,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Aaron.Akka.Reminders" />
     <PackageReference Include="Akka.Cluster.Hosting" />
   </ItemGroup>
 </Project>
