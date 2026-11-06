@@ -10,6 +10,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+    <PackageReference Include="Akka.Hosting.TestKit" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Akka.Durable.Entities/Akka.Durable.Entities.csproj" />

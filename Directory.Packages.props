@@ -12,11 +12,14 @@
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Akka.Serialization.V2" Version="1.6.0-beta5" />
+    <PackageVersion Include="Akka.Streams" Version="1.6.0-beta5" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
   </ItemGroup>
   <!-- Test dependencies -->
   <ItemGroup>
     <PackageVersion Include="Akka.TestKit.Xunit" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Akka.Hosting.TestKit" Version="$(AkkaVersion)" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="$(TestSdkVersion)" />
     <PackageVersion Include="xunit.v3" Version="$(XunitVersion)" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="$(XunitRunnerVersion)" />
