@@ -5,6 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Akka.Durable.Entities.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Akka.Durable.Abstractions/Akka.Durable.Abstractions.csproj" />
   </ItemGroup>
 

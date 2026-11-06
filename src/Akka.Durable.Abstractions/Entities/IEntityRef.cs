@@ -14,9 +14,9 @@ namespace Akka.Durable.Abstractions.Entities;
 public interface IEntityRef<in TCommand> : ICanTell
 {
     public EntityId Id { get; }
-    
+
     void Tell(TCommand command, IActorRef? sender = null);
-    
+
     Task<TReply> Ask<TReply>(
         TCommand command,
         CancellationToken cancellationToken = default);
@@ -41,6 +41,6 @@ public sealed record CommittedEvent<TEvent>(
     [property: AkkaField(0)] TEvent Event,
     [property: AkkaField(1)] long SequenceNr);
 
-public union EntityUpdate<TState, TEvent>(
+public readonly union EntityUpdate<TState, TEvent>(
     StateSnapshot<TState>,
     CommittedEvent<TEvent>);
