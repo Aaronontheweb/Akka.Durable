@@ -14,7 +14,7 @@ dotnet build
 dotnet test
 ```
 
-The solution targets `net11.0` and enables preview C# features. Package versions are managed centrally; Akka.Cluster.Hosting is pinned to 1.6.0-beta5. The existing console application and tests are template samples, not the durable runtime. Run the sample with `dotnet run --project src/Akka.Console`.
+The solution targets `net11.0` and enables preview C# features. Package versions are managed centrally; Akka.Cluster.Hosting is pinned to 1.6.0-beta5. The solution contains empty `Akka.Durable.Abstractions`, `Akka.Durable.Entities`, and `Akka.Durable.Workflows` libraries, each with a corresponding test project. The entities and workflows projects reference the shared abstractions. No durable runtime is implemented yet.
 
 ## Direction
 
