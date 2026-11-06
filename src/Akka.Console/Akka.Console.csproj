@@ -8,8 +8,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Akka.Hosting"/>
-    <PackageReference Include="Microsoft.Extensions.Hosting"/>
+    <PackageReference Include="Akka.Cluster.Hosting" />
+    <PackageReference Include="Akka.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
   </ItemGroup>
 
 </Project>
