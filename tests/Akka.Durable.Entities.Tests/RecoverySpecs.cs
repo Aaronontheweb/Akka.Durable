@@ -27,13 +27,16 @@ public class RecoverySpecs(ITestOutputHelper output) : PersistenceTestKit(output
         services.AddScoped<ScopedRecorder>();
     }
 
-    private IActorRef SpawnEntity(string entityId)
+    private IActorRef SpawnEntity(
+        string entityId,
+        EntityDefinition<CounterState, CounterCommand, CounterEvent>? definition = null)
     {
         var id = new EntityId(entityId);
+        var def = definition ?? Counter.Definition;
         var services = Host.Services;
         var time = Sys.Scheduler;
         return Sys.ActorOf(Props.Create(() =>
-            new EntityActor<CounterState, CounterCommand, CounterEvent>(id, Counter.Definition, services, time)));
+            new EntityActor<CounterState, CounterCommand, CounterEvent>(id, def, services, time)));
     }
 
     // Plants arbitrary journal entries / snapshots under the entity's persistence id.
@@ -112,6 +115,27 @@ public class RecoverySpecs(ITestOutputHelper output) : PersistenceTestKit(output
         await ExpectMsgAsync<CountIs>(c => c.Count == 7, cancellationToken: Ct);
     }
 
+    [Fact]
+    public async Task Unrecognized_entries_can_be_skipped_by_opting_in()
+    {
+        await Plant("r5", (CounterEvent)new Incremented(2), "not-an-event", (CounterEvent)new Incremented(3));
+        var skipping = Counter.Definition with
+        {
+            Options = EntityOptions.Default with { SkipUnrecognizedJournalEntries = true },
+        };
+
+        // The skipped entry is still reported as an error; the valid events around it are applied.
+        IActorRef entity = null!;
+        await EventFilter.Error(contains: typeof(string).ToString()).ExpectOneAsync(() =>
+        {
+            entity = SpawnEntity("r5", skipping);
+            entity.Tell((CounterCommand)new GetCount(), TestActor);
+            return Task.CompletedTask;
+        }, Ct);
+
+        await ExpectMsgAsync<CountIs>(c => c.Count == 5, cancellationToken: Ct);
+    }
+
     private sealed class Planter : ReceivePersistentActor
     {
         public sealed record Write(object Payload);
@@ -131,7 +155,7 @@ public class RecoverySpecs(ITestOutputHelper output) : PersistenceTestKit(output
             {
                 var sender = Sender;
                 SaveSnapshot(s.Snapshot);
-                Become(() => Command<SaveSnapshotSuccess>(_ =>
+                BecomeStacked(() => Command<SaveSnapshotSuccess>(_ =>
                 {
                     sender.Tell(new Done());
                     UnbecomeStacked();

@@ -91,8 +91,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     $"Entity [{PersistenceId}] cannot recover: snapshot at sequence number " +
                     $"[{offer.Metadata.SequenceNr}] is of type [{offer.Snapshot?.GetType()}] but the expected " +
                     $"state type is [{typeof(TState)}]. The snapshot cannot be skipped, because events it covers " +
-                    "are not replayed. If TState is a C# 15 union, a serializer may have returned the case type " +
-                    "instead of the union (https://github.com/akkadotnet/akka.net/issues/8906).");
+                    "are not replayed. If the entity's events are still in the journal, delete the snapshot so " +
+                    "the entity recovers from its events.");
             }
         });
 
@@ -107,12 +107,26 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         // Catch-all, registered last (handlers match in registration order). An unmatched journal entry
         // is otherwise skipped silently by Akka.Persistence, leaving the entity with missing state.
-        Recover<object>(entry =>
-            throw new EntityRecoveryException(
-                $"Entity [{PersistenceId}] cannot recover: journal entry at sequence number [{LastSequenceNr}] " +
-                $"is of type [{entry.GetType()}] but the expected event type is [{typeof(TEvent)}]. " +
-                "If TEvent is a C# 15 union, a serializer may have returned the case type instead of the " +
-                "union (https://github.com/akkadotnet/akka.net/issues/8906)."));
+        Recover<object>(HandleUnrecognizedJournalEntry);
+    }
+
+    private void HandleUnrecognizedJournalEntry(object entry)
+    {
+        var problem =
+            $"Entity [{PersistenceId}] journal entry at sequence number [{LastSequenceNr}] is of type " +
+            $"[{entry.GetType()}] but the expected event type is [{typeof(TEvent)}].";
+
+        if (_options.SkipUnrecognizedJournalEntries)
+        {
+            // Opted in: keep the entity available, but never quietly.
+            _log.Error("{0} Skipping it because EntityOptions.SkipUnrecognizedJournalEntries is enabled.", problem);
+            return;
+        }
+
+        throw new EntityRecoveryException(
+            $"{problem} Recovery stops rather than continue with missing state. To repair or drop such " +
+            "entries, bind an IReadEventAdapter to the journal; to skip them, enable " +
+            "EntityOptions.SkipUnrecognizedJournalEntries.");
     }
 
     private void Apply(TEvent @event) => State = _definition.Evolve(State, @event);

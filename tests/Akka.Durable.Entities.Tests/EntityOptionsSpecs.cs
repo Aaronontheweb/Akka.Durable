@@ -26,6 +26,7 @@ public class EntityOptionsSpecs
         Assert.Equal(TimeSpan.FromSeconds(30), options.EffectTimeout);
         Assert.Equal(TimeSpan.FromMinutes(2), options.PassivateIdleAfter);
         Assert.Equal(100, options.NumberOfShards);
+        Assert.False(options.SkipUnrecognizedJournalEntries);
         Assert.Equal(100, options.SnapshotEvery);
         Assert.Equal(2, options.KeepSnapshots);
         Assert.False(options.DeleteEventsOnSnapshot);

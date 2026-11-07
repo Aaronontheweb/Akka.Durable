@@ -94,6 +94,21 @@ public sealed record EntityOptions
     public string? JournalPluginId { get; init; }
     public string? SnapshotPluginId { get; init; }
 
+    /// <summary>
+    /// Skip journal entries that are not of the entity's event type during recovery, logging an error for
+    /// each, instead of failing recovery. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>By default an unrecognized entry stops recovery, so the entity never runs with silently missing
+    /// state. Enabling this keeps an entity with a poisoned journal available at the cost of the skipped
+    /// entries' changes.</para>
+    /// <para>For targeted repair, bind an <c>IReadEventAdapter</c> to the journal instead: it can drop an entry
+    /// or replace it with a valid event before the entity sees it.</para>
+    /// <para>Snapshots are never skipped: replay resumes after a snapshot, so skipping one would lose every
+    /// event it covers.</para>
+    /// </remarks>
+    public bool SkipUnrecognizedJournalEntries { get; init; }
+
     public EntityOptions WithPersistenceId(
         Func<EntityId, EntityTypeName, string> factory) =>
         this with { PersistenceIdFactory = factory };
