@@ -39,8 +39,6 @@ public sealed class EntityRegion<TCommand, TState, TEvent>
 
 public static class DurableEntityHostingExtensions
 {
-    private const int NumberOfShards = 100;
-
     /// <summary>
     /// Registers <see cref="IEntityRefs{TCommand}"/> and <see cref="IDurableEntityRefs{TCommand,TState,TEvent}"/>
     /// for injection. Call once alongside <see cref="WithDurableEntity{TState,TCommand,TEvent}"/>.
@@ -69,11 +67,16 @@ public static class DurableEntityHostingExtensions
                 new EntityId(entityId), definition, services, time);
         }
 
+        var options = definition.Options ?? EntityOptions.Default;
         var stopMessage = EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
-        var passivateIdleAfter = (definition.Options ?? EntityOptions.Default).PassivateIdleAfter;
+        var passivateIdleAfter = options.PassivateIdleAfter;
 
         if (shardOptions is not null)
         {
+            if (options.NumberOfShards <= 0)
+                throw new ArgumentOutOfRangeException(nameof(definition), options.NumberOfShards,
+                    $"EntityOptions.NumberOfShards for [{definition.TypeName.Value}] must be positive.");
+
             // Hand-off uses the same stop message as passivation, so persistent entities stop cleanly.
             shardOptions.HandOffStopMessage ??= stopMessage;
 
@@ -86,7 +89,7 @@ public static class DurableEntityHostingExtensions
                 .WithShardRegion<EntityRegion<TCommand>>(
                     definition.TypeName.Value,
                     (system, _, resolver) => EntityProps(system, resolver),
-                    HashCodeMessageExtractor.Create(NumberOfShards, _ => null),
+                    HashCodeMessageExtractor.Create(options.NumberOfShards, _ => null),
                     shardOptions)
                 .WithActors(async (_, registry) =>
                     registry.Register<EntityRegion<TCommand, TState, TEvent>>(

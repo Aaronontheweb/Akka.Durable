@@ -52,6 +52,18 @@ public sealed record EntityOptions
     { get; init; } = DefaultPersistenceIdFactory;
 
     /// <summary>
+    /// Number of shards the entity type is spread across in sharded mode. Defaults to 100.
+    /// </summary>
+    /// <remarks>
+    /// <para>Entity IDs are hashed onto this many shards, so every node that hosts the entity type must use
+    /// the same value. It lives on the entity definition, which every node shares, for that reason.</para>
+    /// <para>Changing it after deployment moves entities to different shards: roll it out with a full
+    /// cluster restart, not a rolling upgrade.</para>
+    /// <para>Ignored when the entity type is hosted locally.</para>
+    /// </remarks>
+    public int NumberOfShards { get; init; } = 100;
+
+    /// <summary>
     /// For asynchronous effects, this is the default task budget.
     /// </summary>
     public TimeSpan EffectTimeout { get; init; } =

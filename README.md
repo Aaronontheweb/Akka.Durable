@@ -115,6 +115,8 @@ Without `ShardOptions` the entity type runs in a local host actor in this proces
 
 In both modes an entity is passivated after `EntityOptions.PassivateIdleAfter` (default 2 minutes) without messages, and its next message reactivates it from the journal; set it to `TimeSpan.Zero` to disable. In sharded mode an explicit `ShardOptions.PassivateIdleEntityAfter` wins.
 
+In sharded mode, entity IDs are spread across `EntityOptions.NumberOfShards` shards (default 100). It's on the entity definition so every node uses the same value; changing it after deployment moves entities to different shards and needs a full cluster restart. Local hosting ignores it.
+
 ## Sending commands
 
 Inject `IEntityRefs<TCommand>` and get a ref by entity ID. Getting a ref is cheap and doesn't start the entity. The first message does.
