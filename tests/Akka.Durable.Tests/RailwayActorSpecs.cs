@@ -1,4 +1,5 @@
 using Akka.Actor;
+using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Hosting.TestKit;
 using Akka.Event;
@@ -24,9 +25,10 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         services.AddScoped<ScopedCalculator>();
     }
 
-    private IActorRef Spawn(string id, TimeSpan? timeout = null)
+    private IActorRef Spawn(string id, TimeSpan? timeout = null,
+        EntityDefinition<RailwayState, RailwayCommand, RailwayEvent>? definition = null)
     {
-        var definition = Railway.Definition with
+        definition = (definition ?? Railway.Definition) with
         {
             Options = EntityOptions.Default with { EffectTimeout = timeout ?? TimeSpan.FromSeconds(10) }
         };
@@ -171,6 +173,175 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         await AwaitAssertAsync(() => Assert.Equal(["wait", "disposed"], Recorder.Entries),
             cancellationToken: Ct);
         await ExpectNoMsgAsync(NoMessageWindow, Ct);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Captured_stages_are_rejected_before_repeating_events_or_messages(bool typed, bool fails)
+    {
+        if (fails)
+            Calculator.Calculate = (_, _) => Task.FromException<int>(new InvalidOperationException("service failed"));
+        var definition = Railway.Definition with
+        {
+            Decide = (_, command, ctx) =>
+            {
+                var c = (BeginAdjust)command.Value;
+                if (typed)
+                {
+                    var captured = ctx.For(c).Persist(new Added(c.Before)).Tell(TestActor, "stage");
+                    return captured.Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(c.By, ct),
+                        onSuccess: (_, _) => captured.Reply(new Adjusted(999)),
+                        onFailure: (_, _) => captured.Reply(new AdjustmentRejected("incorrect reply")));
+                }
+                var effects = ctx.Persist(new Added(c.Before)).Tell(TestActor, "stage");
+                return effects.Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(c.By, ct),
+                    onSuccess: (_, _) => effects,
+                    onFailure: (_, _) => effects);
+            }
+        };
+        var actor = Spawn($"captured-{typed}-{fails}", definition: definition);
+        await EventFilter.Custom<Error>(error => error.Cause.GetBaseException() is InvalidOperationException ex
+            && ex.Message.Contains("reused an earlier decision stage", StringComparison.Ordinal)).ExpectOneAsync(() =>
+        {
+            Send(actor, new BeginAdjust(10, 3));
+            return Task.CompletedTask;
+        }, Ct);
+
+        await ExpectMsgAsync("stage", cancellationToken: Ct);
+        var state = await ReadState(actor);
+        Assert.Equal(new RailwayState(10), state.State);
+        Assert.Equal(1, state.SequenceNr);
+        Assert.Equal(["calculate:3", "disposed"], Recorder.Entries);
+        await ExpectNoMsgAsync(NoMessageWindow, Ct);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Non_reply_continuations_receive_fresh_state_and_log_handled_failures(bool fails)
+    {
+        if (fails)
+            Calculator.Calculate = (_, _) => Task.FromException<int>(new InvalidOperationException("service failed"));
+        var definition = Railway.Definition with
+        {
+            Decide = (_, command, ctx) => ctx.Persist(new Added(10))
+                .Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(3, ct),
+                    onSuccess: (result, next) => next.Persist(new Added(result)).Tell(TestActor, next.State.Count),
+                    onFailure: (error, next) => next.Tell(TestActor, next.State.Count))
+        };
+        var actor = Spawn($"non-reply-{fails}", definition: definition);
+        if (fails)
+        {
+            await EventFilter.Custom<Warning>(warning => warning.Message.ToString()!.Contains("Run effect failed",
+                StringComparison.Ordinal)).ExpectOneAsync(() =>
+            {
+                Send(actor, new BeginAdjust(10, 3));
+                return Task.CompletedTask;
+            }, Ct);
+        }
+        else
+            Send(actor, new BeginAdjust(10, 3));
+
+        await ExpectMsgAsync(10, cancellationToken: Ct);
+        var state = await ReadState(actor);
+        Assert.Equal(new RailwayState(fails ? 10 : 13), state.State);
+        Assert.Equal(fails ? 1 : 2, state.SequenceNr);
+        await ExpectNoMsgAsync(NoMessageWindow, Ct);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ReplyAndRun_replies_once_before_Task_or_result_work_finishes(bool hasResult, bool fails)
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Calculator.Calculate = (_, ct) =>
+        {
+            entered.TrySetResult();
+            return finish.Task.WaitAsync(ct);
+        };
+        Calculator.Wait = async ct =>
+        {
+            entered.TrySetResult();
+            await finish.Task.WaitAsync(ct);
+        };
+        var definition = Railway.Definition with
+        {
+            Decide = (_, command, ctx) =>
+            {
+                var request = ctx.For((BeginAdjust)command.Value).Persist(new Added(10));
+                return hasResult
+                    ? request.ReplyAndRun<ScopedCalculator, int>(new Adjusted(10),
+                        (service, ct) => service.CalculateAsync(3, ct),
+                        onSuccess: (result, next) => next.Persist(new Added(result)),
+                        onFailure: (error, next) => next)
+                    : request.ReplyAndRun<ScopedCalculator>(new Adjusted(10),
+                        (service, ct) => service.WaitAsync(ct),
+                        onSuccess: next => next.Persist(new Added(1)),
+                        onFailure: (error, next) => next);
+            }
+        };
+        var actor = Spawn($"early-{hasResult}-{fails}", definition: definition);
+        Send(actor, new BeginAdjust(10, 3));
+        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
+        Assert.Equal(new Adjusted(10), reply.Value);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+        actor.Tell(GetEntityState.Instance, TestActor);
+        try
+        {
+            await ExpectNoMsgAsync(NoMessageWindow, Ct);
+        }
+        finally
+        {
+            if (fails)
+                finish.TrySetException(new InvalidOperationException("service failed"));
+            else
+                finish.TrySetResult(3);
+        }
+
+        var state = await ExpectMsgAsync<EntityStateReply>(cancellationToken: Ct);
+        Assert.Equal(new RailwayState(fails ? 10 : hasResult ? 13 : 11), state.State);
+        Assert.Equal(fails ? 1 : 2, state.SequenceNr);
+        await ExpectNoMsgAsync(NoMessageWindow, Ct);
+    }
+
+    [Fact]
+    public async Task ReplyAndStop_after_an_asynchronous_continuation_passivates_on_the_actor_scheduler()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Calculator.Calculate = (_, ct) =>
+        {
+            entered.TrySetResult();
+            return finish.Task.WaitAsync(ct);
+        };
+        var definition = Railway.Definition with
+        {
+            Decide = (_, command, ctx) => ctx.For((Adjust)command.Value).Run<ScopedCalculator, int>(
+                (service, ct) => service.CalculateAsync(3, ct),
+                onSuccess: (result, next) => next.Persist(new Added(result)).ReplyAndStop(new Adjusted(result)),
+                onFailure: (error, next) => next.Reply(new AdjustmentRejected(error.Message)))
+        };
+        var probe = CreateTestProbe();
+        var props = Props.Create(() => new EntityActor<RailwayState, RailwayCommand, RailwayEvent>(
+            new EntityId("async-stop"), definition, Host.Services, Sys.Scheduler));
+        var parent = Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref)));
+        Send(parent, new Adjust(3));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+        finish.SetResult(3);
+
+        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
+        Assert.Equal(new Adjusted(3), reply.Value);
+        await probe.ExpectMsgAsync<Passivate>(cancellationToken: Ct);
+        var child = probe.LastSender;
+        var stopped = await probe.ExpectMsgAsync<EntityStopped>(cancellationToken: Ct);
+        Assert.Equal(child, stopped.Entity);
     }
 
     private sealed class HeldWrite : IJournalInterceptor

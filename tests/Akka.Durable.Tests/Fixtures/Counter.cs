@@ -155,31 +155,31 @@ public static class Counter
             IncrementAndRecord c => ctx.For(c).Persist(new Incremented(c.By))
                 .Run<ScopedRecorder>(
                     (recorder, ct) => recorder.RecordAsync($"run:{c.By}", ct),
-                    onSuccess: () => ctx.For(c).Reply(new Accepted()),
-                    onFailure: error => throw error),
+                    onSuccess: next => next.Reply(new Accepted()),
+                    onFailure: (error, _) => throw error),
 
             IncrementThenFail c => ctx.For(c).Persist(new Incremented(c.By))
                 .Run<ScopedRecorder>(
                     (_, _) => throw new InvalidOperationException("boom"),
-                    onSuccess: () => ctx.For(c).Reply(new Accepted()),
-                    onFailure: error => throw error),
+                    onSuccess: next => next.Reply(new Accepted()),
+                    onFailure: (error, _) => throw error),
 
             FailWithFallback c => ctx.For(c).Run<ScopedRecorder>(
                 (_, _) => throw new InvalidOperationException("boom"),
-                onSuccess: () => ctx.For(c).Reply(new FailureRecorded("unexpected success")),
-                onFailure: error => ctx.For(c).Reply(new FailureRecorded(error.Message))),
+                onSuccess: next => next.Reply(new FailureRecorded("unexpected success")),
+                onFailure: (error, next) => next.Reply(new FailureRecorded(error.Message))),
 
             RecordFailure f => ctx.For(f).Reply(new FailureRecorded(f.Reason)),
 
             WaitForGate c => ctx.For(c).Run<Gate>(
                 (gate, ct) => gate.WaitAsync(ct),
-                onSuccess: () => ctx.For(c).Reply(new GateOpened()),
-                onFailure: error => throw error),
+                onSuccess: next => next.Reply(new GateOpened()),
+                onFailure: (error, _) => throw error),
 
             WaitForGateWithTimeout c => ctx.For(c).Run<Gate>(
                 (gate, ct) => gate.WaitAsync(ct),
-                onSuccess: () => ctx.For(c).Reply(new FailureRecorded("opened")),
-                onFailure: error => ctx.For(c).Reply(new FailureRecorded(error.GetType().Name)),
+                onSuccess: next => next.Reply(new FailureRecorded("opened")),
+                onFailure: (error, next) => next.Reply(new FailureRecorded(error.GetType().Name)),
                 timeout: c.Timeout),
 
             RemindLater r => ctx.None().Schedule("tick", r.Delay, new Increment(1)),

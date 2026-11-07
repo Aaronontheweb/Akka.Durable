@@ -153,7 +153,8 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
             new EntityId("sender"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
         var effect = Assert.IsType<TellEffect>(
-            ctx.None().Tell(CounterRef("a"), new Increment(1)).Effects.Single().Value);
+            Assert.IsType<Handled<CounterCommand, CounterEvent>>(
+                ctx.None().Tell(CounterRef("a"), new Increment(1)).ToDecision().Value).Effects.Single().Value);
 
         Assert.IsType<CounterCommand>(effect.Message);
         effect.Recipient.Tell(effect.Message, TestActor);

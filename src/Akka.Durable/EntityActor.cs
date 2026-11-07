@@ -213,8 +213,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Unhandled(envelope);
     }
 
-    private void Commit(Handled<TCommand, TEvent> handled, IActorRef sender, ReminderEnvelope? reminder)
+    private void Commit(Handled<TCommand, TEvent> handled, IActorRef sender, ReminderEnvelope? reminder,
+        HashSet<object>? earlierStages = null)
     {
+        var stages = earlierStages ?? [];
+        if (!stages.Add(handled.Stage))
+            throw new InvalidOperationException(Handled<TCommand, TEvent>.ReusedStageMessage);
+
         ImmutableArray<TEvent> events = handled.Events.IsDefault ? [] : handled.Events;
         ImmutableArray<EntityEffect<TCommand, TEvent>> effects = handled.Effects.IsDefault ? [] : handled.Effects;
 
@@ -226,7 +231,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             if (!events.IsEmpty) MaybeSnapshot();
 
             // A Run starts a new persistence stage. Its terminal branch owns the acknowledgement.
-            if (await ExecuteEffectsAsync(effects, sender, reminder) && reminder is not null)
+            if (await ExecuteEffectsAsync(effects, sender, reminder, stages) && reminder is not null)
                 AckReminder(reminder);
         });
     }
@@ -236,7 +241,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     #region Effects
 
     private async Task<bool> ExecuteEffectsAsync(
-        ImmutableArray<EntityEffect<TCommand, TEvent>> effects, IActorRef sender, ReminderEnvelope? reminder)
+        ImmutableArray<EntityEffect<TCommand, TEvent>> effects, IActorRef sender, ReminderEnvelope? reminder,
+        HashSet<object> stages)
     {
         foreach (var effect in effects)
         {
@@ -251,16 +257,26 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     break;
 
                 case RunEffect<TCommand, TEvent> run:
+                    // Keep this await on the actor scheduler: reading State and committing the next
+                    // decision must remain inside the actor, even though service work is independent.
                     var outcome = await ExecuteRunAsync(run);
                     _lifetime.Token.ThrowIfCancellationRequested();
                     // Only the invocation is inside ExecuteRunAsync's failure boundary. Exceptions in
                     // continuation construction, persistence, and later effects go to supervision.
-                    var next = outcome.Failure is { } failure
-                        ? run.OnFailure(State!, _timeProvider.Now, failure)
-                        : run.OnSuccess(State!, _timeProvider.Now, outcome.Result);
+                    Handled<TCommand, TEvent> next;
+                    if (outcome.Failure is { } failure)
+                    {
+                        _log.Warning(failure, "Run effect failed for entity [{0}/{1}]. Executing failure continuation.",
+                            EntityType.Value, _entityId.Value);
+                        next = run.OnFailure(State!, _timeProvider.Now, failure);
+                    }
+                    else
+                    {
+                        next = run.OnSuccess(State!, _timeProvider.Now, outcome.Result);
+                    }
                     // Register the next persist before releasing this callback. Do not await it here:
                     // its journal acknowledgements must be processed by the persistent actor.
-                    Commit(next, sender, reminder);
+                    Commit(next, sender, reminder, stages);
                     return false;
 
                 case ScheduleEffect schedule:

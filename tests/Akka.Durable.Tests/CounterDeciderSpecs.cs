@@ -89,6 +89,6 @@ public class CounterDeciderSpecs
         var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
             new EntityId("x"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
 
-        Assert.Throws<InvalidOperationException>(() => ctx.None().Stop().Schedule("tick", TimeSpan.FromSeconds(1), new Increment(1)));
+        Assert.Throws<InvalidOperationException>(() => Decisions.None<CounterCommand, CounterEvent>().Stop().Schedule("tick", TimeSpan.FromSeconds(1), new Increment(1)));
     }
 }

@@ -60,6 +60,12 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     Decision<TCommand, TEvent> decision,
     DateTimeOffset? utcNow = null)
 {
+    private readonly ImmutableHashSet<object> _earlierStages = [];
+
+    private DeciderOutcome(EntityDefinition<TState, TCommand, TEvent> definition, TState stateBefore,
+        Decision<TCommand, TEvent> decision, DateTimeOffset? utcNow, ImmutableHashSet<object> earlierStages)
+        : this(definition, stateBefore, decision, utcNow) => _earlierStages = earlierStages;
+
     public Decision<TCommand, TEvent> Decision => decision;
 
     public Handled<TCommand, TEvent> Handled => decision is Handled<TCommand, TEvent> handled
@@ -109,7 +115,7 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
         var run = Assert.IsType<RunEffect<TCommand, TEvent>>(Effects.Last().Value);
         var state = Handled.Events.Aggregate(stateBefore, definition.Evolve);
         var at = now ?? utcNow ?? DateTimeOffset.UnixEpoch;
-        return new(definition, state, run.OnSuccess(state!, at, result), at);
+        return Continue(state, run.OnSuccess(state!, at, result), at);
     }
 
     /// <summary>Supplies an operation failure without invoking any service.</summary>
@@ -118,7 +124,15 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
         var run = Assert.IsType<RunEffect<TCommand, TEvent>>(Effects.Last().Value);
         var state = Handled.Events.Aggregate(stateBefore, definition.Evolve);
         var at = now ?? utcNow ?? DateTimeOffset.UnixEpoch;
-        return new(definition, state, run.OnFailure(state!, at, error), at);
+        return Continue(state, run.OnFailure(state!, at, error), at);
+    }
+
+    private DeciderOutcome<TState, TCommand, TEvent> Continue(TState state, Handled<TCommand, TEvent> next, DateTimeOffset at)
+    {
+        var stages = _earlierStages.Add(Handled.Stage);
+        if (stages.Contains(next.Stage))
+            throw new InvalidOperationException(Handled<TCommand, TEvent>.ReusedStageMessage);
+        return new(definition, state, next, at, stages);
     }
 
     public void ThenIgnored() => Assert.True(decision is Ignored, $"Expected Ignored but got {decision.Value}");

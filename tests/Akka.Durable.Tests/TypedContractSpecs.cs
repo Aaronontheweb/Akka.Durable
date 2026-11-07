@@ -53,12 +53,24 @@ public sealed class TypedContractSpecs
             Decision<CounterCommand, CounterEvent> decision = request.Reply(new Accepted());
             var graph = request.Run<Gate>(
                 (gate, ct) => gate.WaitAsync(ct),
-                onSuccess: () => request.Reply(new Accepted()),
-                onFailure: error => request.Reply(new Accepted()));
+                onSuccess: next => next.Reply(new Accepted()),
+                onFailure: (error, next) => next.Reply(new Accepted()));
             var resultGraph = request.Run<Gate, int>(
                 async (gate, ct) => { await gate.WaitAsync(ct); return 1; },
                 onSuccess: (result, next) => next.Reply(new Accepted()),
                 onFailure: (error, next) => next.Reply(new Accepted()));
+            var early = request.ReplyAndRun<Gate>(new Accepted(),
+                (gate, ct) => gate.WaitAsync(ct),
+                onSuccess: next => next,
+                onFailure: (error, next) => next);
+            var earlyResult = request.ReplyAndRun<Gate, int>(new Accepted(),
+                (gate, ct) => Task.FromResult(1),
+                onSuccess: (result, next) => next.Persist(new Incremented(result)),
+                onFailure: (error, next) => next);
+            var nested = ctx.None().Run<Gate>((gate, ct) => gate.WaitAsync(ct),
+                onSuccess: next => next.Run<Gate>((gate, ct) => gate.WaitAsync(ct),
+                    onSuccess: done => done.Stop(), onFailure: (error, done) => done),
+                onFailure: (error, next) => next);
             """);
 
         Assert.True(errors.IsEmpty, string.Join(Environment.NewLine, errors));
@@ -67,6 +79,41 @@ public sealed class TypedContractSpecs
     public static TheoryData<string> InvalidCalls =>
     [
         "entity.Ask(new Noop());",
+        "ctx.None().Stop().Tell(entity, new Increment(1));",
+        """
+        var request = ctx.For(new Increment(1));
+        request.Run<Gate>((gate, ct) => gate.WaitAsync(ct),
+            onSuccess: () => request.Reply(new Accepted()),
+            onFailure: error => request.Reply(new Accepted()));
+        """,
+        """
+        var request = ctx.For(new Increment(1));
+        request.Run<Gate, int>((gate, ct) => Task.FromResult(1),
+            onSuccess: result => request.Reply(new Accepted()),
+            onFailure: error => request.Reply(new Accepted()));
+        """,
+        """
+        ctx.None().Run<Gate>((gate, ct) => gate.WaitAsync(ct),
+            onSuccess: next => next, onFailure: (error, next) => next)
+            .Tell(entity, new Increment(1));
+        """,
+        """
+        ctx.For(new Increment(1)).ReplyAndRun<Gate>(new Accepted(),
+            (gate, ct) => gate.WaitAsync(ct),
+            onSuccess: next => next.Reply(new Accepted()),
+            onFailure: (error, next) => next);
+        """,
+        """
+        var request = ctx.For(new Increment(1));
+        request.ReplyAndRun<Gate>(new Accepted(), (gate, ct) => gate.WaitAsync(ct),
+            onSuccess: next => request.Reply(new Accepted()),
+            onFailure: (error, next) => next);
+        """,
+        """
+        ctx.For(new Increment(1)).ReplyAndRun<Gate>(new Accepted(),
+            (gate, ct) => gate.WaitAsync(ct),
+            onSuccess: next => next, onFailure: (error, next) => next).Reply(new Accepted());
+        """,
         "entity.Ask<CountIs>(new Increment(1));",
         "entity.Ask(new Adjust(1));",
         "ICanTell untyped = entity;",
@@ -76,35 +123,35 @@ public sealed class TypedContractSpecs
         """
         var request = ctx.For(new Increment(1));
         request.Run<Gate>((gate, ct) => gate.WaitAsync(ct),
-            onSuccess: () => request.Reply(new Accepted()));
+            onSuccess: next => next.Reply(new Accepted()));
         """,
         """
         var request = ctx.For(new Increment(1));
         request.Run<Gate>((gate, ct) => gate.WaitAsync(ct),
-            onFailure: error => request.Reply(new Accepted()));
+            onFailure: (error, next) => next.Reply(new Accepted()));
         """,
         """
         var request = ctx.For(new Increment(1));
         request.Run<Gate, int>((gate, ct) => Task.FromResult(1),
-            onSuccess: result => request.Reply(new Accepted()));
+            onSuccess: (result, next) => next.Reply(new Accepted()));
         """,
         """
         var request = ctx.For(new Increment(1));
         request.Run<Gate>((gate, ct) => gate.WaitAsync(ct),
-            onSuccess: () => request.Reply(new Accepted()),
-            onFailure: error => request.Reply(new Accepted())).Reply(new Accepted());
+            onSuccess: next => next.Reply(new Accepted()),
+            onFailure: (error, next) => next.Reply(new Accepted())).Reply(new Accepted());
         """,
         """
         var request = ctx.For(new Increment(1));
         request.Run<Gate>((gate, ct) => gate.WaitAsync(ct),
-            onSuccess: () => ctx.For(new GetCount()).Reply(new CountIs(0)),
-            onFailure: error => request.Reply(new Accepted()));
+            onSuccess: next => ctx.For(new GetCount()).Reply(new CountIs(0)),
+            onFailure: (error, next) => next.Reply(new Accepted()));
         """,
         """
         var request = ctx.For(new Increment(1));
         request.Run<Gate, int>((gate, ct) => Task.FromResult(1),
-            onSuccess: result => request.Reply(new Accepted()),
-            onFailure: error => ctx.For(new GetCount()).Reply(new CountIs(0)));
+            onSuccess: (result, next) => next.Reply(new Accepted()),
+            onFailure: (error, next) => ctx.For(new GetCount()).Reply(new CountIs(0)));
         """
     ];
 

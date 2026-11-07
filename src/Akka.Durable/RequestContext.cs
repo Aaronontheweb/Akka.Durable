@@ -1,10 +1,12 @@
+using Akka.Actor;
+
 namespace Akka.Durable;
 
 /// <summary>An immutable request builder bound to one command's reply contract.</summary>
 /// <remarks>
 /// Reply and Run finish the current branch. Run continuations retain the same reply type.
-/// Continuation overloads accepting a new request context expose state after preceding commits
-/// and the time the operation completed.
+/// Every continuation receives a fresh context with state after preceding commits and the completion
+/// time. ReplyAndRun sends the reply first, then permits only non-reply continuations.
 /// </remarks>
 public sealed class RequestContext<TState, TCommand, TEvent, TReply> where TReply : notnull
 {
@@ -25,7 +27,7 @@ public sealed class RequestContext<TState, TCommand, TEvent, TReply> where TRepl
     public RequestContext<TState, TCommand, TEvent, TReply> Persist(params TEvent[] events) =>
         new(_context, _plan with { Events = _plan.Events.AddRange(events) });
 
-    public RequestContext<TState, TCommand, TEvent, TReply> Tell<TMessage>(Akka.Actor.ICanTell recipient, TMessage message)
+    public RequestContext<TState, TCommand, TEvent, TReply> Tell<TMessage>(ICanTell recipient, TMessage message)
         where TMessage : notnull => new(_context, _plan.Tell(recipient, message));
 
     public RequestContext<TState, TCommand, TEvent, TReply> Tell<TOther>(IEntityRef<TOther> recipient, TOther message) =>
@@ -59,18 +61,6 @@ public sealed class RequestContext<TState, TCommand, TEvent, TReply> where TRepl
 
     public RequestDecision<TCommand, TEvent, TReply> Run<TService, TResult>(
         Func<TService, CancellationToken, Task<TResult>> action,
-        Func<TResult, RequestDecision<TCommand, TEvent, TReply>> onSuccess,
-        Func<Exception, RequestDecision<TCommand, TEvent, TReply>> onFailure,
-        TimeSpan? timeout = null) where TService : notnull
-    {
-        ArgumentNullException.ThrowIfNull(onSuccess);
-        ArgumentNullException.ThrowIfNull(onFailure);
-        return Run<TService, TResult>(action,
-            (result, _) => onSuccess(result), (error, _) => onFailure(error), timeout);
-    }
-
-    public RequestDecision<TCommand, TEvent, TReply> Run<TService, TResult>(
-        Func<TService, CancellationToken, Task<TResult>> action,
         Func<TResult, RequestContext<TState, TCommand, TEvent, TReply>, RequestDecision<TCommand, TEvent, TReply>> onSuccess,
         Func<Exception, RequestContext<TState, TCommand, TEvent, TReply>, RequestDecision<TCommand, TEvent, TReply>> onFailure,
         TimeSpan? timeout = null) where TService : notnull
@@ -80,21 +70,6 @@ public sealed class RequestContext<TState, TCommand, TEvent, TReply> where TRepl
         return new(_plan.Add(RunEffect<TCommand, TEvent>.Create(action,
             (state, now, result) => onSuccess((TResult)result!, Continue(state, now)).Plan,
             (state, now, error) => onFailure(error, Continue(state, now)).Plan, timeout)));
-    }
-
-    public RequestDecision<TCommand, TEvent, TReply> Run<TService>(
-        Func<TService, CancellationToken, Task> action,
-        Func<RequestDecision<TCommand, TEvent, TReply>> onSuccess,
-        Func<Exception, RequestDecision<TCommand, TEvent, TReply>> onFailure,
-        TimeSpan? timeout = null) where TService : notnull
-    {
-        ArgumentNullException.ThrowIfNull(action);
-        ArgumentNullException.ThrowIfNull(onSuccess);
-        return Run<TService, bool>(async (service, ct) =>
-        {
-            await action(service, ct);
-            return true;
-        }, _ => onSuccess(), onFailure, timeout);
     }
 
     public RequestDecision<TCommand, TEvent, TReply> Run<TService>(
@@ -110,6 +85,32 @@ public sealed class RequestContext<TState, TCommand, TEvent, TReply> where TRepl
             await action(service, ct);
             return true;
         }, (_, next) => onSuccess(next), onFailure, timeout);
+    }
+
+    /// <summary>Replies before the operation. Its continuations cannot send a second reply.</summary>
+    /// <remarks>The caller receives its reply immediately; the entity still queues later commands until the work finishes.</remarks>
+    public RequestDecision<TCommand, TEvent, TReply> ReplyAndRun<TService, TResult>(
+        TReply response,
+        Func<TService, CancellationToken, Task<TResult>> action,
+        Func<TResult, EffectContext<TState, TCommand, TEvent>, EffectDecision<TCommand, TEvent>> onSuccess,
+        Func<Exception, EffectContext<TState, TCommand, TEvent>, EffectDecision<TCommand, TEvent>> onFailure,
+        TimeSpan? timeout = null) where TService : notnull
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        var effects = new EffectContext<TState, TCommand, TEvent>(_context, _plan.Add(new ReplyEffect(response)));
+        return new(effects.Run(action, onSuccess, onFailure, timeout).Plan);
+    }
+
+    public RequestDecision<TCommand, TEvent, TReply> ReplyAndRun<TService>(
+        TReply response,
+        Func<TService, CancellationToken, Task> action,
+        Func<EffectContext<TState, TCommand, TEvent>, EffectDecision<TCommand, TEvent>> onSuccess,
+        Func<Exception, EffectContext<TState, TCommand, TEvent>, EffectDecision<TCommand, TEvent>> onFailure,
+        TimeSpan? timeout = null) where TService : notnull
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        var effects = new EffectContext<TState, TCommand, TEvent>(_context, _plan.Add(new ReplyEffect(response)));
+        return new(effects.Run(action, onSuccess, onFailure, timeout).Plan);
     }
 
     private RequestContext<TState, TCommand, TEvent, TReply> Continue(object state, DateTimeOffset now) =>

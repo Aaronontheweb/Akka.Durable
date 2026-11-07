@@ -36,8 +36,8 @@ let definition =
                 let request = ctx.For(c)
                 request.Run<Service, int>(
                     (fun (service: Service) ct -> service.ExecuteAsync(c.Amount, ct)),
-                    (fun result -> request.Persist(Added result).Reply(Accepted result)),
-                    (fun error -> request.Reply(Rejected error.Message)))
+                    (fun result next -> next.Persist(Added result).Reply(Accepted result)),
+                    (fun error next -> next.Reply(Rejected error.Message)))
                     .ToDecision()),
         (fun state (Added value) -> state + value))
 
@@ -66,4 +66,37 @@ let ``failure continuation replies without persisting success`` () =
         .WhenRunFailed(InvalidOperationException("failed"))
         .ThenNothingPersisted()
         .ThenReplied(command, Rejected "failed")
+    |> ignore
+
+[<Fact>]
+let ``early replies allow non reply continuations using native FSharp values`` () =
+    let earlyDefinition =
+        EntityDefinition<int, Command, Event>(
+            EntityTypeName("fsharp-early"),
+            (fun _ -> 0),
+            (fun _ command ctx ->
+                match command with
+                | Issue c ->
+                    ctx.For(c).Persist(Added 1).ReplyAndRun<Service, int>(
+                        Accepted 1,
+                        (fun (service: Service) ct -> service.ExecuteAsync(c.Amount, ct)),
+                        (fun result next -> next.Persist(Added result).ToEffectDecision()),
+                        (fun _ next -> next.ToEffectDecision()))
+                        .ToDecision()),
+            (fun state (Added value) -> state + value))
+    let command = { Amount = 3 }
+    let outcome =
+        DeciderScenario.For(earlyDefinition)
+            .When(Issue command)
+            .ThenPersisted(Added 1)
+            .ThenReplied(command, Accepted 1)
+    outcome.WhenRunSucceeded(7)
+        .ThenPersisted(Added 7)
+        .ThenEffects()
+        .ThenState(fun state -> Assert.Equal(8, state))
+    |> ignore
+    outcome.WhenRunFailed(InvalidOperationException("failed"))
+        .ThenNothingPersisted()
+        .ThenEffects()
+        .ThenState(fun state -> Assert.Equal(1, state))
     |> ignore

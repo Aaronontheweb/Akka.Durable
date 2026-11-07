@@ -85,6 +85,18 @@ public sealed record Handled<TCommand, TEvent>(
     ImmutableArray<TEvent> Events,
     ImmutableArray<EntityEffect<TCommand, TEvent>> Effects)
 {
+    // Clones of a builder represent the same execution stage. They must not be committed twice.
+    internal object Stage { get; } = new();
+
+    // Stage is execution metadata, not part of the decision's value semantics.
+    public bool Equals(Handled<TCommand, TEvent>? other) =>
+        ReferenceEquals(this, other) || other is not null && Events.Equals(other.Events) && Effects.Equals(other.Effects);
+
+    public override int GetHashCode() => HashCode.Combine(Events, Effects);
+
+    internal const string ReusedStageMessage =
+        "A Run continuation reused an earlier decision stage. Build it from the supplied next context.";
+
     internal Handled<TCommand, TEvent> Add(EntityEffect<TCommand, TEvent> effect)
     {
         // Stop ends the incarnation; Run transfers control to exactly one continuation.
@@ -132,35 +144,6 @@ public sealed record Handled<TCommand, TEvent>(
     // delete the entity's journal, snapshots, or logical identity.
     public Handled<TCommand, TEvent> Stop() =>
         Add(new StopEffect());
-
-    /// <summary>Branches on an operation's outcome. Both continuations are required.</summary>
-    public Handled<TCommand, TEvent> Run<TService, TResult>(
-        Func<TService, CancellationToken, Task<TResult>> action,
-        Func<TResult, Handled<TCommand, TEvent>> onSuccess,
-        Func<Exception, Handled<TCommand, TEvent>> onFailure,
-        TimeSpan? timeout = null) where TService : notnull
-    {
-        ArgumentNullException.ThrowIfNull(onSuccess);
-        ArgumentNullException.ThrowIfNull(onFailure);
-        return Add(RunEffect<TCommand, TEvent>.Create(action,
-            (_, _, result) => onSuccess((TResult)result!),
-            (_, _, error) => onFailure(error), timeout));
-    }
-
-    public Handled<TCommand, TEvent> Run<TService>(
-        Func<TService, CancellationToken, Task> action,
-        Func<Handled<TCommand, TEvent>> onSuccess,
-        Func<Exception, Handled<TCommand, TEvent>> onFailure,
-        TimeSpan? timeout = null) where TService : notnull
-    {
-        ArgumentNullException.ThrowIfNull(action);
-        ArgumentNullException.ThrowIfNull(onSuccess);
-        return Run<TService, bool>(async (service, ct) =>
-        {
-            await action(service, ct);
-            return true;
-        }, _ => onSuccess(), onFailure, timeout);
-    }
 }
 
 public readonly union Decision<TCommand, TEvent>(Handled<TCommand, TEvent>, Ignored, NotHandled, Stashed);

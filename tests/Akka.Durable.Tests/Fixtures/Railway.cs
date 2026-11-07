@@ -90,13 +90,13 @@ public static class Railway
 
             TaskOnly c => ctx.For(c).Run<ScopedCalculator>(
                 (service, ct) => service.WaitAsync(ct),
-                onSuccess: () => ctx.For(c).Reply(new Adjusted(state.Count)),
-                onFailure: error => ctx.For(c).Reply(new AdjustmentRejected(error.GetType().Name))),
+                onSuccess: next => next.Reply(new Adjusted(next.State.Count)),
+                onFailure: (error, next) => next.Reply(new AdjustmentRejected(error.GetType().Name))),
 
             ThrowInContinuation c => ctx.For(c).Run<ScopedCalculator, int>(
                 (service, ct) => service.CalculateAsync(1, ct),
-                onSuccess: _ => throw new InvalidOperationException("continuation failed"),
-                onFailure: error => ctx.For(c).Reply(new AdjustmentRejected("incorrect failure branch"))),
+                onSuccess: (_, _) => throw new InvalidOperationException("continuation failed"),
+                onFailure: (error, next) => next.Reply(new AdjustmentRejected("incorrect failure branch"))),
         };
 
     private static RequestDecision<RailwayCommand, RailwayEvent, AdjustmentReply> Calculate(RailwayRequest request, int by) =>

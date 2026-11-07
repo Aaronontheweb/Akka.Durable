@@ -13,10 +13,17 @@ if (reply is not Handled<Command, Event> { Events.Length: 1, Effects.Length: 1 }
 
 Decision<Command, Event> graph = request.Run<Calculator, int>(
     (service, ct) => service.CalculateAsync(command.Value, ct),
-    onSuccess: result => request.Persist(new Added(result)).Reply(new Answer(result)),
-    onFailure: error => request.Reply(new Rejected(error.Message)));
+    onSuccess: (result, next) => next.Persist(new Added(result)).Reply(new Answer(result)),
+    onFailure: (error, next) => next.Reply(new Rejected(error.Message)));
 if (graph is not Handled<Command, Event> { Effects: [RunEffect<Command, Event>] })
     throw new InvalidOperationException("Typed graph construction failed.");
+
+Decision<Command, Event> early = request.ReplyAndRun<Calculator, int>(new Answer(0),
+    (service, ct) => service.CalculateAsync(command.Value, ct),
+    onSuccess: (result, next) => next.Persist(new Added(result)),
+    onFailure: (error, next) => next);
+if (early is not Handled<Command, Event> { Effects: [ReplyEffect, RunEffect<Command, Event>] })
+    throw new InvalidOperationException("Early reply graph construction failed.");
 
 Console.WriteLine("Native AOT smoke passed: command conversion, typed replies, and request graph construction.");
 

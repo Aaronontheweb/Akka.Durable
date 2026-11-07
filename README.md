@@ -50,8 +50,9 @@ public static class Invoice
 
             (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>(
                 (mailer, ct) => mailer.RemindAsync(ct),
-                onSuccess: () => ctx.None(),
-                onFailure: error => throw error),
+                onSuccess: next => next,
+                // Escalate so a failed reminder remains eligible for redelivery.
+                onFailure: (error, _) => throw new InvalidOperationException("Reminder delivery failed", error)),
             (_, SendReminder) => ctx.Ignore(),
 
             (_, IssueInvoice c) => ctx.For(c).Reply(new InvoiceRejected("Invalid invoice operation")),
@@ -188,7 +189,7 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 - **`Run` branches on the operation's outcome.** Both `onSuccess` and `onFailure` are required. Only the selected continuation executes; its events commit before its effects and reply. Each operation gets a fresh DI scope. Completed invocations dispose their scope before continuing; timed-out invocations that ignore cancellation keep their scope until they actually finish. The entity holds later commands and state reads until the entire graph finishes.
 - **`Run` is best effort.** Neither the operation nor its continuations are journaled or replayed during recovery. Service work and scope cleanup can finish independently of actor shutdown. An invocation timeout selects `onFailure`; actor shutdown does not. Continuation errors and journal failures go to supervision rather than selecting the service's failure branch.
 - **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
-- **Typed replies.** `ctx.For(command)` binds the reply contract once. `Reply` and `Run` finish a request branch: no unconditional reply can follow either. Use `ReplyAndStop` to reply and then passivate; `.UnstashAll().Reply(...)` releases stashed commands after this decision completes.
+- **Typed replies.** `ctx.For(command)` binds the reply contract once. `Reply` and `Run` finish a request branch: no unconditional reply can follow either. Use `ReplyAndRun` to reply before best effort work, or `ReplyAndStop` to reply and then passivate; `.UnstashAll().Reply(...)` releases stashed commands after this decision completes.
 - **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `ctx.None().Stop()` passivates without replying or deleting the entity.
 
 ## Asynchronous request decisions
@@ -215,23 +216,33 @@ public static RequestDecision<InvoiceCommand, InvoiceEvent, IssueReply> IssueExt
 
 Here `IssueResult` is the service's result union, with `Created` and `Declined` cases. A returned business rejection goes through `onSuccess`, which means the invocation returned normally. Exceptions and timeouts go through `onFailure`. A timeout does not establish whether an external action occurred; domains that need that distinction should include an indeterminate result in their reply contract.
 
-Both branches can call a named pure decider or return another `Run`. `next.State` includes events committed before the operation; `next.UtcNow` is the time the operation completed. Each fresh continuation starts with no events or effects, so preceding events are not repeated. One-argument continuations are also available when the result alone is sufficient:
+Both branches can call a named pure decider or return another `Run`. Every callback receives `next`: its state includes events committed before the operation, and its time is the operation's completion time. It starts with no events or effects. Build the continuation from `next`; returning a captured, previously committed builder is rejected before its events or effects can run again.
 
-```csharp
-return request.Run<IInvoiceService, IssueResult>(
-    (service, ct) => service.IssueAsync(command.Total, command.Recipient, ct),
-    onSuccess: result => DecideServiceResult(result, request),
-    onFailure: error => request.Reply(new InvoiceRejected(error.Message)));
-```
-
-For an operation returning `Task`, use `Run<TService>` with a parameterless success continuation (or a success continuation receiving the fresh request context). Both handlers remain required:
+For an operation returning `Task`, use `Run<TService>`. Both handlers remain required:
 
 ```csharp
 return request.Run<IInvoiceMailer>(
     (mailer, ct) => mailer.SendAsync(command.Recipient, ct),
-    onSuccess: () => request.Reply(new InvoiceAccepted(request.EntityId)),
-    onFailure: error => request.Reply(new InvoiceRejected(error.Message)));
+    onSuccess: next => next.Reply(new InvoiceAccepted(next.EntityId)),
+    onFailure: (error, next) => next.Reply(new InvoiceRejected(error.Message)));
 ```
+
+To acknowledge a request before doing best effort work, use `ReplyAndRun`:
+
+```csharp
+return request
+    .Persist(new InvoiceIssued(command.Total, command.Recipient, request.UtcNow))
+    .ReplyAndRun<IInvoiceMailer>(new InvoiceAccepted(request.EntityId),
+        (mailer, ct) => mailer.SendAsync(command.Recipient, ct),
+        onSuccess: next => next,
+        onFailure: (error, next) => next);
+```
+
+The reply follows the event commit and precedes the invocation. These continuations receive an `EffectContext` that can persist events, send messages, schedule reminders, or run further operations, but cannot reply again. The runtime logs invocation failures even when the failure branch does nothing. Later commands still wait until the work finishes.
+
+`ctx.None()` and `ctx.Persist(...)` also produce an `EffectContext` for commands without replies. Its `Run` and `Stop` return a finished `EffectDecision`, so effects cannot be appended after either. `ctx.For(command)` produces a `RequestContext` whose continuations retain that command's reply type.
+
+Returning an empty failure branch accepts the failure and completes the command. For reminder commands that also acknowledges the reminder; the `SendReminder` example above deliberately escalates instead, preserving redelivery on failure. Choose that policy explicitly for each operation.
 
 Events explicitly persisted before `Run` remain committed if the operation fails. This API does not provide a transaction with an external service or automatic retries after a crash.
 

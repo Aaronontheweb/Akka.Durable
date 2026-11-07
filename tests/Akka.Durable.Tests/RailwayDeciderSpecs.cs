@@ -89,8 +89,8 @@ public sealed class RailwayDeciderSpecs
             {
                 Adjust c => ctx.For(c).Run<ScopedCalculator, string?>(
                     (_, _) => Task.FromResult<string?>(null),
-                    onSuccess: result => ctx.For(c).Reply(new AdjustmentRejected(result ?? "null result")),
-                    onFailure: error => ctx.For(c).Reply(new AdjustmentRejected("incorrect failure branch"))),
+                    onSuccess: (result, next) => next.Reply(new AdjustmentRejected(result ?? "null result")),
+                    onFailure: (error, next) => next.Reply(new AdjustmentRejected("incorrect failure branch"))),
                 _ => ctx.Ignore(),
             }
         };
@@ -101,4 +101,43 @@ public sealed class RailwayDeciderSpecs
             .WhenRunSucceeded<string?>(null)
             .ThenReplied(command, new AdjustmentRejected("null result"));
     }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Pure_harness_rejects_captured_ancestors_even_after_a_fresh_intermediate_stage(bool fails)
+    {
+        var definition = Railway.Definition with
+        {
+            Decide = (_, command, ctx) =>
+            {
+                var captured = ctx.For((Adjust)command.Value).Persist(new Added(10));
+                return captured.Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(1, ct),
+                    onSuccess: (_, next) => next.Run<ScopedCalculator, int>(
+                        (service, ct) => service.CalculateAsync(2, ct),
+                        onSuccess: (_, _) => captured.Reply(new Adjusted(999)),
+                        onFailure: (_, _) => captured.Reply(new AdjustmentRejected("incorrect reply"))),
+                    onFailure: (error, next) => next.Reply(new AdjustmentRejected(error.Message)));
+            }
+        };
+        var outcome = DeciderScenario.For(definition).When(new Adjust(1)).WhenRunSucceeded(1);
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+        {
+            if (fails)
+                outcome.WhenRunFailed(new InvalidOperationException("service failed"));
+            else
+                outcome.WhenRunSucceeded(2);
+        });
+        Assert.Contains("reused an earlier decision stage", error.Message);
+    }
+
+    [Fact]
+    public void Stage_tracking_does_not_change_decision_value_equality()
+    {
+        var first = Decisions.None<RailwayCommand, RailwayEvent>();
+        var second = Decisions.None<RailwayCommand, RailwayEvent>();
+        Assert.Equal(first, second);
+        Assert.Equal(first.GetHashCode(), second.GetHashCode());
+    }
+
 }

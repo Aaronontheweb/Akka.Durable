@@ -26,13 +26,14 @@ public readonly record struct DecisionContext<TState, TCommand, TEvent>(
         where TReply : notnull
     {
         ArgumentNullException.ThrowIfNull(command);
-        return new(this, None());
+        return new(this, Decisions.None<TCommand, TEvent>());
     }
 
-    public Handled<TCommand, TEvent> Persist(params TEvent[] events) =>
-        Decisions.Persist<TCommand, TEvent>(events);
+    public EffectContext<TState, TCommand, TEvent> Persist(params TEvent[] events) =>
+        new(this, Decisions.Persist<TCommand, TEvent>(events));
 
-    public Handled<TCommand, TEvent> None() => Decisions.None<TCommand, TEvent>();
+    public EffectContext<TState, TCommand, TEvent> None() =>
+        new(this, Decisions.None<TCommand, TEvent>());
 
     public Ignored Ignore() => Decisions.Ignore();
     public NotHandled Unhandled() => Decisions.Unhandled();
