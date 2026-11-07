@@ -19,7 +19,7 @@ public class CounterDeciderSpecs
             .Given(new Incremented(2))
             .When(new Increment(3))
             .ThenPersisted(new Incremented(3))
-            .ThenReplied(new Accepted())
+            .ThenReplied(new Increment(3), new Accepted())
             .ThenState(s => Assert.Equal(5, s.Count));
     }
 
@@ -39,7 +39,7 @@ public class CounterDeciderSpecs
             .Given(new CounterLocked())
             .When(new UnlockCounter())
             .ThenPersisted(new CounterUnlocked())
-            .ThenEffects(typeof(ReplyEffect), typeof(UnstashAllEffect));
+            .ThenEffects(typeof(UnstashAllEffect), typeof(ReplyEffect));
     }
 
     [Fact]
@@ -55,7 +55,9 @@ public class CounterDeciderSpecs
         Scenario()
             .When(new IncrementAndRecord(1))
             .ThenPersisted(new Incremented(1))
-            .ThenEffects(typeof(RunEffect), typeof(ReplyEffect));
+            .ThenEffects(typeof(RunEffect<CounterCommand, CounterEvent>))
+            .WhenRunSucceeded()
+            .ThenEffects(typeof(ReplyEffect));
     }
 
     [Fact]
@@ -65,7 +67,7 @@ public class CounterDeciderSpecs
             .Given(new Incremented(4), new Incremented(3))
             .When(new GetCount())
             .ThenNothingPersisted()
-            .ThenReplied(new CountIs(7));
+            .ThenReplied(new GetCount(), new CountIs(7));
     }
 
     [Fact]
@@ -84,9 +86,9 @@ public class CounterDeciderSpecs
     [Fact]
     public void No_effects_may_follow_Stop()
     {
-        var ctx = new DecisionContext<CounterCommand, CounterEvent>(
-            new EntityId("x"), Counter.TypeName, DateTimeOffset.UnixEpoch);
+        var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
+            new EntityId("x"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
 
-        Assert.Throws<InvalidOperationException>(() => ctx.None().Stop().Reply(new Accepted()));
+        Assert.Throws<InvalidOperationException>(() => ctx.None().Stop().Schedule("tick", TimeSpan.FromSeconds(1), new Increment(1)));
     }
 }

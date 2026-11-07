@@ -8,5 +8,7 @@
   </Folder>
   <Project Path="src/Akka.Durable/Akka.Durable.csproj" />
   <Project Path="src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
+  <Project Path="tests/Akka.Durable.AotSmoke/Akka.Durable.AotSmoke.csproj" />
+  <Project Path="tests/Akka.Durable.FSharp.Tests/Akka.Durable.FSharp.Tests.fsproj" />
   <Project Path="tests/Akka.Durable.Tests/Akka.Durable.Tests.csproj" />
 </Solution>

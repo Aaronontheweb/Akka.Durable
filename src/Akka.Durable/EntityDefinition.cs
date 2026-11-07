@@ -1,5 +1,3 @@
-﻿
-
 namespace Akka.Durable;
 
 /// <summary>
@@ -14,14 +12,23 @@ public readonly record struct EntityTypeName(string Value);
 /// This is an immutable value: the factory methods only construct decision values and
 /// perform no IO, so Decide remains a pure function of (state, command, context).
 /// The factories exist to bind <typeparamref name="TCommand"/> and <typeparamref name="TEvent"/>
-/// without explicit type arguments, so that effects which feed messages back into the
-/// entity (reminders, Run completions) are constrained to <typeparamref name="TCommand"/>.
+/// without explicit type arguments. Scheduled messages are constrained to <typeparamref name="TCommand"/>;
+/// request continuations retain their reply contract and receive an updated <typeparamref name="TState"/>.
 /// </remarks>
-public readonly record struct DecisionContext<TCommand, TEvent>(
+public readonly record struct DecisionContext<TState, TCommand, TEvent>(
     EntityId EntityId,
     EntityTypeName EntityType,
-    DateTimeOffset UtcNow)
+    DateTimeOffset UtcNow,
+    TState State)
 {
+    /// <summary>Binds all branches of a request to the command's declared reply type.</summary>
+    public RequestContext<TState, TCommand, TEvent, TReply> For<TReply>(IReplies<TCommand, TReply> command)
+        where TReply : notnull
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return new(this, None());
+    }
+
     public Handled<TCommand, TEvent> Persist(params TEvent[] events) =>
         Decisions.Persist<TCommand, TEvent>(events);
 
@@ -35,7 +42,7 @@ public readonly record struct DecisionContext<TCommand, TEvent>(
 public sealed record EntityDefinition<TState, TCommand, TEvent>(
     EntityTypeName TypeName,
     Func<EntityId, TState> InitialState,
-    Func<TState, TCommand, DecisionContext<TCommand, TEvent>, Decision<TCommand, TEvent>> Decide,
+    Func<TState, TCommand, DecisionContext<TState, TCommand, TEvent>, Decision<TCommand, TEvent>> Decide,
     Func<TState, TEvent, TState> Evolve,
     EntityOptions? Options = null);
 

@@ -4,7 +4,7 @@ using Akka.Serialization.V2;
 
 namespace Akka.Durable.Tests.Fixtures;
 
-using CounterContext = DecisionContext<CounterCommand, CounterEvent>;
+using CounterContext = DecisionContext<CounterState, CounterCommand, CounterEvent>;
 
 // A deliberately small entity whose commands each exercise one runtime behavior. Every type that can
 // cross a serialization boundary (journal, snapshots, reminders, remoting, replies) is serializable,
@@ -19,10 +19,16 @@ public sealed record CounterState(
 
 // Commands
 [AkkaSerializable(Manifest = "counter-increment-v1")]
-public sealed record Increment([property: AkkaField(0)] int By) : ICounterProtocol;
+public sealed record Increment([property: AkkaField(0)] int By) : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-get-count-v1", AllowEmpty = true)]
-public sealed record GetCount : ICounterProtocol;
+public sealed record GetCount : ICounterProtocol, IReplies<CounterCommand, CountIs>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-noop-v1", AllowEmpty = true)]
 public sealed record Noop : ICounterProtocol;
@@ -31,34 +37,61 @@ public sealed record Noop : ICounterProtocol;
 public sealed record Unsupported : ICounterProtocol;
 
 [AkkaSerializable(Manifest = "counter-lock-v1", AllowEmpty = true)]
-public sealed record LockCounter : ICounterProtocol;
+public sealed record LockCounter : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-unlock-v1", AllowEmpty = true)]
-public sealed record UnlockCounter : ICounterProtocol;
+public sealed record UnlockCounter : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-increment-and-record-v1")]
-public sealed record IncrementAndRecord([property: AkkaField(0)] int By) : ICounterProtocol;
+public sealed record IncrementAndRecord([property: AkkaField(0)] int By) : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-increment-then-fail-v1")]
-public sealed record IncrementThenFail([property: AkkaField(0)] int By) : ICounterProtocol;
+public sealed record IncrementThenFail([property: AkkaField(0)] int By) : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-fail-with-fallback-v1", AllowEmpty = true)]
-public sealed record FailWithFallback : ICounterProtocol;
+public sealed record FailWithFallback : ICounterProtocol, IReplies<CounterCommand, FailureRecorded>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-record-failure-v1")]
-public sealed record RecordFailure([property: AkkaField(0)] string Reason) : ICounterProtocol;
+public sealed record RecordFailure([property: AkkaField(0)] string Reason) : ICounterProtocol, IReplies<CounterCommand, FailureRecorded>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-wait-for-gate-v1", AllowEmpty = true)]
-public sealed record WaitForGate : ICounterProtocol;
+public sealed record WaitForGate : ICounterProtocol, IReplies<CounterCommand, GateOpened>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-wait-for-gate-timeout-v1")]
-public sealed record WaitForGateWithTimeout([property: AkkaField(0)] TimeSpan Timeout) : ICounterProtocol;
+public sealed record WaitForGateWithTimeout([property: AkkaField(0)] TimeSpan Timeout) : ICounterProtocol, IReplies<CounterCommand, FailureRecorded>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-remind-later-v1")]
 public sealed record RemindLater([property: AkkaField(0)] TimeSpan Delay) : ICounterProtocol;
 
 [AkkaSerializable(Manifest = "counter-shutdown-v1", AllowEmpty = true)]
-public sealed record Shutdown : ICounterProtocol;
+public sealed record Shutdown : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
 
 [AkkaSerializable(Manifest = "counter-command-v1")]
 public readonly union CounterCommand(
@@ -110,44 +143,48 @@ public static class Counter
         command switch
         {
             Increment when state.Locked => ctx.Stash(),
-            Increment c => ctx.Persist(new Incremented(c.By)).Reply(new Accepted()),
+            Increment c => ctx.For(c).Persist(new Incremented(c.By)).Reply(new Accepted()),
 
-            GetCount => ctx.None().Reply(new CountIs(state.Count)),
+            GetCount c => ctx.For(c).Reply(new CountIs(state.Count)),
             Noop => ctx.Ignore(),
             Unsupported => ctx.Unhandled(),
 
-            LockCounter => ctx.Persist(new CounterLocked()).Reply(new Accepted()),
-            UnlockCounter => ctx.Persist(new CounterUnlocked()).Reply(new Accepted()).UnstashAll(),
+            LockCounter c => ctx.For(c).Persist(new CounterLocked()).Reply(new Accepted()),
+            UnlockCounter c => ctx.For(c).Persist(new CounterUnlocked()).UnstashAll().Reply(new Accepted()),
 
-            // Run before Reply: the reply is only sent once the effect (and its scope) completes.
-            IncrementAndRecord c => ctx.Persist(new Incremented(c.By))
-                .Run<ScopedRecorder>((recorder, ct) => recorder.RecordAsync($"run:{c.By}", ct))
-                .Reply(new Accepted()),
+            IncrementAndRecord c => ctx.For(c).Persist(new Incremented(c.By))
+                .Run<ScopedRecorder>(
+                    (recorder, ct) => recorder.RecordAsync($"run:{c.By}", ct),
+                    onSuccess: () => ctx.For(c).Reply(new Accepted()),
+                    onFailure: error => throw error),
 
-            IncrementThenFail c => ctx.Persist(new Incremented(c.By))
-                .Run<ScopedRecorder>((_, _) => throw new InvalidOperationException("boom"))
-                .Reply(new Accepted()),
-
-            FailWithFallback => ctx.None()
+            IncrementThenFail c => ctx.For(c).Persist(new Incremented(c.By))
                 .Run<ScopedRecorder>(
                     (_, _) => throw new InvalidOperationException("boom"),
-                    onFailure: ex => new RecordFailure(ex.Message)),
+                    onSuccess: () => ctx.For(c).Reply(new Accepted()),
+                    onFailure: error => throw error),
 
-            RecordFailure f => ctx.None().Reply(new FailureRecorded(f.Reason)),
+            FailWithFallback c => ctx.For(c).Run<ScopedRecorder>(
+                (_, _) => throw new InvalidOperationException("boom"),
+                onSuccess: () => ctx.For(c).Reply(new FailureRecorded("unexpected success")),
+                onFailure: error => ctx.For(c).Reply(new FailureRecorded(error.Message))),
 
-            WaitForGate => ctx.None()
-                .Run<Gate>((gate, ct) => gate.WaitAsync(ct))
-                .Reply(new GateOpened()),
+            RecordFailure f => ctx.For(f).Reply(new FailureRecorded(f.Reason)),
 
-            WaitForGateWithTimeout w => ctx.None()
-                .Run<Gate>(
-                    (gate, ct) => gate.WaitAsync(ct),
-                    onFailure: ex => new RecordFailure(ex.GetType().Name),
-                    timeout: w.Timeout),
+            WaitForGate c => ctx.For(c).Run<Gate>(
+                (gate, ct) => gate.WaitAsync(ct),
+                onSuccess: () => ctx.For(c).Reply(new GateOpened()),
+                onFailure: error => throw error),
+
+            WaitForGateWithTimeout c => ctx.For(c).Run<Gate>(
+                (gate, ct) => gate.WaitAsync(ct),
+                onSuccess: () => ctx.For(c).Reply(new FailureRecorded("opened")),
+                onFailure: error => ctx.For(c).Reply(new FailureRecorded(error.GetType().Name)),
+                timeout: c.Timeout),
 
             RemindLater r => ctx.None().Schedule("tick", r.Delay, new Increment(1)),
 
-            Shutdown => ctx.None().Reply(new Accepted()).Stop(),
+            Shutdown c => ctx.For(c).ReplyAndStop(new Accepted()),
         };
 
     public static CounterState Evolve(CounterState state, CounterEvent @event) =>

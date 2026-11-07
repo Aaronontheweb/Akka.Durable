@@ -10,7 +10,7 @@ namespace Akka.Durable;
 internal interface IDurableEntityProtocol;
 
 /// <summary>
-/// Framework query sent by <see cref="Abstractions.Entities.IDurableEntityRef{TCommand,TState,TEvent}.GetStateAsync"/>.
+/// Framework query sent by <see cref="IDurableEntityRef{TCommand,TState,TEvent}.GetStateAsync"/>.
 /// The entity actor answers it with an <see cref="EntityStateReply"/> without running Decide.
 /// </summary>
 [AkkaSerializable(Manifest = "durable-get-state-v1", AllowEmpty = true)]

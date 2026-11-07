@@ -36,7 +36,7 @@ public class LocalIdlePassivationSpecs(ITestOutputHelper output) : DurableEntity
     private IEntityRef<CounterCommand> CounterRef(string id) => EntityRef<CounterCommand>(id);
 
     private async Task<int> CountOf(IEntityRef<CounterCommand> counter) =>
-        (await counter.Ask<CountIs>(new GetCount(), AskCancellation())).Count;
+        (await counter.Ask(new GetCount(), AskCancellation())).Count;
 
     private Task<IActorRef> EntityActorOf(string id) =>
         Sys.ActorSelection($"/user/durable-counter/{Uri.EscapeDataString(id)}")
@@ -45,7 +45,7 @@ public class LocalIdlePassivationSpecs(ITestOutputHelper output) : DurableEntity
     [Fact]
     public async Task Idle_entity_is_passivated_after_the_timeout()
     {
-        await CounterRef("a").Ask<Accepted>(new Increment(1), AskCancellation());
+        await CounterRef("a").Ask(new Increment(1), AskCancellation());
         var entity = await EntityActorOf("a");
         Watch(entity);
 
@@ -56,7 +56,7 @@ public class LocalIdlePassivationSpecs(ITestOutputHelper output) : DurableEntity
     public async Task Next_message_reactivates_a_passivated_entity_and_recovers_its_state()
     {
         var counter = CounterRef("a");
-        await counter.Ask<Accepted>(new Increment(3), AskCancellation());
+        await counter.Ask(new Increment(3), AskCancellation());
         var entity = await EntityActorOf("a");
         Watch(entity);
         await ExpectTerminatedAsync(entity, PassivationBound, cancellationToken: TestCancellation);
@@ -69,7 +69,7 @@ public class LocalIdlePassivationSpecs(ITestOutputHelper output) : DurableEntity
     public async Task Entity_that_keeps_receiving_messages_is_not_passivated()
     {
         var counter = CounterRef("a");
-        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+        await counter.Ask(new Increment(1), AskCancellation());
         var entity = await EntityActorOf("a");
         Watch(entity);
 
@@ -89,7 +89,7 @@ public class LocalIdlePassivationSpecs(ITestOutputHelper output) : DurableEntity
     public async Task Messages_sent_while_an_idle_entity_passivates_are_delivered_to_its_next_incarnation()
     {
         var counter = CounterRef("a");
-        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+        await counter.Ask(new Increment(1), AskCancellation());
         var entity = await EntityActorOf("a");
         Watch(entity);
 
@@ -136,12 +136,12 @@ public class LocalIdlePassivationDisabledSpecs(ITestOutputHelper output) : Durab
     [Fact]
     public async Task Idle_entity_stays_alive()
     {
-        await EntityRef<CounterCommand>("a").Ask<Accepted>(new Increment(1), AskCancellation());
+        await EntityRef<CounterCommand>("a").Ask(new Increment(1), AskCancellation());
         var entity = await Sys.ActorSelection("/user/durable-counter/a")
             .ResolveOne(TimeSpan.FromSeconds(5), TestCancellation);
         Watch(entity);
 
         await ExpectNoMsgAsync(TimeSpan.FromSeconds(2), TestCancellation);
-        Assert.Equal(1, (await EntityRef<CounterCommand>("a").Ask<CountIs>(new GetCount(), AskCancellation())).Count);
+        Assert.Equal(1, (await EntityRef<CounterCommand>("a").Ask(new GetCount(), AskCancellation())).Count);
     }
 }

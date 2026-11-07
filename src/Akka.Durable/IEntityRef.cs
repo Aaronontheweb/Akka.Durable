@@ -8,21 +8,22 @@ namespace Akka.Durable;
 /// </summary>
 /// <typeparam name="TCommand">The commands supported by this actor.</typeparam>
 /// <remarks>
-/// <para>Implements <see cref="ICanTell"/> for interop and compatibility purposes with classic actors.</para>
+/// <para>Deliberately does not implement <see cref="ICanTell"/>: its untyped Ask extensions would bypass
+/// the command's reply contract.</para>
 /// <para>A ref is bound to this node's shard region or local host and is not serializable. To refer to an
 /// entity inside a message, journal event or reminder, carry its <see cref="EntityId"/> (which is
 /// serializable) and resolve it on the receiving side with <see cref="IEntityRefs{TCommand}.Get"/>.
 /// Serializable typed ref fields are tracked upstream in akkadotnet/akka.net#8911.</para>
 /// </remarks>
-public interface IEntityRef<in TCommand> : ICanTell
+public interface IEntityRef<in TCommand>
 {
     public EntityId Id { get; }
 
     void Tell(TCommand command, IActorRef? sender = null);
 
     Task<TReply> Ask<TReply>(
-        TCommand command,
-        CancellationToken cancellationToken = default);
+        IReplies<TCommand, TReply> command,
+        CancellationToken cancellationToken = default) where TReply : notnull;
 }
 
 /// <summary>
@@ -38,7 +39,7 @@ public interface IEntityRef<in TCommand> : ICanTell
 /// </para>
 /// </remarks>
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
-public interface IEntityRefs<TCommand>
+public interface IEntityRefs<in TCommand>
 {
     IEntityRef<TCommand> Get(EntityId id);
 }
@@ -58,7 +59,7 @@ public interface IEntityRefs<TCommand>
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
 /// <typeparam name="TState">The state type of the entity type.</typeparam>
 /// <typeparam name="TEvent">The event type of the entity type.</typeparam>
-public interface IDurableEntityRef<TCommand, TState, TEvent> : IEntityRef<TCommand>
+public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCommand>
 {
     /// <summary>
     /// Reads the entity's state and the sequence number of the last event applied to it,
@@ -82,7 +83,7 @@ public interface IDurableEntityRef<TCommand, TState, TEvent> : IEntityRef<TComma
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
 /// <typeparam name="TState">The state type of the entity type.</typeparam>
 /// <typeparam name="TEvent">The event type of the entity type.</typeparam>
-public interface IDurableEntityRefs<TCommand, TState, TEvent>
+public interface IDurableEntityRefs<in TCommand, TState, TEvent>
 {
     IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id);
 }

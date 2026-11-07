@@ -48,16 +48,17 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
     public DeciderOutcome<TState, TCommand, TEvent> When(TCommand command)
     {
         var state = _history.Aggregate(definition.InitialState(_entityId), definition.Evolve);
-        var context = new DecisionContext<TCommand, TEvent>(_entityId, definition.TypeName, _now);
+        var context = new DecisionContext<TState, TCommand, TEvent>(_entityId, definition.TypeName, _now, state);
         return new DeciderOutcome<TState, TCommand, TEvent>(
-            definition, state, definition.Decide(state, command, context));
+            definition, state, definition.Decide(state, command, context), _now);
     }
 }
 
 public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     EntityDefinition<TState, TCommand, TEvent> definition,
     TState stateBefore,
-    Decision<TCommand, TEvent> decision)
+    Decision<TCommand, TEvent> decision,
+    DateTimeOffset? utcNow = null)
 {
     public Decision<TCommand, TEvent> Decision => decision;
 
@@ -65,7 +66,7 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
         ? handled
         : throw new Xunit.Sdk.XunitException($"Expected a Handled decision but got {decision.Value}");
 
-    public ImmutableArray<EntityEffect> Effects => Handled.Effects;
+    public ImmutableArray<EntityEffect<TCommand, TEvent>> Effects => Handled.Effects;
 
     public DeciderOutcome<TState, TCommand, TEvent> ThenPersisted(params TEvent[] expected)
     {
@@ -82,8 +83,10 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
         return this;
     }
 
-    public DeciderOutcome<TState, TCommand, TEvent> ThenReplied(object expected)
+    public DeciderOutcome<TState, TCommand, TEvent> ThenReplied<TReply>(IReplies<TCommand, TReply> command, TReply expected)
+        where TReply : notnull
     {
+        ArgumentNullException.ThrowIfNull(command);
         Assert.Contains(Effects, e => e.Value is ReplyEffect r && Equals(r.Response, expected));
         return this;
     }
@@ -96,6 +99,26 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     {
         Assert.Equal(expectedEffectTypes, Effects.Select(e => e.Value!.GetType()));
         return this;
+    }
+
+    public DeciderOutcome<TState, TCommand, TEvent> WhenRunSucceeded() => WhenRunSucceeded(true);
+
+    /// <summary>Supplies an operation result without invoking any service.</summary>
+    public DeciderOutcome<TState, TCommand, TEvent> WhenRunSucceeded<TResult>(TResult result, DateTimeOffset? now = null)
+    {
+        var run = Assert.IsType<RunEffect<TCommand, TEvent>>(Effects.Last().Value);
+        var state = Handled.Events.Aggregate(stateBefore, definition.Evolve);
+        var at = now ?? utcNow ?? DateTimeOffset.UnixEpoch;
+        return new(definition, state, run.OnSuccess(state!, at, result), at);
+    }
+
+    /// <summary>Supplies an operation failure without invoking any service.</summary>
+    public DeciderOutcome<TState, TCommand, TEvent> WhenRunFailed(Exception error, DateTimeOffset? now = null)
+    {
+        var run = Assert.IsType<RunEffect<TCommand, TEvent>>(Effects.Last().Value);
+        var state = Handled.Events.Aggregate(stateBefore, definition.Evolve);
+        var at = now ?? utcNow ?? DateTimeOffset.UnixEpoch;
+        return new(definition, state, run.OnFailure(state!, at, error), at);
     }
 
     public void ThenIgnored() => Assert.True(decision is Ignored, $"Expected Ignored but got {decision.Value}");

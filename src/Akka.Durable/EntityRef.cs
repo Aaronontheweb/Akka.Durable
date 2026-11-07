@@ -14,18 +14,11 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEnti
     public void Tell(TCommand command, IActorRef? sender = null) =>
         region.Tell(new ShardingEnvelope(id.Value, command!), sender!);
 
-    public Task<TReply> Ask<TReply>(TCommand command, CancellationToken cancellationToken = default) =>
-        region.Ask<TReply>(new ShardingEnvelope(id.Value, command!), cancellationToken);
-
-    void ICanTell.Tell(object message, IActorRef sender)
+    public Task<TReply> Ask<TReply>(IReplies<TCommand, TReply> command, CancellationToken cancellationToken = default)
+        where TReply : notnull
     {
-        if (message is not TCommand command)
-            throw new ArgumentException(
-                $"Entity {id.Value} only accepts {typeof(TCommand).FullName}, but received {message?.GetType().FullName ?? "null"}. " +
-                $"If {typeof(TCommand).Name} is a union, convert the case value to it before sending.",
-                nameof(message));
-
-        Tell(command, sender);
+        ArgumentNullException.ThrowIfNull(command);
+        return region.Ask<TReply>(new ShardingEnvelope(id.Value, command.ToCommand()!), cancellationToken);
     }
 }
 
@@ -40,10 +33,9 @@ internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef
 
     public void Tell(TCommand command, IActorRef? sender = null) => _ref.Tell(command, sender);
 
-    public Task<TReply> Ask<TReply>(TCommand command, CancellationToken cancellationToken = default) =>
+    public Task<TReply> Ask<TReply>(IReplies<TCommand, TReply> command, CancellationToken cancellationToken = default)
+        where TReply : notnull =>
         _ref.Ask<TReply>(command, cancellationToken);
-
-    void ICanTell.Tell(object message, IActorRef sender) => ((ICanTell)_ref).Tell(message, sender);
 
     public async Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default)
     {

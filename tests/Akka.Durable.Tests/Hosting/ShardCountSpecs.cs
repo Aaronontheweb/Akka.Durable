@@ -28,9 +28,9 @@ public class ShardCountSpecs(ITestOutputHelper output) : CounterHostingSpec(outp
         var ids = Enumerable.Range(0, 20).Select(i => $"entity-{i}").ToList();
 
         // The first message waits for the cluster and shard coordinator to come up.
-        await CounterRef(ids[0]).Ask<Accepted>(new Increment(1), AskCancellation(TimeSpan.FromSeconds(30)));
+        await CounterRef(ids[0]).Ask(new Increment(1), AskCancellation(TimeSpan.FromSeconds(30)));
         foreach (var id in ids.Skip(1))
-            await CounterRef(id).Ask<Accepted>(new Increment(1), AskCancellation());
+            await CounterRef(id).Ask(new Increment(1), AskCancellation());
 
         var region = Host.Services.GetRequiredService<IRequiredActor<EntityRegion<CounterCommand>>>().ActorRef;
         var state = await region.Ask<CurrentShardRegionState>(GetShardRegionState.Instance, AskCancellation());
