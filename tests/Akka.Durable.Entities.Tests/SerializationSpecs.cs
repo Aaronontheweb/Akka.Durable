@@ -1,9 +1,10 @@
-using System.Collections.Immutable;
 using Akka.Actor;
 using Akka.Actor.Setup;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Entities.Serialization;
 using Akka.Durable.Entities.Tests.Fixtures;
+using Akka.Reminders;
+using Akka.Reminders.Serialization;
 using Akka.Serialization;
 using Xunit;
 
@@ -16,9 +17,14 @@ namespace Akka.Durable.Entities.Tests;
 public sealed class SerializationSpecs : IAsyncLifetime
 {
     private readonly ActorSystem _system = ActorSystem.Create("serialization",
-        BootstrapSetup.Create().And(SerializationSetup.Create(system => ImmutableHashSet.Create(
+        BootstrapSetup.Create().And(SerializationSetup.Create(system =>
+        [
             CounterSerializer.CreateSerializerDetails(system),
-            DurableEntitySerializer.CreateSerializerDetails(system)))));
+            DurableEntitySerializer.CreateSerializerDetails(system),
+            // Registered the same way Akka.Reminders' hosting extensions register it.
+            SerializerDetails.Create("reminder-serializer", new ReminderSerializer(system),
+                [typeof(IReminderWireMessage)]),
+        ])));
 
     private Akka.Serialization.Serialization Serialization => _system.Serialization;
 
@@ -34,24 +40,27 @@ public sealed class SerializationSpecs : IAsyncLifetime
         return Serialization.Deserialize(bytes, serializer.Identifier, manifest);
     }
 
-    public static TheoryData<string, object> UnionValues => new()
+    private static readonly Dictionary<string, object> UnionValues = new()
     {
-        { "command with fields", (CounterCommand)new Increment(2) },
-        { "fieldless command", (CounterCommand)new GetCount() },
-        { "command with TimeSpan", (CounterCommand)new RemindLater(TimeSpan.FromSeconds(3)) },
-        { "event", (CounterEvent)new Incremented(5) },
-        { "fieldless event", (CounterEvent)new CounterLocked() },
+        ["command with fields"] = (CounterCommand)new Increment(2),
+        ["fieldless command"] = (CounterCommand)new GetCount(),
+        ["command with TimeSpan"] = (CounterCommand)new RemindLater(TimeSpan.FromSeconds(3)),
+        ["event"] = (CounterEvent)new Incremented(5),
+        ["fieldless event"] = (CounterEvent)new CounterLocked(),
     };
 
+    public static TheoryData<string> UnionValueNames => [.. UnionValues.Keys];
+
     [Theory]
-    [MemberData(nameof(UnionValues))]
-    public void Union_values_round_trip_as_the_union(string description, object value)
+    [MemberData(nameof(UnionValueNames))]
+    public void Union_values_round_trip_as_the_union(string name)
     {
+        var value = UnionValues[name];
+
         var result = RoundTrip(value);
 
         Assert.IsType(value.GetType(), result);
         Assert.Equal(value, result);
-        Assert.NotNull(description);
     }
 
     [Fact]
@@ -75,6 +84,21 @@ public sealed class SerializationSpecs : IAsyncLifetime
     public void Framework_state_query_round_trips()
     {
         Assert.IsType<GetEntityState>(RoundTrip(GetEntityState.Instance));
+    }
+
+    [Fact]
+    public void Reminder_envelope_carries_a_union_command_payload()
+    {
+        // How a scheduled TCommand travels from reminder storage to the entity.
+        var due = new DateTimeOffset(2026, 11, 7, 12, 0, 0, TimeSpan.Zero);
+        var sent = new ReminderEnvelope(new ReminderEntity("counter", "a"), new ReminderKey("tick"), due,
+            ReminderDeadline.Infinite, (CounterCommand)new Increment(1));
+
+        var received = (ReminderEnvelope)RoundTrip(sent);
+
+        Assert.Equal((CounterCommand)new Increment(1), received.Message);
+        Assert.Equal(new ReminderKey("tick"), received.Key);
+        Assert.Equal(due, received.DueTimeUtc);
     }
 
     [Fact]

@@ -5,6 +5,8 @@
     <AkkaVersion>1.6.0-beta6</AkkaVersion>
     <!-- Aaron.Akka.Reminders ships separately and can lag the Akka.NET beta it targets. -->
     <AkkaRemindersVersion>1.6.0-beta5</AkkaRemindersVersion>
+    <!-- Akka.Persistence.Sql also ships separately; used only by tests, for a real serializing journal. -->
+    <AkkaPersistenceSqlVersion>1.6.0-beta5</AkkaPersistenceSqlVersion>
     <XunitVersion>4.0.2</XunitVersion>
     <XunitRunnerVersion>3.1.5</XunitRunnerVersion>
     <TestSdkVersion>18.11.0</TestSdkVersion>
@@ -22,6 +24,9 @@
   <ItemGroup>
     <PackageVersion Include="Akka.TestKit.Xunit" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Hosting.TestKit" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Akka.Persistence.Sql.Hosting" Version="$(AkkaPersistenceSqlVersion)" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <PackageVersion Include="System.Linq.Async" Version="6.0.1" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="$(TestSdkVersion)" />
     <PackageVersion Include="xunit.v3" Version="$(XunitVersion)" />
     <PackageVersion Include="xunit.v3.assert" Version="$(XunitVersion)" />

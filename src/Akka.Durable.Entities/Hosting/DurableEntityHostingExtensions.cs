@@ -118,7 +118,7 @@ public static class DurableEntityHostingExtensions
         });
     }
 
-    private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, object> FrameworkSerializerAdded = new();
+    private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, object> FrameworkSerializerAdded = [];
 
     /// <summary>Registers Akka.Durable's own serializer once per builder, however many entity types it hosts.</summary>
     private static void AddFrameworkSerializerOnce(AkkaConfigurationBuilder builder)

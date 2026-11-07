@@ -11,6 +11,10 @@
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
     <PackageReference Include="Akka.Hosting.TestKit" />
+    <PackageReference Include="Akka.Persistence.Sql.Hosting" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <!-- Pulled in by linq2db; hide it from compilation so it does not clash with .NET's built-in System.Linq.AsyncEnumerable. -->
+    <PackageReference Include="System.Linq.Async" ExcludeAssets="compile" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Akka.Durable.Entities/Akka.Durable.Entities.csproj" />
