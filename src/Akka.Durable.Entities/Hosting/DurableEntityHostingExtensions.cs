@@ -69,10 +69,17 @@ public static class DurableEntityHostingExtensions
                 new EntityId(entityId), definition, services, time);
         }
 
+        var stopMessage = EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
+        var passivateIdleAfter = (definition.Options ?? EntityOptions.Default).PassivateIdleAfter;
+
         if (shardOptions is not null)
         {
             // Hand-off uses the same stop message as passivation, so persistent entities stop cleanly.
-            shardOptions.HandOffStopMessage ??= EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
+            shardOptions.HandOffStopMessage ??= stopMessage;
+
+            // An explicit sharding value wins. Zero is sharding's own "off", so non-positive maps to it.
+            shardOptions.PassivateIdleEntityAfter ??=
+                passivateIdleAfter > TimeSpan.Zero ? passivateIdleAfter : TimeSpan.Zero;
 
             // Entity refs and reminders send ShardingEnvelopes, which sharding routes on its own.
             return builder
@@ -90,7 +97,7 @@ public static class DurableEntityHostingExtensions
         {
             var entityProps = EntityProps(system, resolver);
             var host = system.ActorOf(
-                Props.Create(() => new LocalEntityHost(entityProps)),
+                Props.Create(() => new LocalEntityHost(entityProps, stopMessage, passivateIdleAfter)),
                 LocalEntityHost.ActorName(definition.TypeName));
             registry.Register<EntityRegion<TCommand>>(host);
             registry.Register<EntityRegion<TCommand, TState, TEvent>>(host);
