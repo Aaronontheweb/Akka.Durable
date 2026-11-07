@@ -85,8 +85,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             }
             else
             {
-                _log.Warning("Ignoring incompatible snapshot of type {0} at SeqNr {1}",
-                    offer.Snapshot?.GetType(), offer.Metadata.SequenceNr);
+                // Ignoring the snapshot is unsafe: Akka.Persistence resumes event replay AFTER the
+                // snapshot's sequence number, so every event the snapshot covered would be silently lost.
+                throw new EntityRecoveryException(
+                    $"Entity [{PersistenceId}] cannot recover: snapshot at sequence number " +
+                    $"[{offer.Metadata.SequenceNr}] is of type [{offer.Snapshot?.GetType()}] but the expected " +
+                    $"state type is [{typeof(TState)}]. The snapshot cannot be skipped, because events it covers " +
+                    "are not replayed. If TState is a C# 15 union, a serializer may have returned the case type " +
+                    "instead of the union (https://github.com/akkadotnet/akka.net/issues/8906).");
             }
         });
 
@@ -98,6 +104,15 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         Recover<RecoveryCompleted>(_ =>
             _log.Debug("Recovery completed at SeqNr {0}", LastSequenceNr));
+
+        // Catch-all, registered last (handlers match in registration order). An unmatched journal entry
+        // is otherwise skipped silently by Akka.Persistence, leaving the entity with missing state.
+        Recover<object>(entry =>
+            throw new EntityRecoveryException(
+                $"Entity [{PersistenceId}] cannot recover: journal entry at sequence number [{LastSequenceNr}] " +
+                $"is of type [{entry.GetType()}] but the expected event type is [{typeof(TEvent)}]. " +
+                "If TEvent is a C# 15 union, a serializer may have returned the case type instead of the " +
+                "union (https://github.com/akkadotnet/akka.net/issues/8906)."));
     }
 
     private void Apply(TEvent @event) => State = _definition.Evolve(State, @event);
