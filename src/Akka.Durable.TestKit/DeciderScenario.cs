@@ -101,6 +101,6 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     }
 
     public void ThenIgnored() => Assert.True(decision is Ignored, $"Expected Ignored but got {decision.Value}");
-    public void ThenUnhandled() => Assert.True(decision is Unhandled, $"Expected Unhandled but got {decision.Value}");
+    public void ThenUnhandled() => Assert.True(decision is NotHandled, $"Expected NotHandled but got {decision.Value}");
     public void ThenStashed() => Assert.True(decision is Stashed, $"Expected Stashed but got {decision.Value}");
 }

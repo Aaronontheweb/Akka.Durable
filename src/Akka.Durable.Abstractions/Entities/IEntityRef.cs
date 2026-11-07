@@ -28,6 +28,11 @@ public interface IEntityRef<in TCommand> : ICanTell
 /// <remarks>
 /// Creating a reference is cheap, synchronous and side-effect free: it does not activate the entity.
 /// The entity is activated by the first message sent through the reference.
+/// <para>
+/// Refs are keyed by command type, so each entity type must have its own command type (typically an
+/// entity-specific command union). Registering two entity types with the same command type makes the
+/// second registration collide in the ActorRegistry.
+/// </para>
 /// </remarks>
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
 public interface IEntityRefs<TCommand>

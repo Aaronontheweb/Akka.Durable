@@ -13,6 +13,11 @@ namespace Akka.Durable.Entities.Hosting;
 /// <see cref="ActorRegistry"/> key for the shard region or local host of the entity type whose
 /// command protocol is <typeparamref name="TCommand"/>.
 /// </summary>
+/// <remarks>
+/// The registry is keyed by command type, so each entity type must have its own command type
+/// (typically an entity-specific command union). Registering two entity types with the same command
+/// type makes the second registration collide in the ActorRegistry.
+/// </remarks>
 public sealed class EntityRegion<TCommand>
 {
     private EntityRegion() { }
