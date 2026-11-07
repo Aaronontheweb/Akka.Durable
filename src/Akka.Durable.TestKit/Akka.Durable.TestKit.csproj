@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>$(NetLibVersion)</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Description>Akka.Hosting.TestKit-based test infrastructure for Akka.Durable entities: a hosted spec base class with an in-memory journal and local reminders, plus Given/When/Then helpers for pure decider tests.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Akka.Durable.Entities/Akka.Durable.Entities.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Akka.Hosting.TestKit" />
+    <PackageReference Include="xunit.v3.assert" />
+  </ItemGroup>
+</Project>
