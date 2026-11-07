@@ -1,5 +1,8 @@
 # Akka.Durable
 
+> [!NOTE]
+> Akka.Durable is a proof of concept, not an official Akka.NET project. It is published as `Aaron.Akka.Durable` because the `Akka.*` NuGet prefix is reserved for official Akka.NET packages. Expect breaking changes between releases.
+
 Akka.Durable is an early-stage project exploring durable entities and workflows on Akka.NET. The intended foundation is Akka.Persistence and Cluster Sharding, with a local development and execution story as well as clustered deployments. Agent capabilities are a much later possibility, not part of the initial scope.
 
 The design draws on a functional event-sourcing decider: pure decisions and state transitions, with persistence, recovery, delivery, and other effects handled by a runtime shell. A first vertical slice of durable entities exists; workflows are not implemented yet.
@@ -18,8 +21,8 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 
 | Package | Contents |
 |---|---|
-| `Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
-| `Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in `Akka.Durable.TestKit` |
+| `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
+| `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
 ## Defining an entity
 
@@ -210,7 +213,7 @@ The snapshot carries the state and the sequence number of the last applied event
 
 ## Testing
 
-Use `Akka.Durable.TestKit`. Decisions can be tested as plain functions:
+Use the `Aaron.Akka.Durable.TestKit` package. Decisions can be tested as plain functions:
 
 ```csharp
 [Fact]

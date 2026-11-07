@@ -2,6 +2,7 @@
   <PropertyGroup>
     <TargetFramework>$(NetLibVersion)</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
+    <PackageId>Aaron.Akka.Durable.TestKit</PackageId>
     <Description>Akka.Hosting.TestKit-based test infrastructure for Akka.Durable entities: a hosted spec base class with an in-memory journal and local reminders, plus Given/When/Then helpers for pure decider tests.</Description>
   </PropertyGroup>
 
