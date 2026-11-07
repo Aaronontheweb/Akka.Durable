@@ -1,6 +1,5 @@
 ﻿using Akka.Actor;
 using Akka.Serialization.V2;
-using Akka.Streams;
 
 namespace Akka.Durable.Abstractions.Entities;
 
@@ -40,13 +39,41 @@ public interface IEntityRefs<TCommand>
     IEntityRef<TCommand> Get(EntityId id);
 }
 
-public interface IDurableEntityRef<TCommand, TState, TEvent>
-    : IEntityRef<TCommand>
+/// <summary>
+/// Entity reference that can also read the entity's current state.
+/// </summary>
+/// <remarks>
+/// Refs carried in messages are always the address-only <see cref="IEntityRef{TCommand}"/>: it is just
+/// the entity type and ID, and doesn't depend on the state type. To read state, upgrade a ref by its ID
+/// with <see cref="IDurableEntityRefs{TCommand,TState}.Get"/>.
+/// </remarks>
+/// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
+/// <typeparam name="TState">The state type of the entity type.</typeparam>
+public interface IDurableEntityRef<TCommand, TState> : IEntityRef<TCommand>
 {
-    Task<StateSnapshot<TState>> GetStateAsync();
+    /// <summary>
+    /// Reads the entity's state and the sequence number of the last event applied to it,
+    /// activating the entity if needed.
+    /// </summary>
+    /// <remarks>
+    /// The read is queued behind commands the entity has already received: it is answered only after
+    /// their events are committed and their effects have finished.
+    /// </remarks>
+    Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+}
 
-    Task<ISourceRef<EntityUpdate<TState, TEvent>>>
-        SubscribeAsync();
+/// <summary>
+/// Factory for state-aware entity references of a single entity type.
+/// </summary>
+/// <remarks>
+/// <typeparamref name="TState"/> must be the state type the entity type was registered with;
+/// otherwise <see cref="Get"/> fails because no matching entity type is registered.
+/// </remarks>
+/// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
+/// <typeparam name="TState">The state type of the entity type.</typeparam>
+public interface IDurableEntityRefs<TCommand, TState>
+{
+    IDurableEntityRef<TCommand, TState> Get(EntityId id);
 }
 
 [AkkaSerializable]

@@ -29,3 +29,23 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEnti
         Tell(command, sender);
     }
 }
+
+/// <summary>
+/// <see cref="EntityRef{TCommand}"/> that can also read the entity's state.
+/// </summary>
+internal sealed class EntityRef<TCommand, TState>(EntityId id, IActorRef region) : IDurableEntityRef<TCommand, TState>
+{
+    private readonly EntityRef<TCommand> _ref = new(id, region);
+
+    public EntityId Id => id;
+
+    public void Tell(TCommand command, IActorRef? sender = null) => _ref.Tell(command, sender);
+
+    public Task<TReply> Ask<TReply>(TCommand command, CancellationToken cancellationToken = default) =>
+        _ref.Ask<TReply>(command, cancellationToken);
+
+    void ICanTell.Tell(object message, IActorRef sender) => ((ICanTell)_ref).Tell(message, sender);
+
+    public Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default) =>
+        region.Ask<StateSnapshot<TState>>(new ShardingEnvelope(id.Value, GetEntityState.Instance), cancellationToken);
+}

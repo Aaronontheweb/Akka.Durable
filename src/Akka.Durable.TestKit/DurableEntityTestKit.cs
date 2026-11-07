@@ -20,7 +20,8 @@ namespace Akka.Durable.TestKit;
 /// <c>WithJournalWrite</c>, <c>WithSnapshotSave</c>, ...);</item>
 /// <item>Akka.Reminders running locally with in-memory storage, delivering to durable entities in either
 /// hosting mode;</item>
-/// <item><see cref="IEntityRefs{TCommand}"/> registered for injection.</item>
+/// <item><see cref="IEntityRefs{TCommand}"/> and <see cref="IDurableEntityRefs{TCommand,TState}"/> registered
+/// for injection.</item>
 /// </list>
 /// <para>Register entities in <see cref="ConfigureEntities"/>, typically with
 /// <c>WithDurableEntity(definition)</c>.</para>
@@ -74,6 +75,14 @@ public abstract class DurableEntityTestKit(
     /// <summary>A logical reference to one entity.</summary>
     protected IEntityRef<TCommand> EntityRef<TCommand>(string entityId) =>
         EntityRefs<TCommand>().Get(new EntityId(entityId));
+
+    /// <summary>The state-aware reference factory for an entity type, as application code would inject it.</summary>
+    protected IDurableEntityRefs<TCommand, TState> DurableEntityRefs<TCommand, TState>() =>
+        Host.Services.GetRequiredService<IDurableEntityRefs<TCommand, TState>>();
+
+    /// <summary>A reference to one entity that can also read its state.</summary>
+    protected IDurableEntityRef<TCommand, TState> DurableEntityRef<TCommand, TState>(string entityId) =>
+        DurableEntityRefs<TCommand, TState>().Get(new EntityId(entityId));
 
     /// <summary>The current test's cancellation token, for awaited calls.</summary>
     protected static CancellationToken TestCancellation => TestContext.Current.CancellationToken;

@@ -1,6 +1,7 @@
 using Akka.Actor;
 using Akka.Cluster.Hosting;
 using Akka.Durable.Entities.Tests.Fixtures;
+using Akka.Event;
 using Xunit;
 
 namespace Akka.Durable.Entities.Tests.Hosting;
@@ -133,4 +134,56 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         counter.Tell((CounterCommand)new Increment(1), TestActor);
         await ExpectMsgAsync<Accepted>(cancellationToken: TestCancellation);
     }
+
+    #region State reads
+
+    [Fact]
+    public Task GetState_returns_the_committed_state_and_sequence_number() =>
+        AssertGetStateReturnsCommittedStateAndSequenceNr(DurableCounterRef("a"));
+
+    [Fact]
+    public async Task GetState_of_a_fresh_entity_returns_its_initial_state()
+    {
+        var snapshot = await DurableCounterRef("fresh").GetStateAsync(AskCancellation());
+
+        Assert.Equal(new CounterState(0, false), snapshot.State);
+        Assert.Equal(0, snapshot.SequenceNr);
+    }
+
+    [Fact]
+    public Task GetState_waits_for_in_flight_effects() =>
+        AssertGetStateWaitsForInFlightEffects(DurableCounterRef("a"));
+
+    [Fact]
+    public async Task GetState_is_not_treated_as_a_command()
+    {
+        var unhandled = CreateTestProbe();
+        Sys.EventStream.Subscribe(unhandled.Ref, typeof(UnhandledMessage));
+        var counter = DurableCounterRef("a");
+        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+
+        var snapshot = await counter.GetStateAsync(AskCancellation());
+
+        Assert.Equal(1, snapshot.SequenceNr);
+        await unhandled.ExpectNoMsgAsync(NoMsgWindow, TestCancellation);
+        Assert.Equal(1, await CountOf(counter));
+    }
+
+    [Fact]
+    public async Task A_plain_ref_can_be_upgraded_by_id_to_read_state()
+    {
+        var plain = CounterRef("a");
+        await plain.Ask<Accepted>(new Increment(3), AskCancellation());
+
+        var snapshot = await DurableEntityRefs<CounterCommand, CounterState>().Get(plain.Id)
+            .GetStateAsync(AskCancellation());
+
+        Assert.Equal(3, snapshot.State.Count);
+    }
+
+    [Fact]
+    public void A_state_type_that_does_not_match_the_definition_is_rejected() =>
+        AssertWrongStateTypeIsRejected();
+
+    #endregion
 }
