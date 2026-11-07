@@ -1,44 +1,102 @@
+using Akka.Actor;
+using Akka.Serialization;
+using Akka.Serialization.V2;
+
 namespace Akka.Durable.Entities.Tests.Fixtures;
 
 using CounterContext = DecisionContext<CounterCommand, CounterEvent>;
 
-// A deliberately small entity whose commands each exercise one runtime behavior.
+// A deliberately small entity whose commands each exercise one runtime behavior. Every type that can
+// cross a serialization boundary (journal, snapshots, reminders, remoting, replies) is serializable,
+// so hosted specs can run with serialize-messages on.
 
-public sealed record CounterState(int Count, bool Locked);
+public interface ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-state-v1")]
+public sealed record CounterState(
+    [property: AkkaField(0)] int Count,
+    [property: AkkaField(1)] bool Locked) : ICounterProtocol;
 
 // Commands
-public sealed record Increment(int By);
-public sealed record GetCount;
-public sealed record Noop;
-public sealed record Unsupported;
-public sealed record LockCounter;
-public sealed record UnlockCounter;
-public sealed record IncrementAndRecord(int By);
-public sealed record IncrementThenFail(int By);
-public sealed record FailWithFallback;
-public sealed record RecordFailure(string Reason);
-public sealed record WaitForGate;
-public sealed record WaitForGateWithTimeout(TimeSpan Timeout);
-public sealed record RemindLater(TimeSpan Delay);
-public sealed record Shutdown;
+[AkkaSerializable(Manifest = "counter-increment-v1")]
+public sealed record Increment([property: AkkaField(0)] int By) : ICounterProtocol;
 
+[AkkaSerializable(Manifest = "counter-get-count-v1", AllowEmpty = true)]
+public sealed record GetCount : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-noop-v1", AllowEmpty = true)]
+public sealed record Noop : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-unsupported-v1", AllowEmpty = true)]
+public sealed record Unsupported : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-lock-v1", AllowEmpty = true)]
+public sealed record LockCounter : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-unlock-v1", AllowEmpty = true)]
+public sealed record UnlockCounter : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-increment-and-record-v1")]
+public sealed record IncrementAndRecord([property: AkkaField(0)] int By) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-increment-then-fail-v1")]
+public sealed record IncrementThenFail([property: AkkaField(0)] int By) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-fail-with-fallback-v1", AllowEmpty = true)]
+public sealed record FailWithFallback : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-record-failure-v1")]
+public sealed record RecordFailure([property: AkkaField(0)] string Reason) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-wait-for-gate-v1", AllowEmpty = true)]
+public sealed record WaitForGate : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-wait-for-gate-timeout-v1")]
+public sealed record WaitForGateWithTimeout([property: AkkaField(0)] TimeSpan Timeout) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-remind-later-v1")]
+public sealed record RemindLater([property: AkkaField(0)] TimeSpan Delay) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-shutdown-v1", AllowEmpty = true)]
+public sealed record Shutdown : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-command-v1")]
 public readonly union CounterCommand(
     Increment, GetCount, Noop, Unsupported, LockCounter, UnlockCounter,
     IncrementAndRecord, IncrementThenFail, FailWithFallback, RecordFailure,
-    WaitForGate, WaitForGateWithTimeout, RemindLater, Shutdown);
+    WaitForGate, WaitForGateWithTimeout, RemindLater, Shutdown) : ICounterProtocol;
 
 // Events
-public sealed record Incremented(int By);
-public sealed record CounterLocked;
-public sealed record CounterUnlocked;
+[AkkaSerializable(Manifest = "counter-incremented-v1")]
+public sealed record Incremented([property: AkkaField(0)] int By) : ICounterProtocol;
 
-public readonly union CounterEvent(Incremented, CounterLocked, CounterUnlocked);
+[AkkaSerializable(Manifest = "counter-locked-v1", AllowEmpty = true)]
+public sealed record CounterLocked : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-unlocked-v1", AllowEmpty = true)]
+public sealed record CounterUnlocked : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-event-v1")]
+public readonly union CounterEvent(Incremented, CounterLocked, CounterUnlocked) : ICounterProtocol;
 
 // Replies (application-defined; no entity-wide response union required)
-public sealed record Accepted;
-public sealed record CountIs(int Count);
-public sealed record GateOpened;
-public sealed record FailureRecorded(string Reason);
+[AkkaSerializable(Manifest = "counter-accepted-v1", AllowEmpty = true)]
+public sealed record Accepted : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-count-is-v1")]
+public sealed record CountIs([property: AkkaField(0)] int Count) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-gate-opened-v1", AllowEmpty = true)]
+public sealed record GateOpened : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-failure-recorded-v1")]
+public sealed record FailureRecorded([property: AkkaField(0)] string Reason) : ICounterProtocol;
+
+[AkkaSerializer<ICounterProtocol>("counter-test", 22599)]
+public sealed partial class CounterSerializer : AkkaSerializer
+{
+    public static partial SerializerDetails CreateSerializerDetails(ExtendedActorSystem system);
+}
 
 public static class Counter
 {

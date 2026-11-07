@@ -2,6 +2,7 @@
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Abstractions.Entities;
+using Akka.Durable.Entities.Serialization;
 using Akka.Event;
 using Akka.Persistence;
 using Akka.Reminders;
@@ -144,7 +145,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // incoming messages while events persist and effects run, so a query sent after a command is
         // answered only once that command's events are committed and its effects have finished.
         // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
-        Command<GetEntityState>(_ => Sender.Tell(new StateSnapshot<TState>(State, LastSequenceNr)));
+        Command<GetEntityState>(_ => Sender.Tell(new EntityStateReply(State!, LastSequenceNr)));
 
         Command<TCommand>(command => HandleCommand(command, reminder: null));
         Command<StopEntity>(_ => Context.Stop(Self));
@@ -460,7 +461,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <summary>
     /// Stop message handed back by the shard / local host after <see cref="Passivate"/>.
     /// </summary>
-    internal sealed class StopEntity
+    /// <remarks>
+    /// Only ever sent by an entity's own parent (its shard or local host) on the same node, also as the
+    /// shard's hand-off stop message, so it never crosses a serialization boundary.
+    /// </remarks>
+    internal sealed class StopEntity : INoSerializationVerificationNeeded
     {
         public static readonly StopEntity Instance = new();
         private StopEntity() { }

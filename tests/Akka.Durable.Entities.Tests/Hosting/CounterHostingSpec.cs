@@ -50,7 +50,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         ConfigureCluster(builder);
-        builder.WithDurableEntity(Definition, Sharding);
+        builder.WithCustomSerializer(CounterSerializer.CreateSerializerDetails).WithDurableEntity(Definition, Sharding);
     }
 
     protected IEntityRef<CounterCommand> CounterRef(string id) => EntityRef<CounterCommand>(id);
