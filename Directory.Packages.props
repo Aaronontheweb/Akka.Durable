@@ -17,7 +17,6 @@
     <PackageVersion Include="Akka.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaRemindersVersion)" />
     <PackageVersion Include="Akka.Serialization.V2" Version="$(AkkaVersion)" />
-    <PackageVersion Include="Akka.Streams" Version="$(AkkaVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
   </ItemGroup>
   <!-- Test dependencies -->

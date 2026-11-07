@@ -6,7 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Akka.Durable.Entities/Akka.Durable.Entities.csproj" />
+    <ProjectReference Include="../Akka.Durable/Akka.Durable.csproj" />
   </ItemGroup>
 
   <ItemGroup>

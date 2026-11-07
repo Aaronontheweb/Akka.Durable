@@ -16,12 +16,10 @@ dotnet test
 
 The solution targets `net11.0` and enables preview C# features (C# 15 unions are used throughout). Package versions are managed centrally; Akka.NET packages are pinned to 1.6.0-beta6 (Aaron.Akka.Reminders to 1.6.0-beta5).
 
-| Project | Contents |
+| Package | Contents |
 |---|---|
-| `Akka.Durable.Abstractions` | `EntityId`, `IEntityRef<TCommand>`, `IEntityRefs<TCommand>`, `IDurableEntityRefs<TCommand, TState, TEvent>` |
-| `Akka.Durable.Entities` | Entity definitions, decisions and effects, the entity actor, and Akka.Hosting integration |
-| `Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit |
-| `Akka.Durable.Workflows` | Empty for now |
+| `Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
+| `Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in `Akka.Durable.TestKit` |
 
 ## Defining an entity
 
@@ -176,6 +174,18 @@ public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
 
 A ref's identity is the entity type plus the entity ID. It doesn't change when the entity moves between processes or nodes. Messages always go through the shard region or local host, so a command sent while an entity is stopping is delivered to its next incarnation.
 
+A ref is bound to the node that created it, so it isn't serializable. To refer to an entity inside a message, event or reminder, carry its `EntityId` and resolve it on the receiving side. Each entity type has its own command type, so the receiver knows which factory to use:
+
+```csharp
+[AkkaSerializable(Manifest = "audit-invoice-v1")]
+public sealed record AuditInvoice([property: AkkaField(0)] EntityId Invoice) : IInvoiceProtocol;
+
+// on the receiving side
+var invoice = invoices.Get(audit.Invoice);   // invoices: IEntityRefs<InvoiceCommand>
+```
+
+Typed `IEntityRef<T>` fields in messages need generic formatter support in Akka.Serialization.V2, tracked in [akkadotnet/akka.net#8911](https://github.com/akkadotnet/akka.net/issues/8911).
+
 ## Reading state
 
 Inject `IDurableEntityRefs<TCommand, TState, TEvent>` to get refs that can also read the entity's state. The event type is part of the signature so that event subscriptions can be added without changing it:
@@ -196,7 +206,7 @@ public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceSta
 }
 ```
 
-The snapshot carries the state and the sequence number of the last applied event. The read waits behind commands the entity has already received, so it sees their committed events and runs only after their effects finish. Refs carried in messages are always the address-only `IEntityRef<TCommand>`. To read state from one, upgrade it by ID: `invoices.Get(invoiceRef.Id)`. `TState` must match the registered definition; otherwise `Get` throws Akka.Hosting's `MissingActorRegistryEntryException`.
+The snapshot carries the state and the sequence number of the last applied event. The read waits behind commands the entity has already received, so it sees their committed events and runs only after their effects finish. To read the state of an entity you hold a plain ref or an ID for, get a state-aware ref by ID: `invoices.Get(invoiceRef.Id)`. `TState` must match the registered definition; otherwise `Get` throws Akka.Hosting's `MissingActorRegistryEntryException`.
 
 ## Testing
 

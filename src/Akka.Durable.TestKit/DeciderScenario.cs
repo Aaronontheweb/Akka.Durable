@@ -1,6 +1,4 @@
 using System.Collections.Immutable;
-using Akka.Durable.Abstractions.Entities;
-using Akka.Durable.Entities;
 using Xunit;
 
 namespace Akka.Durable.TestKit;
