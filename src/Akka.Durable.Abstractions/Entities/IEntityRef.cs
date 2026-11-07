@@ -45,11 +45,16 @@ public interface IEntityRefs<TCommand>
 /// <remarks>
 /// Refs carried in messages are always the address-only <see cref="IEntityRef{TCommand}"/>: it is just
 /// the entity type and ID, and doesn't depend on the state type. To read state, upgrade a ref by its ID
-/// with <see cref="IDurableEntityRefs{TCommand,TState}.Get"/>.
+/// with <see cref="IDurableEntityRefs{TCommand,TState,TEvent}.Get"/>.
+/// <para>
+/// <typeparamref name="TEvent"/> is part of the type now so that event subscriptions can be added to this
+/// interface without changing its signature.
+/// </para>
 /// </remarks>
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
 /// <typeparam name="TState">The state type of the entity type.</typeparam>
-public interface IDurableEntityRef<TCommand, TState> : IEntityRef<TCommand>
+/// <typeparam name="TEvent">The event type of the entity type.</typeparam>
+public interface IDurableEntityRef<TCommand, TState, TEvent> : IEntityRef<TCommand>
 {
     /// <summary>
     /// Reads the entity's state and the sequence number of the last event applied to it,
@@ -66,14 +71,16 @@ public interface IDurableEntityRef<TCommand, TState> : IEntityRef<TCommand>
 /// Factory for state-aware entity references of a single entity type.
 /// </summary>
 /// <remarks>
-/// <typeparamref name="TState"/> must be the state type the entity type was registered with;
-/// otherwise <see cref="Get"/> fails because no matching entity type is registered.
+/// <typeparamref name="TState"/> and <typeparamref name="TEvent"/> must be the state and event types the
+/// entity type was registered with; otherwise <see cref="Get"/> fails because no matching entity type is
+/// registered.
 /// </remarks>
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
 /// <typeparam name="TState">The state type of the entity type.</typeparam>
-public interface IDurableEntityRefs<TCommand, TState>
+/// <typeparam name="TEvent">The event type of the entity type.</typeparam>
+public interface IDurableEntityRefs<TCommand, TState, TEvent>
 {
-    IDurableEntityRef<TCommand, TState> Get(EntityId id);
+    IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id);
 }
 
 [AkkaSerializable]

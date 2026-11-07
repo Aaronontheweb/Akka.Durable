@@ -18,7 +18,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 
 | Project | Contents |
 |---|---|
-| `Akka.Durable.Abstractions` | `EntityId`, `IEntityRef<TCommand>`, `IEntityRefs<TCommand>`, `IDurableEntityRefs<TCommand, TState>` |
+| `Akka.Durable.Abstractions` | `EntityId`, `IEntityRef<TCommand>`, `IEntityRefs<TCommand>`, `IDurableEntityRefs<TCommand, TState, TEvent>` |
 | `Akka.Durable.Entities` | Entity definitions, decisions and effects, the entity actor, and Akka.Hosting integration |
 | `Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit |
 | `Akka.Durable.Workflows` | Empty for now |
@@ -132,10 +132,10 @@ A ref's identity is the entity type plus the entity ID. It doesn't change when t
 
 ## Reading state
 
-Inject `IDurableEntityRefs<TCommand, TState>` to get refs that can also read the entity's state:
+Inject `IDurableEntityRefs<TCommand, TState, TEvent>` to get refs that can also read the entity's state. The event type is part of the signature so that event subscriptions can be added without changing it:
 
 ```csharp
-public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceState> invoices)
+public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent> invoices)
 {
     public async Task<string> DescribeAsync(string invoiceId, CancellationToken ct)
     {
@@ -186,7 +186,7 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
         await invoice.Ask<InvoiceAccepted>(new IssueInvoice(250m, "billing@example.com"), AskCancellation());
         await invoice.Ask<PaymentAccepted>(new RecordPayment(250m), AskCancellation());
 
-        var snapshot = await DurableEntityRef<InvoiceCommand, InvoiceState>("invoice-1")
+        var snapshot = await DurableEntityRef<InvoiceCommand, InvoiceState, InvoiceEvent>("invoice-1")
             .GetStateAsync(AskCancellation());
         Assert.True(snapshot.State is Paid);
     }

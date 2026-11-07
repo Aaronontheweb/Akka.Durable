@@ -40,8 +40,8 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
 
     protected IEntityRef<CounterCommand> CounterRef(string id) => EntityRef<CounterCommand>(id);
 
-    protected IDurableEntityRef<CounterCommand, CounterState> DurableCounterRef(string id) =>
-        DurableEntityRef<CounterCommand, CounterState>(id);
+    protected IDurableEntityRef<CounterCommand, CounterState, CounterEvent> DurableCounterRef(string id) =>
+        DurableEntityRef<CounterCommand, CounterState, CounterEvent>(id);
 
     protected EffectRecorder Recorder => Host.Services.GetRequiredService<EffectRecorder>();
 
@@ -65,7 +65,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     }
 
     protected async Task AssertGetStateReturnsCommittedStateAndSequenceNr(
-        IDurableEntityRef<CounterCommand, CounterState> counter)
+        IDurableEntityRef<CounterCommand, CounterState, CounterEvent> counter)
     {
         await counter.Ask<Accepted>(new Increment(2), AskCancellation());
         await counter.Ask<Accepted>(new LockCounter(), AskCancellation());
@@ -81,7 +81,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     /// WaitForGate persists nothing and holds its Run effect open, so a state read sent after it must
     /// wait until the effect finishes.
     /// </summary>
-    protected async Task AssertGetStateWaitsForInFlightEffects(IDurableEntityRef<CounterCommand, CounterState> counter)
+    protected async Task AssertGetStateWaitsForInFlightEffects(IDurableEntityRef<CounterCommand, CounterState, CounterEvent> counter)
     {
         var opened = counter.Ask<GateOpened>(new WaitForGate(), AskCancellation());
         var read = counter.GetStateAsync(AskCancellation());
@@ -96,8 +96,10 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
 
     protected void AssertWrongStateTypeIsRejected()
     {
-        var refs = DurableEntityRefs<CounterCommand, string>();
+        var wrongState = DurableEntityRefs<CounterCommand, string, CounterEvent>();
+        Assert.Throws<MissingActorRegistryEntryException>(() => wrongState.Get(new EntityId("a")));
 
-        Assert.Throws<MissingActorRegistryEntryException>(() => refs.Get(new EntityId("a")));
+        var wrongEvent = DurableEntityRefs<CounterCommand, CounterState, string>();
+        Assert.Throws<MissingActorRegistryEntryException>(() => wrongEvent.Get(new EntityId("a")));
     }
 }

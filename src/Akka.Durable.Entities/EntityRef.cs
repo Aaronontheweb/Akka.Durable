@@ -33,7 +33,7 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEnti
 /// <summary>
 /// <see cref="EntityRef{TCommand}"/> that can also read the entity's state.
 /// </summary>
-internal sealed class EntityRef<TCommand, TState>(EntityId id, IActorRef region) : IDurableEntityRef<TCommand, TState>
+internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef region) : IDurableEntityRef<TCommand, TState, TEvent>
 {
     private readonly EntityRef<TCommand> _ref = new(id, region);
 

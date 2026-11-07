@@ -175,7 +175,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         var plain = CounterRef("a");
         await plain.Ask<Accepted>(new Increment(3), AskCancellation());
 
-        var snapshot = await DurableEntityRefs<CounterCommand, CounterState>().Get(plain.Id)
+        var snapshot = await DurableEntityRefs<CounterCommand, CounterState, CounterEvent>().Get(plain.Id)
             .GetStateAsync(AskCancellation());
 
         Assert.Equal(3, snapshot.State.Count);

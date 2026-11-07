@@ -24,14 +24,15 @@ public sealed class EntityRegion<TCommand>
 }
 
 /// <summary>
-/// <see cref="ActorRegistry"/> key used by state-aware refs (<see cref="IDurableEntityRefs{TCommand,TState}"/>).
+/// <see cref="ActorRegistry"/> key used by state-aware refs (<see cref="IDurableEntityRefs{TCommand,TState,TEvent}"/>).
 /// It points at the same shard region or local host as <see cref="EntityRegion{TCommand}"/>.
 /// </summary>
 /// <remarks>
-/// A <typeparamref name="TState"/> that doesn't match the registered entity definition has no registry
-/// entry, so resolving the ref fails with Akka.Hosting's <see cref="MissingActorRegistryEntryException"/>.
+/// A <typeparamref name="TState"/> or <typeparamref name="TEvent"/> that doesn't match the registered entity
+/// definition has no registry entry, so resolving the ref fails with Akka.Hosting's
+/// <see cref="MissingActorRegistryEntryException"/>.
 /// </remarks>
-public sealed class EntityRegion<TCommand, TState>
+public sealed class EntityRegion<TCommand, TState, TEvent>
 {
     private EntityRegion() { }
 }
@@ -41,13 +42,13 @@ public static class DurableEntityHostingExtensions
     private const int NumberOfShards = 100;
 
     /// <summary>
-    /// Registers <see cref="IEntityRefs{TCommand}"/> and <see cref="IDurableEntityRefs{TCommand,TState}"/>
+    /// Registers <see cref="IEntityRefs{TCommand}"/> and <see cref="IDurableEntityRefs{TCommand,TState,TEvent}"/>
     /// for injection. Call once alongside <see cref="WithDurableEntity{TState,TCommand,TEvent}"/>.
     /// </summary>
     public static IServiceCollection AddDurableEntities(this IServiceCollection services)
     {
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
-        services.TryAddSingleton(typeof(IDurableEntityRefs<,>), typeof(DurableEntityRefs<,>));
+        services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
         return services;
     }
 
@@ -81,7 +82,7 @@ public static class DurableEntityHostingExtensions
                     HashCodeMessageExtractor.Create(NumberOfShards, _ => null),
                     shardOptions)
                 .WithActors(async (_, registry) =>
-                    registry.Register<EntityRegion<TCommand, TState>>(
+                    registry.Register<EntityRegion<TCommand, TState, TEvent>>(
                         await registry.GetAsync<EntityRegion<TCommand>>()));
         }
 
@@ -92,7 +93,7 @@ public static class DurableEntityHostingExtensions
                 Props.Create(() => new LocalEntityHost(entityProps)),
                 LocalEntityHost.ActorName(definition.TypeName));
             registry.Register<EntityRegion<TCommand>>(host);
-            registry.Register<EntityRegion<TCommand, TState>>(host);
+            registry.Register<EntityRegion<TCommand, TState, TEvent>>(host);
         });
     }
 }
@@ -102,8 +103,8 @@ internal sealed class EntityRefs<TCommand>(IRequiredActor<EntityRegion<TCommand>
     public IEntityRef<TCommand> Get(EntityId id) => new EntityRef<TCommand>(id, region.ActorRef);
 }
 
-internal sealed class DurableEntityRefs<TCommand, TState>(IRequiredActor<EntityRegion<TCommand, TState>> region)
-    : IDurableEntityRefs<TCommand, TState>
+internal sealed class DurableEntityRefs<TCommand, TState, TEvent>(IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region)
+    : IDurableEntityRefs<TCommand, TState, TEvent>
 {
-    public IDurableEntityRef<TCommand, TState> Get(EntityId id) => new EntityRef<TCommand, TState>(id, region.ActorRef);
+    public IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id) => new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef);
 }

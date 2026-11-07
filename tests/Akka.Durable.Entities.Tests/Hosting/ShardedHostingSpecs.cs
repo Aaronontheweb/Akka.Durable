@@ -109,7 +109,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
         var plain = CounterRef("a");
         await FirstAsk(ct => plain.Ask<Accepted>(new Increment(3), ct));
 
-        var snapshot = await DurableEntityRefs<CounterCommand, CounterState>().Get(plain.Id)
+        var snapshot = await DurableEntityRefs<CounterCommand, CounterState, CounterEvent>().Get(plain.Id)
             .GetStateAsync(AskCancellation());
 
         Assert.Equal(3, snapshot.State.Count);
