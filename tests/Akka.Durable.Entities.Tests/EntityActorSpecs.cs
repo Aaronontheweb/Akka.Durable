@@ -178,6 +178,30 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     [Fact]
+    public async Task State_query_bypasses_the_decider()
+    {
+        var decided = new List<CounterCommand>();
+        var definition = Counter.Definition with
+        {
+            Decide = (state, command, ctx) =>
+            {
+                decided.Add(command);
+                return Counter.Decide(state, command, ctx);
+            },
+        };
+        var entity = SpawnEntity("c-query", definition);
+
+        Send(entity, new Increment(2));
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        entity.Tell(GetEntityState.Instance, TestActor);
+
+        var snapshot = await ExpectMsgAsync<StateSnapshot<CounterState>>(cancellationToken: Ct);
+        Assert.Equal(new CounterState(2, false), snapshot.State);
+        Assert.Equal(1, snapshot.SequenceNr);
+        Assert.Single(decided);
+    }
+
+    [Fact]
     public async Task Stashed_command_keeps_its_sender_and_runs_after_UnstashAll()
     {
         var entity = SpawnEntity("c6");

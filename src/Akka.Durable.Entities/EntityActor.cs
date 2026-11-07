@@ -110,6 +110,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     {
         // Must precede Command<TCommand> so reminder envelopes are never treated as commands.
         Command<ReminderEnvelope>(HandleReminder);
+
+        // State query, handled outside TCommand so Decide never sees it. Akka.Persistence stashes
+        // incoming messages while events persist and effects run, so a query sent after a command is
+        // answered only once that command's events are committed and its effects have finished.
+        // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
+        Command<GetEntityState>(_ => Sender.Tell(new StateSnapshot<TState>(State, LastSequenceNr)));
+
         Command<TCommand>(command => HandleCommand(command, reminder: null));
         Command<StopEntity>(_ => Context.Stop(Self));
 

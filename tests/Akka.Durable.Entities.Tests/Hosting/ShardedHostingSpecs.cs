@@ -75,4 +75,47 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
             interval: TimeSpan.FromMilliseconds(250),
             cancellationToken: TestCancellation);
     }
+
+    [Fact]
+    public async Task GetState_returns_the_committed_state_and_sequence_number()
+    {
+        var counter = DurableCounterRef("a");
+        await FirstAsk(ct => counter.Ask<CountIs>(new GetCount(), ct));
+
+        await AssertGetStateReturnsCommittedStateAndSequenceNr(counter);
+    }
+
+    [Fact]
+    public async Task GetState_of_a_fresh_entity_returns_its_initial_state()
+    {
+        var snapshot = await FirstAsk(ct => DurableCounterRef("fresh").GetStateAsync(ct));
+
+        Assert.Equal(new CounterState(0, false), snapshot.State);
+        Assert.Equal(0, snapshot.SequenceNr);
+    }
+
+    [Fact]
+    public async Task GetState_waits_for_in_flight_effects()
+    {
+        var counter = DurableCounterRef("a");
+        await FirstAsk(ct => counter.Ask<CountIs>(new GetCount(), ct));
+
+        await AssertGetStateWaitsForInFlightEffects(counter);
+    }
+
+    [Fact]
+    public async Task A_plain_ref_can_be_upgraded_by_id_to_read_state()
+    {
+        var plain = CounterRef("a");
+        await FirstAsk(ct => plain.Ask<Accepted>(new Increment(3), ct));
+
+        var snapshot = await DurableEntityRefs<CounterCommand, CounterState, CounterEvent>().Get(plain.Id)
+            .GetStateAsync(AskCancellation());
+
+        Assert.Equal(3, snapshot.State.Count);
+    }
+
+    [Fact]
+    public void A_state_type_that_does_not_match_the_definition_is_rejected() =>
+        AssertWrongStateTypeIsRejected();
 }

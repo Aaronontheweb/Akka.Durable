@@ -18,7 +18,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 
 | Project | Contents |
 |---|---|
-| `Akka.Durable.Abstractions` | `EntityId`, `IEntityRef<TCommand>`, `IEntityRefs<TCommand>` |
+| `Akka.Durable.Abstractions` | `EntityId`, `IEntityRef<TCommand>`, `IEntityRefs<TCommand>`, `IDurableEntityRefs<TCommand, TState, TEvent>` |
 | `Akka.Durable.Entities` | Entity definitions, decisions and effects, the entity actor, and Akka.Hosting integration |
 | `Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit |
 | `Akka.Durable.Workflows` | Empty for now |
@@ -132,6 +132,28 @@ public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
 
 A ref's identity is the entity type plus the entity ID. It doesn't change when the entity moves between processes or nodes. Messages always go through the shard region or local host, so a command sent while an entity is stopping is delivered to its next incarnation.
 
+## Reading state
+
+Inject `IDurableEntityRefs<TCommand, TState, TEvent>` to get refs that can also read the entity's state. The event type is part of the signature so that event subscriptions can be added without changing it:
+
+```csharp
+public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent> invoices)
+{
+    public async Task<string> DescribeAsync(string invoiceId, CancellationToken ct)
+    {
+        var snapshot = await invoices.Get(new EntityId(invoiceId)).GetStateAsync(ct);
+        return snapshot.State switch
+        {
+            Draft => "draft",
+            Issued s => $"issued to {s.Recipient}, {s.Total:C} due",
+            Paid s => $"paid {s.Total:C}",
+        };
+    }
+}
+```
+
+The snapshot carries the state and the sequence number of the last applied event. The read waits behind commands the entity has already received, so it sees their committed events and runs only after their effects finish. Refs carried in messages are always the address-only `IEntityRef<TCommand>`. To read state from one, upgrade it by ID: `invoices.Get(invoiceRef.Id)`. `TState` must match the registered definition; otherwise `Get` throws Akka.Hosting's `MissingActorRegistryEntryException`.
+
 ## Testing
 
 Use `Akka.Durable.TestKit`. Decisions can be tested as plain functions:
@@ -165,6 +187,10 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
 
         await invoice.Ask<InvoiceAccepted>(new IssueInvoice(250m, "billing@example.com"), AskCancellation());
         await invoice.Ask<PaymentAccepted>(new RecordPayment(250m), AskCancellation());
+
+        var snapshot = await DurableEntityRef<InvoiceCommand, InvoiceState, InvoiceEvent>("invoice-1")
+            .GetStateAsync(AskCancellation());
+        Assert.True(snapshot.State is Paid);
     }
 }
 ```
@@ -176,12 +202,12 @@ Working today, and tested against the in-memory test journal:
 - Recovery.
 - Reminders.
 - Local and sharded hosting.
-- Typed entity refs.
+- Typed entity refs and state reads.
 
 Not done yet:
 - **Serialization.** Union commands and events have only been tested in memory, not through a real serializer and journal.
 - **Snapshot tests.** Snapshotting and retention are implemented but not yet covered by tests.
-- **Built-in reads.** No state queries or subscriptions.
+- **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
 - **Source generation.**
 - **Durable workflows.**
 - **Agents.** Much later, once the foundations exist.
