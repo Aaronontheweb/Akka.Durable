@@ -10,6 +10,7 @@
   <Project Path="tests/Akka.Durable.Abstractions.Tests/Akka.Durable.Abstractions.Tests.csproj" />
   <Project Path="src/Akka.Durable.Entities/Akka.Durable.Entities.csproj" />
   <Project Path="tests/Akka.Durable.Entities.Tests/Akka.Durable.Entities.Tests.csproj" />
+  <Project Path="src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
   <Project Path="src/Akka.Durable.Workflows/Akka.Durable.Workflows.csproj" />
   <Project Path="tests/Akka.Durable.Workflows.Tests/Akka.Durable.Workflows.Tests.csproj" />
 </Solution>

@@ -14,5 +14,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Akka.Durable.Entities/Akka.Durable.Entities.csproj" />
+    <ProjectReference Include="../../src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
   </ItemGroup>
 </Project>

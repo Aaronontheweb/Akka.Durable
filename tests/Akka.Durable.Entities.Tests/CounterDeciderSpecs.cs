@@ -1,5 +1,6 @@
 using Akka.Durable.Abstractions.Entities;
 using Akka.Durable.Entities.Tests.Fixtures;
+using Akka.Durable.TestKit;
 using Xunit;
 
 namespace Akka.Durable.Entities.Tests;

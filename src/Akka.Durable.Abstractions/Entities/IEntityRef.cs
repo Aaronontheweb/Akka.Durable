@@ -22,6 +22,19 @@ public interface IEntityRef<in TCommand> : ICanTell
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Factory for logical entity references of a single entity type, keyed by its command type.
+/// </summary>
+/// <remarks>
+/// Creating a reference is cheap, synchronous and side-effect free: it does not activate the entity.
+/// The entity is activated by the first message sent through the reference.
+/// </remarks>
+/// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
+public interface IEntityRefs<TCommand>
+{
+    IEntityRef<TCommand> Get(EntityId id);
+}
+
 public interface IDurableEntityRef<TCommand, TState, TEvent>
     : IEntityRef<TCommand>
 {

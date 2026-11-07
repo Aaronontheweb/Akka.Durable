@@ -1,8 +1,9 @@
 using System.Collections.Immutable;
 using Akka.Durable.Abstractions.Entities;
+using Akka.Durable.Entities;
 using Xunit;
 
-namespace Akka.Durable.Entities.Tests;
+namespace Akka.Durable.TestKit;
 
 /// <summary>
 /// Given / When / Then harness for pure Decide + Evolve tests. No ActorSystem involved.
