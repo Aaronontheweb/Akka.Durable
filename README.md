@@ -3,9 +3,72 @@
 > [!NOTE]
 > Akka.Durable is a proof of concept, not an official Akka.NET project. It is published as `Aaron.Akka.Durable` because the `Akka.*` NuGet prefix is reserved for official Akka.NET packages. Expect breaking changes between releases.
 
-Akka.Durable is an early-stage project exploring durable entities and workflows on Akka.NET. The intended foundation is Akka.Persistence and Cluster Sharding, with a local development and execution story as well as clustered deployments. Agent capabilities are a much later possibility, not part of the initial scope.
+Akka.Durable gives you event-sourced entities on Akka.NET. Define their behavior with pure `Decide` and `Evolve` functions, then send commands through typed references. The runtime handles persistence, recovery, and routing in local or clustered deployments.
 
-The design draws on a functional event-sourcing decider: pure decisions and state transitions, with persistence, recovery, delivery, and other effects handled by a runtime shell. A first vertical slice of durable entities exists; workflows are not implemented yet.
+## Inject it. Send a message.
+
+**Entity reference factories are .NET DI services.** Call `AddDurableEntities()` at startup, then inject `IEntityRefs<InvoiceCommand>` into any controller, hosted service, or application service:
+
+```csharp
+public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
+{
+    public Task<IssueReply> IssueAsync(EntityId id, CancellationToken ct) =>
+        invoices.Get(id).Ask(new IssueInvoice(250m, "billing@example.com"), ct);
+
+    public void Remind(EntityId id) =>
+        invoices.Get(id).Tell(new SendReminder());
+}
+```
+
+That's the caller API: choose an ID, send a command, get its declared reply type. The first message creates or recovers the entity. The same calls work with local hosting and Cluster Sharding. [Register and host the entity](#hosting) once at startup.
+
+## Define its behavior
+
+Here is the `Invoice` behind those calls. `Decide` produces events and effects; `Evolve` computes the state from each persisted event. The `InvoiceCommand`, `IssueInvoice`, and `SendReminder` types are the same ones used by the injected service above.
+
+```csharp
+using InvoiceContext = DecisionContext<InvoiceState, InvoiceCommand, InvoiceEvent>;
+
+public static class Invoice
+{
+    public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
+        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
+
+    public static Decision<InvoiceCommand, InvoiceEvent> Decide(
+        InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
+        (state, command) switch
+        {
+            (Draft, IssueInvoice c) when c.Total > 0 =>
+                ctx.For(c).Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
+                    .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
+                    .Reply(new InvoiceAccepted(ctx.EntityId)),
+
+            (Issued s, RecordPayment p) when p.Amount == s.Total =>
+                ctx.For(p).Persist(new PaymentRecorded(p.Amount))
+                    .CancelTimer("reminder")
+                    .Reply(new PaymentAccepted()),
+
+            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>(
+                (mailer, ct) => mailer.RemindAsync(ct),
+                onSuccess: () => ctx.None(),
+                onFailure: error => throw error),
+            (_, SendReminder) => ctx.Ignore(),
+
+            (_, IssueInvoice c) => ctx.For(c).Reply(new InvoiceRejected("Invalid invoice operation")),
+            (_, RecordPayment p) => ctx.For(p).Reply(new InvoiceRejected("Invalid invoice operation")),
+        };
+
+    public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
+        (state, @event) switch
+        {
+            (Draft, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
+            (Issued s, PaymentRecorded) => new Paid(s.Total),
+            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
+        };
+}
+```
+
+The [state, command, event, and reply declarations](#state-commands-events-and-replies) are below. You write the domain functions; Akka.Durable supplies the actor.
 
 ## Getting started
 
@@ -24,7 +87,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 | `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
 | `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
-## Defining an entity
+## State, commands, events, and replies
 
 An entity is an initial state, a `Decide` function and an `Evolve` function. You don't subclass an actor. Its state, commands, events and replies are serialized (see [Serialization](#serialization)), so each one carries a stable manifest and field indexes:
 
@@ -118,50 +181,6 @@ public readonly union PaymentReply(
 public sealed partial class InvoiceSerializer : AkkaSerializer
 {
     public static partial SerializerDetails CreateSerializerDetails(ExtendedActorSystem system);
-}
-```
-
-`Decide` returns events to persist and effects to run afterwards. `Evolve` applies one event to the state. The invoice state is a union, so each state carries only the data that is valid for it and no sentinel values are needed.
-
-```csharp
-using InvoiceContext = DecisionContext<InvoiceState, InvoiceCommand, InvoiceEvent>;
-
-public static class Invoice
-{
-    public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
-        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
-
-    public static Decision<InvoiceCommand, InvoiceEvent> Decide(
-        InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
-        (state, command) switch
-        {
-            (Draft, IssueInvoice c) when c.Total > 0 =>
-                ctx.For(c).Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
-                    .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
-                    .Reply(new InvoiceAccepted(ctx.EntityId)),
-
-            (Issued s, RecordPayment p) when p.Amount == s.Total =>
-                ctx.For(p).Persist(new PaymentRecorded(p.Amount))
-                    .CancelTimer("reminder")
-                    .Reply(new PaymentAccepted()),
-
-            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>(
-                (mailer, ct) => mailer.RemindAsync(ct),
-                onSuccess: () => ctx.None(),
-                onFailure: error => throw error),
-            (_, SendReminder) => ctx.Ignore(),
-
-            (_, IssueInvoice c) => ctx.For(c).Reply(new InvoiceRejected("Invalid invoice operation")),
-            (_, RecordPayment p) => ctx.For(p).Reply(new InvoiceRejected("Invalid invoice operation")),
-        };
-
-    public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
-        (state, @event) switch
-        {
-            (Draft, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
-            (Issued s, PaymentRecorded) => new Paid(s.Total),
-            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
-        };
 }
 ```
 
@@ -266,68 +285,9 @@ In sharded mode, entity IDs are spread across `EntityOptions.NumberOfShards` sha
 
 ## Sending commands
 
-Inject `IEntityRefs<TCommand>` and get a ref by entity ID. Getting a ref is cheap and doesn't start the entity. The first message does.
+Inject `IEntityRefs<InvoiceCommand>` as shown above, then call `Get(id)` to address an invoice. Getting a reference is cheap and does not activate the entity; the first `Ask` or `Tell` does. On activation, a new ID starts from `InitialState`, and an existing entity recovers from its journal and snapshot.
 
-```csharp
-public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
-{
-    public Task<IssueReply> IssueAsync(string invoiceId, decimal total, string recipient, CancellationToken ct) =>
-        invoices.Get(new EntityId(invoiceId)).Ask(new IssueInvoice(total, recipient), ct);
-
-    public void RecordPayment(string invoiceId, decimal amount) =>
-        invoices.Get(new EntityId(invoiceId)).Tell(new RecordPayment(amount));
-}
-```
-
-To create and interact with one invoice from the running host, resolve a factory and choose an `EntityId`. There is no separate `Create` call: `Get` returns a logical reference, and the first `Ask` or `Tell` activates the entity. On activation, a new ID starts from `InitialState`; an existing entity recovers its saved events and snapshot. `IssueInvoice` performs the business operation that moves it from `Draft` to `Issued`.
-
-The state-aware factory returns a reference supporting both commands and state reads:
-
-```csharp
-var invoices = host.Services
-    .GetRequiredService<IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>>();
-
-var invoice = invoices.Get(new EntityId("invoice-1"));
-
-using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-var ct = timeout.Token;
-
-// First use creates this invoice, or recovers it if this ID already exists.
-// Ask infers IssueReply from the command's declaration.
-IssueReply issued = await invoice.Ask(new IssueInvoice(250m, "billing@example.com"), ct);
-
-Console.WriteLine(issued switch
-{
-    InvoiceAccepted accepted => $"Issued invoice {accepted.Id.Value}",
-    InvoiceRejected rejected => $"Invoice rejected: {rejected.Reason}",
-});
-
-if (issued is InvoiceAccepted)
-{
-    // Tell sends a command without waiting for a reply.
-    invoice.Tell(new SendReminder());
-
-    // Ask when the caller needs to know whether payment was accepted.
-    PaymentReply payment = await invoice.Ask(new RecordPayment(250m), ct);
-    Console.WriteLine(payment switch
-    {
-        PaymentAccepted => "Payment recorded",
-        InvoiceRejected rejected => $"Payment rejected: {rejected.Reason}",
-    });
-}
-
-// Reads wait for commands and effects the entity has already received to finish.
-var snapshot = await invoice.GetStateAsync(ct);
-Console.WriteLine(snapshot.State switch
-{
-    Draft => "State: draft",
-    Issued s => $"State: issued, {s.Total:C} due",
-    Paid s => $"State: paid, {s.Total:C}",
-});
-Console.WriteLine($"Last event sequence number: {snapshot.SequenceNr}");
-```
-
-Use the same ID for later commands to the same invoice, and a different ID for another invoice. Calling `Get` again does not reset its state. The in-memory journal used by tests is temporary; recovery across process restarts requires a durable persistence provider configured in the host.
+Use the same ID for later commands to the same invoice, and a different ID for another invoice. Calling `Get` again does not reset its state. `Ask` waits for a reply; `Tell` sends without waiting for one. [State-aware references](#reading-state) support both messaging and state reads.
 
 `Ask` infers its return type from `IReplies<TCommand, TReply>`. Tell-only commands have no interface and cannot be asked. `IEntityRef<TCommand>` does not implement `ICanTell`, so Akka.NET's unchecked Ask extension methods cannot bypass the contract. Tell effects accept another typed entity ref and convert its command case before boxing it.
 
