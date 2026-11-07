@@ -9,18 +9,25 @@ namespace Akka.Durable.Entities;
 /// Child-per-entity parent that stands in for a shard region in local (non-clustered) execution.
 /// </summary>
 /// <remarks>
-/// Speaks the same protocol as a shard: it accepts <see cref="ShardingEnvelope"/>s, lazily creates one
+/// <para>Speaks the same protocol as a shard: it accepts <see cref="ShardingEnvelope"/>s, lazily creates one
 /// child per entity id, and honours <see cref="Passivate"/> by buffering that entity's messages until it
 /// has stopped, then reactivating it if anything arrived in the meantime. Only one child per entity id
-/// exists at a time.
+/// exists at a time.</para>
+/// <para>Like a shard, it also passivates entities that have received no message for the idle timeout,
+/// using the same buffered protocol with the stop message it was constructed with.</para>
 /// </remarks>
-internal sealed class LocalEntityHost : ReceiveActor
+internal sealed class LocalEntityHost : ReceiveActor, IWithTimers
 {
     private readonly Func<string, Props> _entityProps;
+    private readonly object _stopMessage;
+    private readonly long _passivateIdleAfterMs;
     private readonly Dictionary<string, IActorRef> _entities = [];
     private readonly Dictionary<IActorRef, string> _entityIds = [];
+    private readonly Dictionary<string, long> _lastActivity = [];
     private readonly Dictionary<string, List<(object Message, IActorRef Sender)>> _passivating = [];
     private readonly ILoggingAdapter _log = Context.GetLogger();
+
+    public ITimerScheduler Timers { get; set; } = null!;
 
     /// <summary>Top-level actor name of the host for an entity type.</summary>
     public static string ActorName(EntityTypeName typeName) => ActorName(typeName.Value);
@@ -34,9 +41,14 @@ internal sealed class LocalEntityHost : ReceiveActor
         return host.IsNobody() ? null : host;
     }
 
-    public LocalEntityHost(Func<string, Props> entityProps)
+    /// <param name="entityProps">Props for the entity child with the given id.</param>
+    /// <param name="stopMessage">Sent to an entity to stop it when the host passivates it for being idle.</param>
+    /// <param name="passivateIdleAfter">Idle timeout; non-positive disables idle passivation.</param>
+    public LocalEntityHost(Func<string, Props> entityProps, object stopMessage, TimeSpan passivateIdleAfter)
     {
         _entityProps = entityProps;
+        _stopMessage = stopMessage;
+        _passivateIdleAfterMs = (long)passivateIdleAfter.TotalMilliseconds;
 
         Receive<ShardingEnvelope>(e => Deliver(e.EntityId, e.Message));
 
@@ -45,6 +57,16 @@ internal sealed class LocalEntityHost : ReceiveActor
 
         Receive<Passivate>(HandlePassivate);
         Receive<Terminated>(HandleTerminated);
+        Receive<PassivateIdleTick>(_ => PassivateIdleEntities());
+    }
+
+    protected override void PreStart()
+    {
+        if (_passivateIdleAfterMs <= 0) return;
+
+        // Same cadence as a shard: check at half the timeout, so an entity is stopped within 1.5x of it.
+        var interval = TimeSpan.FromMilliseconds(Math.Max(1, _passivateIdleAfterMs / 2));
+        Timers.StartPeriodicTimer(PassivateIdleTick.Instance, PassivateIdleTick.Instance, interval);
     }
 
     private void Deliver(string entityId, object message)
@@ -55,7 +77,9 @@ internal sealed class LocalEntityHost : ReceiveActor
             return;
         }
 
-        GetOrCreate(entityId).Forward(message);
+        var entity = GetOrCreate(entityId);
+        _lastActivity[entityId] = Environment.TickCount64;
+        entity.Forward(message);
     }
 
     private IActorRef GetOrCreate(string entityId)
@@ -67,6 +91,7 @@ internal sealed class LocalEntityHost : ReceiveActor
         Context.Watch(entity);
         _entities[entityId] = entity;
         _entityIds[entity] = entityId;
+        _lastActivity[entityId] = Environment.TickCount64;
         return entity;
     }
 
@@ -78,16 +103,40 @@ internal sealed class LocalEntityHost : ReceiveActor
             return;
         }
 
+        StartPassivation(entityId, Sender, passivate.StopMessage);
+    }
+
+    private void PassivateIdleEntities()
+    {
+        var deadline = Environment.TickCount64 - _passivateIdleAfterMs;
+        List<string>? idle = null;
+        foreach (var (entityId, lastActivity) in _lastActivity)
+        {
+            if (lastActivity <= deadline && !_passivating.ContainsKey(entityId))
+                (idle ??= []).Add(entityId);
+        }
+
+        if (idle is null) return;
+
+        _log.Debug("Passivating {0} idle entities", idle.Count);
+        foreach (var entityId in idle)
+            StartPassivation(entityId, _entities[entityId], _stopMessage);
+    }
+
+    /// <summary>Buffers the entity's messages from now on and asks it to stop.</summary>
+    private void StartPassivation(string entityId, IActorRef entity, object stopMessage)
+    {
         if (_passivating.ContainsKey(entityId)) return;
 
         _passivating[entityId] = [];
-        Sender.Tell(passivate.StopMessage);
+        entity.Tell(stopMessage);
     }
 
     private void HandleTerminated(Terminated terminated)
     {
         if (!_entityIds.Remove(terminated.ActorRef, out var entityId)) return;
         _entities.Remove(entityId);
+        _lastActivity.Remove(entityId);
 
         if (!_passivating.Remove(entityId, out var buffer) || buffer.Count == 0) return;
 
@@ -95,5 +144,11 @@ internal sealed class LocalEntityHost : ReceiveActor
         var entity = GetOrCreate(entityId);
         foreach (var (message, sender) in buffer)
             entity.Tell(message, sender);
+    }
+
+    private sealed class PassivateIdleTick
+    {
+        public static readonly PassivateIdleTick Instance = new();
+        private PassivateIdleTick() { }
     }
 }

@@ -57,6 +57,22 @@ public sealed record EntityOptions
     public TimeSpan EffectTimeout { get; init; } =
         TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How long an entity may go without receiving a message before its host passivates it
+    /// (stops its actor; the next message reactivates it from the journal). Defaults to 2 minutes,
+    /// matching Akka.Cluster.Sharding's <c>passivate-idle-entity-after</c> default.
+    /// </summary>
+    /// <remarks>
+    /// <para>Set to <see cref="TimeSpan.Zero"/> to disable idle passivation; any non-positive value
+    /// disables it. This mirrors Akka.Cluster.Sharding, which represents "off" as
+    /// <see cref="TimeSpan.Zero"/> and only passivates idle entities when the timeout is positive, so
+    /// the value maps one-to-one onto <c>ShardOptions.PassivateIdleEntityAfter</c>.</para>
+    /// <para>Applies in both hosting modes. In sharded mode an explicit
+    /// <c>ShardOptions.PassivateIdleEntityAfter</c> takes precedence, and sharding never passivates
+    /// idle entities while remember-entities is enabled.</para>
+    /// </remarks>
+    public TimeSpan PassivateIdleAfter { get; init; } = TimeSpan.FromMinutes(2);
+
     // Snapshot and retention policy
     public int SnapshotEvery { get; init; } = 100;
     public int KeepSnapshots { get; init; } = 2;
