@@ -4,6 +4,7 @@ using Akka.Durable.Entities.Hosting;
 using Akka.Durable.Entities.Tests.Fixtures;
 using Akka.Durable.TestKit;
 using Akka.Hosting;
+using Akka.Remote.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -21,9 +22,23 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     /// <summary>Shard options for sharded hosting; <c>null</c> hosts locally.</summary>
     protected abstract ShardOptions? Sharding { get; }
 
+    /// <summary>The Counter definition to host; override to vary its options.</summary>
+    protected virtual EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition => Counter.Definition;
+
     protected virtual void ConfigureCluster(AkkaConfigurationBuilder builder)
     {
     }
+
+    /// <summary>A single-node cluster that joins itself, for sharded hosting specs.</summary>
+    protected static void ConfigureSingleNodeCluster(AkkaConfigurationBuilder builder) =>
+        builder
+            .WithRemoting("localhost", 0)
+            .WithClustering()
+            .AddStartup((system, _) =>
+            {
+                var cluster = Akka.Cluster.Cluster.Get(system);
+                cluster.Join(cluster.SelfAddress);
+            });
 
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
     {
@@ -35,7 +50,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         ConfigureCluster(builder);
-        builder.WithDurableEntity(Counter.Definition, Sharding);
+        builder.WithDurableEntity(Definition, Sharding);
     }
 
     protected IEntityRef<CounterCommand> CounterRef(string id) => EntityRef<CounterCommand>(id);

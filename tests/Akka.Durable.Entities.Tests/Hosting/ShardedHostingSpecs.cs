@@ -1,8 +1,6 @@
-using Akka.Cluster;
 using Akka.Cluster.Hosting;
 using Akka.Durable.Entities.Tests.Fixtures;
 using Akka.Hosting;
-using Akka.Remote.Hosting;
 using Xunit;
 
 namespace Akka.Durable.Entities.Tests.Hosting;
@@ -16,17 +14,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
 
     protected override ShardOptions? Sharding => new();
 
-    protected override void ConfigureCluster(AkkaConfigurationBuilder builder)
-    {
-        builder
-            .WithRemoting("localhost", 0)
-            .WithClustering()
-            .AddStartup((system, _) =>
-            {
-                var cluster = Cluster.Cluster.Get(system);
-                cluster.Join(cluster.SelfAddress);
-            });
-    }
+    protected override void ConfigureCluster(AkkaConfigurationBuilder builder) => ConfigureSingleNodeCluster(builder);
 
     // The first message waits for the cluster and shard coordinator to come up.
     private Task<T> FirstAsk<T>(Func<CancellationToken, Task<T>> ask) => ask(AskCancellation(ClusterFormation));

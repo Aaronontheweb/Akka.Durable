@@ -25,6 +25,7 @@ public class EntityOptionsSpecs
         Assert.Same(EntityOptions.DefaultPersistenceIdFactory, options.PersistenceIdFactory);
         Assert.Equal(TimeSpan.FromSeconds(30), options.EffectTimeout);
         Assert.Equal(TimeSpan.FromMinutes(2), options.PassivateIdleAfter);
+        Assert.Equal(100, options.NumberOfShards);
         Assert.Equal(100, options.SnapshotEvery);
         Assert.Equal(2, options.KeepSnapshots);
         Assert.False(options.DeleteEventsOnSnapshot);
