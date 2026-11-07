@@ -71,6 +71,27 @@ public static class Invoice
 
 The [state, command, event, and reply declarations](#state-commands-events-and-replies) are below. You write the domain functions; Akka.Durable supplies the actor.
 
+The calling surface is small: `IEntityRef` sends commands, and `IDurableEntityRef` adds state reads:
+
+```csharp
+public interface IEntityRef<in TCommand>
+{
+    EntityId Id { get; }
+
+    void Tell(TCommand command, IActorRef? sender = null);
+
+    Task<TReply> Ask<TReply>(IReplies<TCommand, TReply> command,
+        CancellationToken cancellationToken = default) where TReply : notnull;
+}
+
+public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCommand>
+{
+    Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+}
+```
+
+`Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`.
+
 ## Getting started
 
 Install the .NET 11 RC SDK pinned in `global.json` (including prerelease SDKs), then run:
