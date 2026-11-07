@@ -237,6 +237,8 @@ Stored events and snapshots are a long-lived contract, so evolve these types by 
 Register entity refs with DI, then host each entity type either locally or in a shard region:
 
 ```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
 builder.Services.AddDurableEntities();
 builder.Services.AddScoped<IInvoiceMailer, SmtpInvoiceMailer>();
 
@@ -249,7 +251,12 @@ builder.Services.AddAkka("billing", (akka, sp) =>
     // or, in a cluster:
     // akka.WithDurableEntity(Invoice.Definition, new ShardOptions { Role = "billing" });
 });
+
+using var host = builder.Build();
+await host.StartAsync();
 ```
+
+This starts the infrastructure for the entity type. Individual invoices are created or recovered on their first message, as shown below. In a console application, call `await host.StopAsync()` when finished; a web application uses its normal host lifetime.
 
 Without `ShardOptions` the entity type runs in a local host actor in this process. In both modes, `.Stop()` uses sharding's `Passivate` protocol, so an entity that stops itself isn't restarted when remember-entities is enabled. Don't run the same entity type in local mode on more than one node against the same journal. When using Akka.Reminders with locally hosted entities, point it at them with `WithResolver(sys => new DurableEntityReminderResolver(sys))`.
 
@@ -271,6 +278,56 @@ public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
         invoices.Get(new EntityId(invoiceId)).Tell(new RecordPayment(amount));
 }
 ```
+
+To create and interact with one invoice from the running host, resolve a factory and choose an `EntityId`. There is no separate `Create` call: `Get` returns a logical reference, and the first `Ask` or `Tell` activates the entity. On activation, a new ID starts from `InitialState`; an existing entity recovers its saved events and snapshot. `IssueInvoice` performs the business operation that moves it from `Draft` to `Issued`.
+
+The state-aware factory returns a reference supporting both commands and state reads:
+
+```csharp
+var invoices = host.Services
+    .GetRequiredService<IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>>();
+
+var invoice = invoices.Get(new EntityId("invoice-1"));
+
+using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+var ct = timeout.Token;
+
+// First use creates this invoice, or recovers it if this ID already exists.
+// Ask infers IssueReply from the command's declaration.
+IssueReply issued = await invoice.Ask(new IssueInvoice(250m, "billing@example.com"), ct);
+
+Console.WriteLine(issued switch
+{
+    InvoiceAccepted accepted => $"Issued invoice {accepted.Id.Value}",
+    InvoiceRejected rejected => $"Invoice rejected: {rejected.Reason}",
+});
+
+if (issued is InvoiceAccepted)
+{
+    // Tell sends a command without waiting for a reply.
+    invoice.Tell(new SendReminder());
+
+    // Ask when the caller needs to know whether payment was accepted.
+    PaymentReply payment = await invoice.Ask(new RecordPayment(250m), ct);
+    Console.WriteLine(payment switch
+    {
+        PaymentAccepted => "Payment recorded",
+        InvoiceRejected rejected => $"Payment rejected: {rejected.Reason}",
+    });
+}
+
+// Reads wait for commands and effects the entity has already received to finish.
+var snapshot = await invoice.GetStateAsync(ct);
+Console.WriteLine(snapshot.State switch
+{
+    Draft => "State: draft",
+    Issued s => $"State: issued, {s.Total:C} due",
+    Paid s => $"State: paid, {s.Total:C}",
+});
+Console.WriteLine($"Last event sequence number: {snapshot.SequenceNr}");
+```
+
+Use the same ID for later commands to the same invoice, and a different ID for another invoice. Calling `Get` again does not reset its state. The in-memory journal used by tests is temporary; recovery across process restarts requires a durable persistence provider configured in the host.
 
 `Ask` infers its return type from `IReplies<TCommand, TReply>`. Tell-only commands have no interface and cannot be asked. `IEntityRef<TCommand>` does not implement `ICanTell`, so Akka.NET's unchecked Ask extension methods cannot bypass the contract. Tell effects accept another typed entity ref and convert its command case before boxing it.
 
