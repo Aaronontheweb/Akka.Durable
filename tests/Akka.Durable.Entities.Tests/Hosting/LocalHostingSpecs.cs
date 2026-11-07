@@ -53,15 +53,39 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         Assert.Equal(3, await CountOf(counter));
     }
 
+    private Task<IActorRef> EntityActorOf(string id) =>
+        Sys.ActorSelection($"/user/durable-counter/{Uri.EscapeDataString(id)}")
+            .ResolveOne(TimeSpan.FromSeconds(5), TestCancellation);
+
+    [Fact]
+    public async Task Host_stops_an_entity_that_passivates_itself()
+    {
+        // Stop sends Passivate to the host; the host must answer with the stop message so the
+        // entity's actor actually terminates, rather than leaving the old incarnation running.
+        var counter = CounterRef("a");
+        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+        var entity = await EntityActorOf("a");
+        Watch(entity);
+
+        await counter.Ask<Accepted>(new Shutdown(), AskCancellation());
+
+        await ExpectTerminatedAsync(entity, cancellationToken: TestCancellation);
+    }
+
     [Fact]
     public async Task Stopped_entity_is_reactivated_by_the_next_message_and_recovers_state()
     {
         var counter = CounterRef("a");
         await counter.Ask<Accepted>(new Increment(3), AskCancellation());
+        var firstIncarnation = await EntityActorOf("a");
+        Watch(firstIncarnation);
 
         await counter.Ask<Accepted>(new Shutdown(), AskCancellation());
+        await ExpectTerminatedAsync(firstIncarnation, cancellationToken: TestCancellation);
 
+        // A new incarnation answers, with its state recovered from the journal.
         Assert.Equal(3, await CountOf(counter));
+        Assert.NotEqual(firstIncarnation, await EntityActorOf("a"));
     }
 
     [Fact]
