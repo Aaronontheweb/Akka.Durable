@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>$(NetLibVersion)</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Published as Aaron.Akka.Durable; the assembly and namespace stay Akka.Durable (same convention as Aaron.Akka.Reminders). -->
+    <PackageId>Aaron.Akka.Durable</PackageId>
+    <Description>Event-sourced durable entities for Akka.NET: describe an entity with Decide and Evolve functions, and Akka.Durable persists, recovers and hosts it locally or in Akka.Cluster.Sharding, with typed entity references, durable reminders and Akka.Hosting integration.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Akka.Durable.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aaron.Akka.Reminders" />
+    <PackageReference Include="Akka.Cluster.Hosting" />
+    <!-- Direct reference so its source generator runs for this project's framework serializer. -->
+    <PackageReference Include="Akka.Serialization.V2" />
+  </ItemGroup>
+</Project>

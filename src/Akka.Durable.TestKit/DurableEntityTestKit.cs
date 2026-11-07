@@ -1,6 +1,3 @@
-using Akka.Durable.Abstractions.Entities;
-using Akka.Durable.Entities;
-using Akka.Durable.Entities.Hosting;
 using Akka.Hosting;
 using Akka.Reminders;
 using Microsoft.Extensions.DependencyInjection;
