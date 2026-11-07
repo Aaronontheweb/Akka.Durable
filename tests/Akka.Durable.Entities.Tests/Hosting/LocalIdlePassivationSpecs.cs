@@ -30,7 +30,7 @@ public class LocalIdlePassivationSpecs(ITestOutputHelper output) : DurableEntity
     }
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
-        builder.WithDurableEntity(Counter.Definition with
+        builder.WithCustomSerializer(CounterSerializer.CreateSerializerDetails).WithDurableEntity(Counter.Definition with
         {
             Options = EntityOptions.Default with { PassivateIdleAfter = IdleTimeout },
         });
@@ -130,7 +130,7 @@ public class LocalIdlePassivationDisabledSpecs(ITestOutputHelper output) : Durab
     }
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
-        builder.WithDurableEntity(Counter.Definition with
+        builder.WithCustomSerializer(CounterSerializer.CreateSerializerDetails).WithDurableEntity(Counter.Definition with
         {
             Options = EntityOptions.Default with { PassivateIdleAfter = TimeSpan.Zero },
         });

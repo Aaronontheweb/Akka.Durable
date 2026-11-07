@@ -193,11 +193,11 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
 
         Send(entity, new Increment(2));
         await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
-        entity.Tell(GetEntityState.Instance, TestActor);
+        entity.Tell(Serialization.GetEntityState.Instance, TestActor);
 
-        var snapshot = await ExpectMsgAsync<StateSnapshot<CounterState>>(cancellationToken: Ct);
-        Assert.Equal(new CounterState(2, false), snapshot.State);
-        Assert.Equal(1, snapshot.SequenceNr);
+        var reply = await ExpectMsgAsync<Serialization.EntityStateReply>(cancellationToken: Ct);
+        Assert.Equal(new CounterState(2, false), reply.State);
+        Assert.Equal(1, reply.SequenceNr);
         Assert.Single(decided);
     }
 

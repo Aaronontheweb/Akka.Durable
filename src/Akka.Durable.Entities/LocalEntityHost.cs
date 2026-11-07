@@ -146,7 +146,8 @@ internal sealed class LocalEntityHost : ReceiveActor, IWithTimers
             entity.Tell(message, sender);
     }
 
-    private sealed class PassivateIdleTick
+    // Timer message the host sends itself; never leaves this actor.
+    private sealed class PassivateIdleTick : INoSerializationVerificationNeeded
     {
         public static readonly PassivateIdleTick Instance = new();
         private PassivateIdleTick() { }

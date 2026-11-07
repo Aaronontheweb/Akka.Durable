@@ -1,6 +1,7 @@
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Abstractions.Entities;
+using Akka.Durable.Entities.Serialization;
 
 namespace Akka.Durable.Entities;
 
@@ -46,6 +47,10 @@ internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef
 
     void ICanTell.Tell(object message, IActorRef sender) => ((ICanTell)_ref).Tell(message, sender);
 
-    public Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default) =>
-        region.Ask<StateSnapshot<TState>>(new ShardingEnvelope(id.Value, GetEntityState.Instance), cancellationToken);
+    public async Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await region.Ask<EntityStateReply>(
+            new ShardingEnvelope(id.Value, GetEntityState.Instance), cancellationToken);
+        return new StateSnapshot<TState>((TState)reply.State, reply.SequenceNr);
+    }
 }

@@ -2,8 +2,12 @@ using Akka.Actor;
 using Akka.Cluster.Hosting;
 using Akka.Cluster.Sharding;
 using Akka.DependencyInjection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Serialization;
 using Akka.Durable.Abstractions.Entities;
+using Akka.Durable.Entities.Serialization;
 using Akka.Hosting;
+using Akka.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -71,6 +75,13 @@ public static class DurableEntityHostingExtensions
         var stopMessage = EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
         var passivateIdleAfter = options.PassivateIdleAfter;
 
+        AddFrameworkSerializerOnce(builder);
+
+        // Fail at startup, before any entity runs, if an entity type would fall back to the
+        // System.Object serializer: events, snapshots, reminders and remote commands all serialize.
+        builder.WithActors((system, _) => EnsureSerializable(system, definition.TypeName,
+            typeof(TState), typeof(TCommand), typeof(TEvent)));
+
         if (shardOptions is not null)
         {
             if (options.NumberOfShards <= 0)
@@ -105,6 +116,49 @@ public static class DurableEntityHostingExtensions
             registry.Register<EntityRegion<TCommand>>(host);
             registry.Register<EntityRegion<TCommand, TState, TEvent>>(host);
         });
+    }
+
+    private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, object> FrameworkSerializerAdded = [];
+
+    /// <summary>Registers Akka.Durable's own serializer once per builder, however many entity types it hosts.</summary>
+    private static void AddFrameworkSerializerOnce(AkkaConfigurationBuilder builder)
+    {
+        if (FrameworkSerializerAdded.TryAdd(builder, FrameworkSerializerAdded))
+            builder.WithCustomSerializer(DurableEntitySerializer.CreateSerializerDetails);
+    }
+
+    private static void EnsureSerializable(ActorSystem system, EntityTypeName typeName, params Type[] types)
+    {
+        var serialization = system.Serialization;
+        var fallback = TryFindSerializer(serialization, typeof(object));
+
+        var unbound = types
+            .Where(type => TryFindSerializer(serialization, type) is not { } serializer
+                           || (fallback is not null && serializer.Identifier == fallback.Identifier))
+            .Select(type => type.FullName)
+            .ToList();
+
+        if (unbound.Count == 0) return;
+
+        throw new InvalidOperationException(
+            $"Durable entity [{typeName.Value}] cannot start: no serializer is registered for " +
+            $"{string.Join(", ", unbound)}, so they would fall back to " +
+            $"{fallback?.GetType().Name ?? "no serializer at all"}. Mark them [AkkaSerializable(Manifest = \"...\")] " +
+            "(for a C# 15 union, the union itself as well as each case) under an [AkkaSerializer<TProtocol>] " +
+            "serializer, and register it with WithCustomSerializer(YourSerializer.CreateSerializerDetails).");
+    }
+
+    private static Serializer? TryFindSerializer(Akka.Serialization.Serialization serialization, Type type)
+    {
+        try
+        {
+            return serialization.FindSerializerForType(type);
+        }
+        catch (SerializationException)
+        {
+            // No binding and no System.Object fallback configured.
+            return null;
+        }
     }
 }
 

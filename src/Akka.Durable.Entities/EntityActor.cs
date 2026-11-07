@@ -2,6 +2,7 @@
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Abstractions.Entities;
+using Akka.Durable.Entities.Serialization;
 using Akka.Event;
 using Akka.Persistence;
 using Akka.Reminders;
@@ -74,9 +75,6 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     {
         Recover<SnapshotOffer>(offer =>
         {
-            // TODO: same C# 15 union caveat as Recover<TEvent>: if TState is a union, a serializer that
-            // hands back the concrete case type (instead of the boxed union) will not match here.
-            // Upstream fix: https://github.com/akkadotnet/akka.net/issues/8906
             if (offer.Snapshot is TState state)
             {
                 State = state;
@@ -97,9 +95,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         });
 
         // Replay only domain events through Evolve. Decide and effects never run during recovery.
-        // TODO: if TEvent is a C# 15 union, a journal that hands back the concrete case type
-        // (rather than the boxed union struct) will not match here.
-        // Upstream fix: https://github.com/akkadotnet/akka.net/issues/8906
+        // A C# 15 union TEvent comes back from the journal as the union, because WithDurableEntity requires
+        // it to have its own serializer (a union marked [AkkaSerializable(Manifest = ...)]).
         Recover<TEvent>(Apply);
 
         Recover<RecoveryCompleted>(_ =>
@@ -144,7 +141,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // incoming messages while events persist and effects run, so a query sent after a command is
         // answered only once that command's events are committed and its effects have finished.
         // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
-        Command<GetEntityState>(_ => Sender.Tell(new StateSnapshot<TState>(State, LastSequenceNr)));
+        Command<GetEntityState>(_ => Sender.Tell(new EntityStateReply(State!, LastSequenceNr)));
 
         Command<TCommand>(command => HandleCommand(command, reminder: null));
         Command<StopEntity>(_ => Context.Stop(Self));
@@ -204,11 +201,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void HandleReminder(ReminderEnvelope envelope)
     {
-        // Handled.Schedule only accepts TCommand, so the payload was a TCommand when it was
-        // scheduled. This check still matters for the reminder-storage round trip:
-        // TODO: same C# 15 union caveat as Recover<TEvent>: a serializer that hands back the
-        // concrete case type (instead of the boxed union) will not match a union TCommand.
-        // Upstream fix: https://github.com/akkadotnet/akka.net/issues/8906
+        // Handled.Schedule only accepts TCommand, so the payload was a TCommand when it was scheduled.
+        // The check still guards against a payload that changed type in reminder storage.
         if (envelope.Message is TCommand command)
         {
             HandleCommand(command, envelope);
@@ -460,7 +454,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <summary>
     /// Stop message handed back by the shard / local host after <see cref="Passivate"/>.
     /// </summary>
-    internal sealed class StopEntity
+    /// <remarks>
+    /// Only ever sent by an entity's own parent (its shard or local host) on the same node, also as the
+    /// shard's hand-off stop message, so it never crosses a serialization boundary.
+    /// </remarks>
+    internal sealed class StopEntity : INoSerializationVerificationNeeded
     {
         public static readonly StopEntity Instance = new();
         private StopEntity() { }

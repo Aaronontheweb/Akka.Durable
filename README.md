@@ -14,7 +14,7 @@ dotnet build
 dotnet test
 ```
 
-The solution targets `net11.0` and enables preview C# features (C# 15 unions are used throughout). Package versions are managed centrally; Akka.NET packages are pinned to 1.6.0-beta5.
+The solution targets `net11.0` and enables preview C# features (C# 15 unions are used throughout). Package versions are managed centrally; Akka.NET packages are pinned to 1.6.0-beta6 (Aaron.Akka.Reminders to 1.6.0-beta5).
 
 | Project | Contents |
 |---|---|
@@ -25,26 +25,51 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 
 ## Defining an entity
 
-An entity is an initial state, a `Decide` function and an `Evolve` function. You don't subclass an actor.
+An entity is an initial state, a `Decide` function and an `Evolve` function. You don't subclass an actor. Its state, commands, events and replies are serialized (see [Serialization](#serialization)), so each one carries a stable manifest and field indexes:
 
 ```csharp
-public sealed record Draft;
-public sealed record Issued(decimal Total, string Recipient);
-public sealed record Paid(decimal Total);
-public readonly union InvoiceState(Draft, Issued, Paid);
+public interface IInvoiceProtocol;
 
-public sealed record IssueInvoice(decimal Total, string Recipient);
-public sealed record RecordPayment(decimal Amount);
-public sealed record SendReminder;
-public readonly union InvoiceCommand(IssueInvoice, RecordPayment, SendReminder);
+[AkkaSerializable(Manifest = "invoice-draft-v1", AllowEmpty = true)]
+public sealed record Draft : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "invoice-issued-state-v1")]
+public sealed record Issued([property: AkkaField(0)] decimal Total, [property: AkkaField(1)] string Recipient) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "invoice-paid-state-v1")]
+public sealed record Paid([property: AkkaField(0)] decimal Total) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "invoice-state-v1")]
+public readonly union InvoiceState(Draft, Issued, Paid) : IInvoiceProtocol;
 
-public sealed record InvoiceIssued(decimal Total, string Recipient, DateTimeOffset At);
-public sealed record PaymentRecorded(decimal Amount);
-public readonly union InvoiceEvent(InvoiceIssued, PaymentRecorded);
+[AkkaSerializable(Manifest = "issue-invoice-v1")]
+public sealed record IssueInvoice([property: AkkaField(0)] decimal Total, [property: AkkaField(1)] string Recipient) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "record-payment-v1")]
+public sealed record RecordPayment([property: AkkaField(0)] decimal Amount) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "send-reminder-v1", AllowEmpty = true)]
+public sealed record SendReminder : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "invoice-command-v1")]
+public readonly union InvoiceCommand(IssueInvoice, RecordPayment, SendReminder) : IInvoiceProtocol;
 
-public sealed record InvoiceAccepted(EntityId Id);
-public sealed record PaymentAccepted;
-public sealed record InvoiceRejected(string Reason);
+[AkkaSerializable(Manifest = "invoice-issued-v1")]
+public sealed record InvoiceIssued(
+    [property: AkkaField(0)] decimal Total,
+    [property: AkkaField(1)] string Recipient,
+    [property: AkkaField(2)] DateTimeOffset At) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "payment-recorded-v1")]
+public sealed record PaymentRecorded([property: AkkaField(0)] decimal Amount) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "invoice-event-v1")]
+public readonly union InvoiceEvent(InvoiceIssued, PaymentRecorded) : IInvoiceProtocol;
+
+[AkkaSerializable(Manifest = "invoice-accepted-v1")]
+public sealed record InvoiceAccepted([property: AkkaField(0)] EntityId Id) : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "payment-accepted-v1", AllowEmpty = true)]
+public sealed record PaymentAccepted : IInvoiceProtocol;
+[AkkaSerializable(Manifest = "invoice-rejected-v1")]
+public sealed record InvoiceRejected([property: AkkaField(0)] string Reason) : IInvoiceProtocol;
+
+[AkkaSerializer<IInvoiceProtocol>("invoices", 120100)]
+public sealed partial class InvoiceSerializer : AkkaSerializer
+{
+    public static partial SerializerDetails CreateSerializerDetails(ExtendedActorSystem system);
+}
 ```
 
 `Decide` returns events to persist and effects to run afterwards. `Evolve` applies one event to the state. The invoice state is a union, so each state carries only the data that is valid for it and no sentinel values are needed.
@@ -93,6 +118,22 @@ public static class Invoice
 - **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
 - **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `.Stop()` passivates the current actor without deleting the entity.
 
+## Serialization
+
+Events and snapshots go to the journal, scheduled commands go to the reminder store, and in a cluster commands, replies and state reads cross the network. All of them are serialized with [Akka.Serialization.V2](https://getakka.net/articles/serialization/source-generated-serialization.html):
+
+- **Give the union itself a manifest, as well as each case.** With `[AkkaSerializable(Manifest = "...")]` on the union, a union value round-trips as the union. That's what the entity's handlers match on.
+- **Register the serializer** next to the entity: `akka.WithCustomSerializer(InvoiceSerializer.CreateSerializerDetails)`.
+- **`WithDurableEntity` checks this at startup.** If `TState`, `TCommand` or `TEvent` would fall back to the default JSON serializer, the host fails to start and the error names the types. Akka.Durable registers its own serializer (id 22560) for the framework's messages.
+- **Recovery fails on an entry it can't read** rather than continuing with missing state. `EntityOptions.SkipUnrecognizedJournalEntries` lets an entity skip such entries, logging an error for each. An `IReadEventAdapter` on the journal can repair or drop them instead.
+
+Stored events and snapshots are a long-lived contract, so evolve these types by extension only:
+
+- **Add, don't change.** New fields must be nullable. New union cases and new messages must be deployed to every reader before any node writes them.
+- **Never change or reuse a manifest or a field index**, and never remove a union case that may already be in a journal. Mark it `[Obsolete]`, stop writing it, and keep handling it in `Evolve`.
+- **Case order doesn't matter;** cases are matched by manifest. Renaming a C# type is safe as long as its manifest stays the same.
+- **Switching a union to a closed record hierarchy, or back,** changes the top-level manifest. Treat it as a migration.
+
 ## Hosting
 
 Register entity refs with DI, then host each entity type either locally or in a shard region:
@@ -105,6 +146,7 @@ builder.Services.AddAkka("billing", (akka, sp) =>
 {
     // Configure an Akka.Persistence journal / snapshot store and Akka.Reminders here.
 
+    akka.WithCustomSerializer(InvoiceSerializer.CreateSerializerDetails);
     akka.WithDurableEntity(Invoice.Definition);
     // or, in a cluster:
     // akka.WithDurableEntity(Invoice.Definition, new ShardOptions { Role = "billing" });
@@ -171,7 +213,7 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .ThenState(s => Assert.True(s is Paid));
 ```
 
-For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI:
+For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite.
 
 ```csharp
 public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
@@ -180,7 +222,9 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
         services.AddScoped<IInvoiceMailer, FakeInvoiceMailer>();
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
-        builder.WithDurableEntity(Invoice.Definition);
+        builder
+            .WithCustomSerializer(InvoiceSerializer.CreateSerializerDetails)
+            .WithDurableEntity(Invoice.Definition);
 
     [Fact]
     public async Task Issued_invoice_accepts_payment()
@@ -199,16 +243,17 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
 
 ## Status and direction
 
-Working today, and tested against the in-memory test journal:
+Working today:
 - Decide, persist, evolve, then effects.
-- Recovery.
+- Recovery, which fails on journal entries it can't interpret.
 - Reminders.
 - Local and sharded hosting.
 - Typed entity refs and state reads.
+- Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
 
 Not done yet:
-- **Serialization.** Union commands and events have only been tested in memory, not through a real serializer and journal.
-- **Snapshot tests.** Snapshotting and retention are implemented but not yet covered by tests.
+- **Snapshot retention tests.** Snapshots are written and recovered, but pruning old snapshots and deleting covered events aren't covered by tests yet.
+- **Message serialization checks in the TestKit.** `VerifyMessageSerialization` stays off by default until [akkadotnet/akka.net#8910](https://github.com/akkadotnet/akka.net/issues/8910) is fixed.
 - **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
 - **Source generation.**
 - **Durable workflows.**
