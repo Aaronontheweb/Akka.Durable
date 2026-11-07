@@ -28,7 +28,10 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 An entity is an initial state, a `Decide` function and an `Evolve` function. You don't subclass an actor.
 
 ```csharp
-public sealed record InvoiceState(decimal Total, bool Paid);
+public sealed record Draft;
+public sealed record Issued(decimal Total, string Recipient);
+public sealed record Paid(decimal Total);
+public readonly union InvoiceState(Draft, Issued, Paid);
 
 public sealed record IssueInvoice(decimal Total, string Recipient);
 public sealed record RecordPayment(decimal Amount);
@@ -44,7 +47,7 @@ public sealed record PaymentAccepted;
 public sealed record InvoiceRejected(string Reason);
 ```
 
-`Decide` returns events to persist and effects to run afterwards. `Evolve` applies one event to the state.
+`Decide` returns events to persist and effects to run afterwards. `Evolve` applies one event to the state. The invoice state is a union, so each state carries only the data that is valid for it and no sentinel values are needed.
 
 ```csharp
 using InvoiceContext = DecisionContext<InvoiceCommand, InvoiceEvent>;
@@ -52,34 +55,35 @@ using InvoiceContext = DecisionContext<InvoiceCommand, InvoiceEvent>;
 public static class Invoice
 {
     public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
-        new(new EntityTypeName("invoices"), _ => new InvoiceState(0, false), Decide, Evolve);
+        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
 
     public static Decision<InvoiceCommand, InvoiceEvent> Decide(
         InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
-        command switch
+        (state, command) switch
         {
-            IssueInvoice c when state.Total == 0 && c.Total > 0 =>
+            (Draft, IssueInvoice c) when c.Total > 0 =>
                 ctx.Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
                     .Reply(new InvoiceAccepted(ctx.EntityId))
                     .Run<IInvoiceMailer>((mailer, ct) => mailer.SendAsync(c.Recipient, ct))
                     .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
 
-            RecordPayment p when !state.Paid && p.Amount == state.Total =>
+            (Issued s, RecordPayment p) when p.Amount == s.Total =>
                 ctx.Persist(new PaymentRecorded(p.Amount))
                     .Reply(new PaymentAccepted())
                     .CancelTimer("reminder"),
 
-            SendReminder when !state.Paid => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
-            SendReminder => ctx.Ignore(),
+            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
+            (_, SendReminder) => ctx.Ignore(),
 
             _ => ctx.None().Reply(new InvoiceRejected("Invalid invoice operation")),
         };
 
     public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
-        @event switch
+        (state, @event) switch
         {
-            InvoiceIssued e => state with { Total = e.Total },
-            PaymentRecorded => state with { Paid = true },
+            (Draft, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
+            (Issued s, PaymentRecorded) => new Paid(s.Total),
+            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
         };
 }
 ```
@@ -138,7 +142,7 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .When(new RecordPayment(250m))
         .ThenPersisted(new PaymentRecorded(250m))
         .ThenReplied(new PaymentAccepted())
-        .ThenState(s => Assert.True(s.Paid));
+        .ThenState(s => Assert.True(s is Paid));
 ```
 
 For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI:

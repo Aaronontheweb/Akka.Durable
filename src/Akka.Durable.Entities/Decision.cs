@@ -7,7 +7,7 @@ namespace Akka.Durable.Entities;
 // The command-processing outcomes are mutually exclusive.
 // Only Handled<TEvent> can contain events and effects.
 public sealed record Ignored;
-public sealed record Unhandled;
+public sealed record NotHandled;
 public sealed record Stashed;
 
 // Built-in, in-process effects. None of these are journaled.
@@ -145,7 +145,7 @@ public sealed record Handled<TCommand, TEvent>(
         onFailure is null ? null : ex => onFailure(ex)!;
 }
 
-public readonly union Decision<TCommand, TEvent>(Handled<TCommand, TEvent>, Ignored, Unhandled, Stashed);
+public readonly union Decision<TCommand, TEvent>(Handled<TCommand, TEvent>, Ignored, NotHandled, Stashed);
 
 /// <summary>
 /// Explicitly typed decision factories. C# deciders normally use the equivalent methods on
@@ -159,6 +159,6 @@ public static class Decisions
     public static Handled<TCommand, TEvent> None<TCommand, TEvent>() => new([], []);
 
     public static Ignored Ignore() => new();
-    public static Unhandled Unhandled() => new();
+    public static NotHandled Unhandled() => new();
     public static Stashed Stash() => new();
 }

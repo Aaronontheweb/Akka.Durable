@@ -28,7 +28,7 @@ public readonly record struct DecisionContext<TCommand, TEvent>(
     public Handled<TCommand, TEvent> None() => Decisions.None<TCommand, TEvent>();
 
     public Ignored Ignore() => Decisions.Ignore();
-    public Unhandled Unhandled() => Decisions.Unhandled();
+    public NotHandled Unhandled() => Decisions.Unhandled();
     public Stashed Stash() => Decisions.Stash();
 }
 

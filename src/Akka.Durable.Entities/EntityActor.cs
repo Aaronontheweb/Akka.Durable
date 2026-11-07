@@ -74,6 +74,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     {
         Recover<SnapshotOffer>(offer =>
         {
+            // TODO: same C# 15 union caveat as Recover<TEvent>: if TState is a union, a serializer that
+            // hands back the concrete case type (instead of the boxed union) will not match here.
+            // Upstream fix: https://github.com/akkadotnet/akka.net/issues/8906
             if (offer.Snapshot is TState state)
             {
                 State = state;
@@ -89,7 +92,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         // Replay only domain events through Evolve. Decide and effects never run during recovery.
         // TODO: if TEvent is a C# 15 union, a journal that hands back the concrete case type
-        // (rather than the boxed union struct) will not match here. See spec P0 serialization item.
+        // (rather than the boxed union struct) will not match here.
+        // Upstream fix: https://github.com/akkadotnet/akka.net/issues/8906
         Recover<TEvent>(Apply);
 
         Recover<RecoveryCompleted>(_ =>
@@ -136,13 +140,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 if (reminder is not null) AckReminder(reminder);
                 break;
 
-            // Fully qualified: inside an actor, bare `Unhandled` binds to ActorBase.Unhandled(object).
-            case global::Akka.Durable.Entities.Unhandled:
+            case NotHandled:
                 // Policy: an unhandled reminder is NACKed (scheduler retry policy applies)
                 // rather than silently acknowledged.
                 if (reminder is not null)
                 {
-                    NackReminder(reminder, "Entity decider returned Unhandled for reminder payload");
+                    NackReminder(reminder, "Entity decider returned NotHandled for reminder payload");
                     Unhandled(reminder);
                 }
                 else
@@ -169,6 +172,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // scheduled. This check still matters for the reminder-storage round trip:
         // TODO: same C# 15 union caveat as Recover<TEvent>: a serializer that hands back the
         // concrete case type (instead of the boxed union) will not match a union TCommand.
+        // Upstream fix: https://github.com/akkadotnet/akka.net/issues/8906
         if (envelope.Message is TCommand command)
         {
             HandleCommand(command, envelope);
