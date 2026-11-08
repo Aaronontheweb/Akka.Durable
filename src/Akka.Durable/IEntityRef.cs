@@ -1,5 +1,7 @@
 ﻿using Akka.Actor;
 using Akka.Serialization.V2;
+using Akka.Streams.Dsl;
+using Akka.Persistence.Query;
 
 namespace Akka.Durable;
 
@@ -70,6 +72,17 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
     /// their events are committed and their effects have finished.
     /// </remarks>
     Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Reads a stored snapshot and follows committed events without activating the publisher.</summary>
+    /// <remarks>
+    /// A fresh subscription emits the latest stored snapshot (or InitialState at zero), then later events.
+    /// Resuming after a sequence older than the snapshot emits that newer baseline instead. Otherwise it
+    /// emits only events after the requested sequence. Each materialization is independent and cancellation
+    /// releases it. Configure WithDurableEntityQueries on this node before calling this method.
+    /// </remarks>
+    /// <param name="offset">NoOffset or null loads a baseline; Sequence resumes exclusively after that publisher sequence.
+    /// Other offset kinds are not supported by the per-entity query.</param>
+    Source<EntityUpdate<TState, TEvent>, NotUsed> Subscribe(Offset? offset = null);
 }
 
 /// <summary>
@@ -91,12 +104,20 @@ public interface IDurableEntityRefs<in TCommand, TState, TEvent>
 [AkkaSerializable]
 public sealed record StateSnapshot<TState>(
     [property: AkkaField(0)] TState State,
-    [property: AkkaField(1)] long SequenceNr);
+    [property: AkkaField(1)] long SequenceNr,
+    [property: AkkaField(2)] EntityIdentity? Publisher = null);
 
 [AkkaSerializable]
 public sealed record CommittedEvent<TEvent>(
     [property: AkkaField(0)] TEvent Event,
-    [property: AkkaField(1)] long SequenceNr);
+    [property: AkkaField(1)] long SequenceNr,
+    [property: AkkaField(2)] EntityIdentity? Publisher = null);
+
+/// <summary>Logical publisher identity carried by subscription updates.</summary>
+[AkkaSerializable(Manifest = "durable-entity-identity-v1")]
+public readonly record struct EntityIdentity(
+    [property: AkkaField(0)] EntityTypeName EntityType,
+    [property: AkkaField(1)] EntityId EntityId);
 
 public readonly union EntityUpdate<TState, TEvent>(
     StateSnapshot<TState>,

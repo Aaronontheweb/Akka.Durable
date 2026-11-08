@@ -32,6 +32,8 @@ internal sealed record EntityStateReply(
 /// Serializer for Akka.Durable's framework messages. Registered automatically by <c>WithDurableEntity</c>.
 /// </summary>
 [AkkaSerializer<IDurableEntityProtocol>("akka-durable", SerializerId)]
+[AkkaSerializerIncludes<EntityTypeName>]
+[AkkaSerializerIncludes<EntityIdentity>]
 internal sealed partial class DurableEntitySerializer : AkkaSerializer
 {
     public const int SerializerId = 22560;

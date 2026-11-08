@@ -71,7 +71,7 @@ public static class Invoice
 
 The [state, command, event, and reply declarations](#state-commands-events-and-replies) are below. You write the domain functions; Akka.Durable supplies the actor.
 
-The calling surface is small: `IEntityRef` sends commands, and `IDurableEntityRef` adds state reads:
+The calling surface is small: `IEntityRef` sends commands, and `IDurableEntityRef` adds state reads and subscriptions:
 
 ```csharp
 public interface IEntityRef<in TCommand>
@@ -87,6 +87,8 @@ public interface IEntityRef<in TCommand>
 public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCommand>
 {
     Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+
+    Source<EntityUpdate<TState, TEvent>, NotUsed> Subscribe(Offset? offset = null);
 }
 ```
 
@@ -349,7 +351,7 @@ Typed `IEntityRef<T>` fields in messages need generic formatter support in Akka.
 
 ## Reading state
 
-Inject `IDurableEntityRefs<TCommand, TState, TEvent>` to get refs that can also read the entity's state. The event type is part of the signature so that event subscriptions can be added without changing it:
+Inject `IDurableEntityRefs<TCommand, TState, TEvent>` to get refs that can also read state and subscribe to events:
 
 ```csharp
 public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent> invoices)
@@ -368,6 +370,45 @@ public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceSta
 ```
 
 The snapshot carries the state and the sequence number of the last applied event. The read waits behind commands the entity has already received, so it sees their committed events and runs only after their effects finish. To read the state of an entity you hold a plain ref or an ID for, get a state-aware ref by ID: `invoices.Get(invoiceRef.Id)`. `TState` must match the registered definition; otherwise `Get` throws Akka.Hosting's `MissingActorRegistryEntryException`.
+
+## Snapshot and event subscriptions (prototype)
+
+Enable queries on each subscribing node, alongside the entity registration. The read journal must support live events by persistence ID, and read the same journal as the entity. For Akka.Persistence.Sql:
+
+```csharp
+akka.WithDurableEntityQueries(Invoice.Definition,
+    new EntityQueryOptions("akka.persistence.query.journal.sql"));
+```
+
+`Subscribe()` returns a cold Akka.Streams source. Each materialization loads the newest persisted snapshot, emits it with its sequence number, then follows subsequent committed events. If no snapshot exists, it emits `InitialState` at sequence zero. Reading does not activate the publisher actor or wait for its current effects to finish.
+
+```csharp
+var subscription = invoices.Get(id).Subscribe()
+    .ViaMaterialized(KillSwitches.Single<EntityUpdate<InvoiceState, InvoiceEvent>>(), Keep.Right)
+    .To(Sink.ForEach<EntityUpdate<InvoiceState, InvoiceEvent>>(update => Console.WriteLine(update)))
+    .Run(system.Materializer());
+
+// Cancel when the consumer is done.
+subscription.Shutdown();
+```
+
+The output is a union, so consumers can match either case:
+
+```csharp
+public readonly union EntityUpdate<TState, TEvent>(
+    StateSnapshot<TState>,
+    CommittedEvent<TEvent>);
+```
+
+Both cases carry `SequenceNr` and `Publisher` (entity type and ID). A snapshot is the baseline for the publisher's state; it can be older than the current state. Event updates retain the publisher's original sequence numbers. A consumer can use normal `Select` stages to convert the union into its own command protocol.
+
+To resume, call `Subscribe(Offset.Sequence(lastProcessedSequenceNr))`. When that position precedes the latest stored snapshot, the source emits the newer snapshot and continues after it. Otherwise it emits only events after the requested position. `Offset.NoOffset()` (or an omitted offset) starts from the latest snapshot. Sequence offsets are exclusive resume positions, scoped to one publisher; time-based UUID and from-end offsets are not supported by this per-entity prototype. This API permits snapshot replacement of older history; it does not promise every historical event will be delivered.
+
+Each materialization owns an independent Persistence Query stream. Akka.Streams backpressure and the read journal's configured buffers control event delivery; cancellation terminates that query. There is no shared subscription manager, snapshot cache, or custom live handoff buffer. Once the initial snapshot is emitted, the subscription retains only its cursor and stream handles.
+
+`SnapshotTimeout` defaults to 30 seconds. Polling frequency, database query throttling, and query buffering remain settings of the chosen Persistence Query plugin. A query can emit committed events while the publisher is still running post-commit effects.
+
+This prototype covers queries and ordinary stream cancellation. Durable entity-owned subscription markers, automatic reconstruction of those subscriptions, and automatic reconnect after query failures are separate work. If retention overtakes an active reader, the stream fails on the sequence gap and the consumer can re-subscribe for a new baseline.
 
 ## Testing
 
@@ -439,7 +480,7 @@ Working today:
 Not done yet:
 - **Snapshot retention tests.** Snapshots are written and recovered, but pruning old snapshots and deleting covered events aren't covered by tests yet.
 - **Message serialization checks in the TestKit.** `VerifyMessageSerialization` stays off by default until [akkadotnet/akka.net#8910](https://github.com/akkadotnet/akka.net/issues/8910) is fixed.
-- **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
+- **Durable subscription ownership.** Snapshot/event query streams exist as a prototype; entity-owned subscription markers and automatic reconstruction are not implemented yet.
 - **Source generation.**
 - **Durable workflows.**
 - **Agents.** Much later, once the foundations exist.

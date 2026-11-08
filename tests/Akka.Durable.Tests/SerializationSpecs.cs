@@ -83,6 +83,14 @@ public sealed class SerializationSpecs : IAsyncLifetime
     }
 
     [Fact]
+    public void Subscription_publisher_identity_round_trips_through_the_framework_serializer()
+    {
+        var identity = new EntityIdentity(Counter.TypeName, new EntityId("tenant/42"));
+        Assert.Equal(DurableEntitySerializer.SerializerId, Serialization.FindSerializerFor(identity).Identifier);
+        Assert.Equal(identity, RoundTrip(identity));
+    }
+
+    [Fact]
     public void Framework_state_query_round_trips()
     {
         Assert.IsType<GetEntityState>(RoundTrip(GetEntityState.Instance));

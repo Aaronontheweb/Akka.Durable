@@ -1,5 +1,7 @@
 using Akka.Actor;
 using Akka.Cluster.Sharding;
+using Akka.Streams.Dsl;
+using Akka.Persistence.Query;
 
 namespace Akka.Durable;
 
@@ -25,7 +27,8 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEnti
 /// <summary>
 /// <see cref="EntityRef{TCommand}"/> that can also read the entity's state.
 /// </summary>
-internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef region) : IDurableEntityRef<TCommand, TState, TEvent>
+internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef region,
+    Func<Offset?, Source<EntityUpdate<TState, TEvent>, NotUsed>>? queries = null) : IDurableEntityRef<TCommand, TState, TEvent>
 {
     private readonly EntityRef<TCommand> _ref = new(id, region);
 
@@ -43,4 +46,7 @@ internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef
             new ShardingEnvelope(id.Value, GetEntityState.Instance), cancellationToken);
         return new StateSnapshot<TState>((TState)reply.State, reply.SequenceNr);
     }
+
+    public Source<EntityUpdate<TState, TEvent>, NotUsed> Subscribe(Offset? offset = null) =>
+        queries?.Invoke(offset) ?? throw new InvalidOperationException("Configure WithDurableEntityQueries to enable subscriptions.");
 }

@@ -1,9 +1,12 @@
+using Akka.Serialization.V2;
+
 namespace Akka.Durable;
 
 /// <summary>
 /// Name of the ShardRegion that will be hosting and running this entity.
 /// </summary>
-public readonly record struct EntityTypeName(string Value);
+[AkkaSerializable(Manifest = "durable-entity-type-v1")]
+public readonly record struct EntityTypeName([property: AkkaField(0)] string Value);
 
 /// <summary>
 /// Inputs to a decision, plus factories for building one.

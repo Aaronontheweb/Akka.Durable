@@ -15,7 +15,9 @@
   <ItemGroup>
     <PackageReference Include="Aaron.Akka.Reminders" />
     <PackageReference Include="Akka.Cluster.Hosting" />
+    <PackageReference Include="Akka.Persistence.Query" />
     <!-- Direct reference so its source generator runs for this project's framework serializer. -->
     <PackageReference Include="Akka.Serialization.V2" />
+    <PackageReference Include="Akka.Streams" />
   </ItemGroup>
 </Project>

@@ -19,12 +19,13 @@
 * **Configurable shard count.** `EntityOptions.NumberOfShards` (default 100) lives on the entity definition so every node agrees on it.
 * **Typed entity refs.** `IEntityRefs&lt;TCommand&gt;` hands out refs by entity ID without starting the entity. A ref's identity is the entity type plus the ID and survives the entity moving between nodes.
 * **State reads.** `IDurableEntityRefs&lt;TCommand, TState, TEvent&gt;` adds `GetStateAsync`, which waits behind commands the entity already received and returns the state with the sequence number of the last applied event.
+* **Subscription queries (prototype).** `Subscribe` exposes a typed Akka.Streams source with a stored snapshot followed by committed events. Sequence offsets resume a publisher's stream; older offsets reset to the latest stored snapshot. Each consumer owns its query and can cancel it independently.
 * **Serialization.** Commands, events, state and replies serialize through Akka.Serialization.V2 with stable manifests and field indexes. `WithDurableEntity` checks at startup that `TState`, `TCommand` and `TEvent` won't fall back to the default JSON serializer, and names the offending types if they would.
 * **Akka.Hosting integration.** `AddDurableEntities` registers entity refs with DI; `WithDurableEntity` wires a definition into the actor system.
 * **TestKit.** `Aaron.Akka.Durable.TestKit` adds `DeciderScenario` Given/When/Then helpers for pure decider tests, and `DurableEntityTestKit` for hosting entities against an in-memory journal with failure injection, in-memory reminders and DI.
 * **Two packages.** `Aaron.Akka.Durable` carries the entity runtime, refs and hosting integration; `Aaron.Akka.Durable.TestKit` carries the test infrastructure. Both live in the `Akka.Durable` namespace.
 
-Not yet implemented: durable workflows, state and event subscriptions, source generation, and snapshot retention tests. `VerifyMessageSerialization` stays off by default in the TestKit until akkadotnet/akka.net#8910 is fixed.</PackageReleaseNotes>
+Not yet implemented: durable workflows, durable subscription ownership, source generation, and snapshot retention tests. `VerifyMessageSerialization` stays off by default in the TestKit until akkadotnet/akka.net#8910 is fixed.</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Target framework definitions. Projects should reference these instead of hardcoding a TFM:

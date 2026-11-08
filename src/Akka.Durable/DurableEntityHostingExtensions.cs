@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using Akka.Hosting;
 using Akka.Serialization;
+using Akka.Streams;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -41,6 +42,21 @@ public sealed class EntityRegion<TCommand, TState, TEvent>
 
 public static class DurableEntityHostingExtensions
 {
+    /// <summary>Enables independent snapshot/event subscriptions using a Persistence Query read journal.</summary>
+    /// <remarks>Register the definition on each reader node. This does not start or recover its entity actors.</remarks>
+    public static AkkaConfigurationBuilder WithDurableEntityQueries<TState, TCommand, TEvent>(
+        this AkkaConfigurationBuilder builder, EntityDefinition<TState, TCommand, TEvent> definition,
+        EntityQueryOptions options)
+    {
+        options.Validate();
+        return builder.WithActors((system, _, resolver) =>
+        {
+            var reader = new EntityQueryReader<TState, TCommand, TEvent>(system, definition, options);
+            resolver.GetService<IServiceProvider>().GetRequiredService<EntityQueryRegistry>()
+                .Register<TState, TCommand, TEvent>(definition.TypeName, reader, system.Materializer(), options);
+        });
+    }
+
     /// <summary>
     /// Registers <see cref="IEntityRefs{TCommand}"/> and <see cref="IDurableEntityRefs{TCommand,TState,TEvent}"/>
     /// for injection. Call once alongside <see cref="WithDurableEntity{TState,TCommand,TEvent}"/>.
@@ -49,6 +65,7 @@ public static class DurableEntityHostingExtensions
     {
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
         services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
+        services.TryAddSingleton<EntityQueryRegistry>();
         return services;
     }
 
@@ -165,8 +182,11 @@ internal sealed class EntityRefs<TCommand>(IRequiredActor<EntityRegion<TCommand>
     public IEntityRef<TCommand> Get(EntityId id) => new EntityRef<TCommand>(id, region.ActorRef);
 }
 
-internal sealed class DurableEntityRefs<TCommand, TState, TEvent>(IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region)
+internal sealed class DurableEntityRefs<TCommand, TState, TEvent>(
+    IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region, EntityQueryRegistry queries)
     : IDurableEntityRefs<TCommand, TState, TEvent>
 {
-    public IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id) => new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef);
+    public IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id) =>
+        new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef,
+            offset => queries.Subscribe<TState, TCommand, TEvent>(id, offset));
 }

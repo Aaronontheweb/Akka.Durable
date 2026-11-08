@@ -24,12 +24,18 @@ public sealed class TypedContractSpecs
             using System.Threading;
             using System.Threading.Tasks;
             using Akka.Actor;
+            using Akka;
             using Akka.Durable;
             using Akka.Durable.Tests.Fixtures;
+            using Akka.Streams;
+            using Akka.Streams.Dsl;
+            using Akka.Persistence.Query;
             public static class Caller
             {
                 public static void Call(IEntityRef<CounterCommand> entity,
-                    DecisionContext<CounterState, CounterCommand, CounterEvent> ctx)
+                    DecisionContext<CounterState, CounterCommand, CounterEvent> ctx,
+                    IDurableEntityRef<CounterCommand, CounterState, CounterEvent> durable,
+                    ActorSystem system)
                 {
             """ + body + """
                 }
@@ -73,6 +79,21 @@ public sealed class TypedContractSpecs
                 onFailure: (error, next) => next);
             """);
 
+        Assert.True(errors.IsEmpty, string.Join(Environment.NewLine, errors));
+    }
+
+    [Fact]
+    public void Typed_subscription_sources_compose_with_normal_stream_stages_and_cancellation()
+    {
+        var errors = Compile("""
+            Source<EntityUpdate<CounterState, CounterEvent>, NotUsed> updates = durable.Subscribe(Offset.Sequence(42));
+            Source<CounterCommand, NotUsed> commands = updates.Select(update => (CounterCommand)new Noop());
+            var subscription = updates
+                .ViaMaterialized(KillSwitches.Single<EntityUpdate<CounterState, CounterEvent>>(), Keep.Right)
+                .To(Sink.ForEach<EntityUpdate<CounterState, CounterEvent>>(update => Console.WriteLine(update)))
+                .Run(system.Materializer());
+            subscription.Shutdown();
+            """);
         Assert.True(errors.IsEmpty, string.Join(Environment.NewLine, errors));
     }
 
