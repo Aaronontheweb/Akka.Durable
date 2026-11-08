@@ -15,7 +15,14 @@ namespace Akka.Durable.Tests.Hosting;
 public sealed class SqlEntityQuerySpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
 {
     private readonly string _databasePath = Path.Combine(Path.GetTempPath(), $"akka-durable-queries-{Guid.NewGuid():N}.db");
+    private string ConnectionString => $"Data Source={_databasePath};Pooling=False";
     private int _initializations;
+
+    protected override async Task AfterAllAsync()
+    {
+        await base.AfterAllAsync();
+        File.Delete(_databasePath);
+    }
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
@@ -33,7 +40,7 @@ public sealed class SqlEntityQuerySpecs(ITestOutputHelper output) : DurableEntit
                 PassivateIdleAfter = TimeSpan.Zero
             }
         };
-        builder.WithSqlPersistence(connectionString: $"Data Source={_databasePath}", providerName: ProviderName.SQLiteMS)
+        builder.WithSqlPersistence(connectionString: ConnectionString, providerName: ProviderName.SQLiteMS)
             .AddHocon("akka.persistence.query.journal.sql.refresh-interval = 20ms", HoconAddMode.Prepend)
             .WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
             .WithDurableEntity(definition)
@@ -54,7 +61,7 @@ public sealed class SqlEntityQuerySpecs(ITestOutputHelper output) : DurableEntit
         await counter.Ask(new Increment(4), AskCancellation());
         await AwaitAssertAsync(() =>
         {
-            using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_databasePath}");
+            using var connection = new Microsoft.Data.Sqlite.SqliteConnection(ConnectionString);
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT COUNT(*) FROM snapshot";
@@ -168,12 +175,8 @@ public sealed class SqlEntityQuerySpecs(ITestOutputHelper output) : DurableEntit
 
             var error = await Record.ExceptionAsync(async () =>
                 await pending.WaitAsync(TimeSpan.FromSeconds(5), TestCancellation));
-            if (error is null) Assert.False((await pending).HasValue);
-            else
-            {
-                Assert.IsNotType<TimeoutException>(error);
-                Assert.False(error is OperationCanceledException, error.ToString());
-            }
+            // The owned queue can stop before or after the pending pull reaches it.
+            Assert.True(error is AbruptStageTerminationException or StreamDetachedException, error?.ToString());
             Assert.True(materializer.IsShutdown);
             Assert.False(Sys.Materializer().IsShutdown);
             Assert.Equal(7, await Source.Single(7).RunWith(Sink.First<int>(), Sys.Materializer()));

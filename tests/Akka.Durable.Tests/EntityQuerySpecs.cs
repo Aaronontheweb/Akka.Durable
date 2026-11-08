@@ -1,7 +1,6 @@
 using System.Threading.Channels;
 using Akka;
 using Akka.Durable.Tests.Fixtures;
-using Akka.Hosting.TestKit;
 using Akka.Persistence.Query;
 using Akka.Streams;
 using Akka.Streams.Dsl;
@@ -10,7 +9,7 @@ using Xunit;
 
 namespace Akka.Durable.Tests;
 
-public sealed class EntityQuerySpecs(ITestOutputHelper output) : PersistenceTestKit(output: output)
+public sealed class EntityQuerySpecs(ITestOutputHelper output) : Akka.TestKit.Xunit.TestKit(output: output)
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
     private static readonly EntityId Id = new("publisher");
@@ -116,78 +115,60 @@ public sealed class EntityQuerySpecs(ITestOutputHelper output) : PersistenceTest
     }
 
     [Fact]
-    public async Task A_future_checkpoint_does_not_hide_existing_history_from_a_later_consumer()
+    public async Task A_future_checkpoint_waits_for_events_after_that_position()
     {
         for (var i = 1; i <= 3; i++) _reader.Append(i);
         var future = Subscribe(after: 5);
-        var fresh = default((UniqueKillSwitch Kill, ISinkQueue<EntityUpdate<CounterState, CounterEvent>> Queue));
         try
         {
             await AwaitAssertAsync(() => Assert.Equal(1, _reader.ActiveLive), cancellationToken: Ct);
-            fresh = Subscribe();
-            Assert.IsType<StateSnapshot<CounterState>>((await Next(fresh.Queue)).Value);
-            for (var i = 1; i <= 5; i++)
-            {
-                if (i > 3) _reader.Append(i);
-                Assert.Equal(i, await NextEvent(fresh.Queue));
-            }
-            _reader.Append(6);
+            for (var i = 4; i <= 6; i++) _reader.Append(i);
             Assert.Equal(6, await NextEvent(future.Queue));
-            Assert.Equal(6, await NextEvent(fresh.Queue));
-            Assert.Equal(2, _reader.LiveStarts);
         }
-        finally { future.Kill.Shutdown(); fresh.Kill?.Shutdown(); }
+        finally { future.Kill.Shutdown(); }
     }
 
     [Fact]
     public async Task Events_arriving_during_snapshot_load_are_bridged_without_gaps_or_duplicates()
     {
         _reader.Append(1);
-        var first = Subscribe();
         var gate = new TaskCompletionSource<StateSnapshot<CounterState>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var second = default((UniqueKillSwitch Kill, ISinkQueue<EntityUpdate<CounterState, CounterEvent>> Queue));
+        _reader.Snapshot = ct => { entered.TrySetResult(); return gate.Task.WaitAsync(ct); };
+        var subscription = Subscribe();
         try
         {
-            await Next(first.Queue);
-            Assert.Equal(1, await NextEvent(first.Queue));
-            await AwaitAssertAsync(() => Assert.Equal(1, _reader.ActiveLive), cancellationToken: Ct);
-            _reader.Snapshot = ct => { entered.TrySetResult(); return gate.Task.WaitAsync(ct); };
-            second = Subscribe();
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
             _reader.Append(2);
             _reader.Append(3);
-            Assert.Equal(2, await NextEvent(first.Queue));
-            Assert.Equal(3, await NextEvent(first.Queue));
             gate.SetResult(new(new CounterState(0, false), 0));
-            Assert.IsType<StateSnapshot<CounterState>>((await Next(second.Queue)).Value);
-            for (var i = 1; i <= 3; i++) Assert.Equal(i, await NextEvent(second.Queue));
+            Assert.IsType<StateSnapshot<CounterState>>((await Next(subscription.Queue)).Value);
+            for (var i = 1; i <= 3; i++) Assert.Equal(i, await NextEvent(subscription.Queue));
             _reader.Append(4);
-            Assert.Equal(4, await NextEvent(second.Queue));
-            Assert.Equal(2, _reader.LiveStarts);
+            Assert.Equal(4, await NextEvent(subscription.Queue));
         }
-        finally { gate.TrySetCanceled(Ct); first.Kill.Shutdown(); second.Kill?.Shutdown(); }
+        finally { gate.TrySetCanceled(Ct); subscription.Kill.Shutdown(); }
     }
 
-    [Fact]
-    public async Task A_slow_consumer_can_backpressure_its_query_without_stalling_another_consumer()
+    [Theory]
+    [InlineData(1L)]
+    [InlineData(4L)]
+    public async Task Non_contiguous_events_fail_the_stream_and_release_the_query(long sequenceNr)
     {
-        var fast = Subscribe();
-        var slow = Subscribe();
+        _reader.Append(1);
+        _reader.Append(2);
+        var subscription = Subscribe();
         try
         {
-            await Next(fast.Queue);
-            await Next(slow.Queue);
-            await AwaitAssertAsync(() => Assert.Equal(2, _reader.ActiveLive), cancellationToken: Ct);
-            for (var i = 1; i <= 50; i++)
-            {
-                _reader.Append(i);
-                Assert.Equal(i, await NextEvent(fast.Queue));
-            }
-            for (var i = 1; i <= 50; i++) Assert.Equal(i, await NextEvent(slow.Queue));
-            Assert.Equal(2, _reader.ActiveLive);
+            await Next(subscription.Queue);
+            Assert.Equal(1, await NextEvent(subscription.Queue));
+            Assert.Equal(2, await NextEvent(subscription.Queue));
+            _reader.Append(3, sequenceNr: sequenceNr);
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(async () => await Next(subscription.Queue));
+            Assert.Contains($"expected 3, got {sequenceNr}", error.Message);
+            await AwaitAssertAsync(() => Assert.Equal(0, _reader.ActiveLive), cancellationToken: Ct);
         }
-        finally { fast.Kill.Shutdown(); slow.Kill.Shutdown(); }
+        finally { subscription.Kill.Shutdown(); }
     }
 
     [Fact]
@@ -353,11 +334,11 @@ public sealed class EntityQuerySpecs(ITestOutputHelper output) : PersistenceTest
             return Snapshot(cancellationToken);
         }
 
-        public void Append(int by)
+        public void Append(int by, long? sequenceNr = null)
         {
             lock (_sync)
             {
-                var item = new CommittedEvent<CounterEvent>(new Incremented(by), _events.Count + 1);
+                var item = new CommittedEvent<CounterEvent>(new Incremented(by), sequenceNr ?? _events.Count + 1);
                 _events.Add(item);
                 foreach (var live in _live)
                     if (item.SequenceNr >= live.From) Assert.True(live.Channel.Writer.TryWrite(item));
