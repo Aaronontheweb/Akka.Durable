@@ -271,7 +271,7 @@ To retry without restarting the entity, re-arm the same reminder key in the fail
 onFailure: (error, next) => next.Schedule("reminder", TimeSpan.FromHours(1), new SendReminder())
 ```
 
-The old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact; it may log `NotFound` because the old occurrence was superseded.
+The old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact. A `NotFound` acknowledgement for the superseded occurrence is logged at Debug.
 
 Events explicitly persisted before `Run` remain committed if the operation fails. This API does not provide a transaction with an external service or automatic retries after a crash.
 

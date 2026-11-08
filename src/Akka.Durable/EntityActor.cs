@@ -428,6 +428,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         {
             if (t.IsFaulted)
                 log.Warning(t.Exception, "Failed to ack reminder {0}; it may be redelivered", envelope.Key);
+            else if (t.Result.ResponseCode == ReminderAckResponseCode.NotFound)
+                log.Debug("Ack for superseded or removed reminder {0} returned NotFound: {1}", envelope.Key, t.Result.Message);
             else if (t.Result.ResponseCode != ReminderAckResponseCode.Success)
                 log.Warning("Ack for reminder {0} returned {1}: {2}", envelope.Key, t.Result.ResponseCode, t.Result.Message);
         }, TaskScheduler.Default);

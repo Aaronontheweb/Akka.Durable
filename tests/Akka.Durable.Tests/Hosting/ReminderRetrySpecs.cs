@@ -1,6 +1,5 @@
 using Akka.Cluster.Hosting;
 using Akka.Durable.Tests.Fixtures;
-using Akka.Event;
 using Akka.Reminders;
 using Xunit;
 
@@ -42,23 +41,17 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
         Assert.Equal(1, Volatile.Read(ref _initializations));
         var started = DateTimeOffset.UtcNow;
 
-        // The stale-ack warning is emitted after storage has processed the terminal stage's ack.
-        await EventFilter.Custom<Warning>(warning =>
-            warning.Message.ToString()!.StartsWith("Ack for reminder", StringComparison.Ordinal)
-            && warning.Message.ToString()!.Contains("returned NotFound", StringComparison.Ordinal))
-            .ExpectOneAsync(() =>
-            {
-                counter.Tell(new RemindLater(TimeSpan.FromMilliseconds(100)));
-                return Task.CompletedTask;
-            }, TestCancellation);
-
+        counter.Tell(new RemindLater(TimeSpan.FromMilliseconds(100)));
         var client = Sys.ReminderClient().CreateClient(Counter.TypeName.Value, "retry");
-        var listed = await client.ListRemindersAsync(TestCancellation);
-        Assert.Equal(FetchRemindersResponseCode.Success, listed.ResponseCode);
-        var replacement = Assert.Single(listed.Reminders);
-        Assert.Equal(new ReminderKey("reminder"), replacement.Key);
-        Assert.IsType<Noop>(Assert.IsType<CounterCommand>(replacement.Message).Value);
-        Assert.InRange(replacement.DueTimeUtc, started.AddHours(1), DateTimeOffset.UtcNow.AddHours(1));
+        await AwaitAssertAsync(async () =>
+        {
+            var listed = await client.ListRemindersAsync(TestCancellation);
+            Assert.Equal(FetchRemindersResponseCode.Success, listed.ResponseCode);
+            var replacement = Assert.Single(listed.Reminders);
+            Assert.Equal(new ReminderKey("reminder"), replacement.Key);
+            Assert.IsType<Noop>(Assert.IsType<CounterCommand>(replacement.Message).Value);
+            Assert.InRange(replacement.DueTimeUtc, started.AddHours(1), DateTimeOffset.UtcNow.AddHours(1));
+        }, cancellationToken: TestCancellation);
 
         var snapshot = await counter.GetStateAsync(AskCancellation());
         Assert.Equal(new CounterState(5, false), snapshot.State);
