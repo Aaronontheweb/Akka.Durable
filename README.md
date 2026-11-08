@@ -90,7 +90,7 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
 }
 ```
 
-`Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`.
+`Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`. The registry is keyed by command type, so each entity type must have its own command type.
 
 ## Getting started
 
@@ -264,6 +264,14 @@ The reply follows the event commit and precedes the invocation. These continuati
 `ctx.None()` and `ctx.Persist(...)` also produce an `EffectContext` for commands without replies. Its `Run` and `Stop` return a finished `EffectDecision`, so effects cannot be appended after either. `ctx.For(command)` produces a `RequestContext` whose continuations retain that command's reply type.
 
 Returning an empty failure branch accepts the failure and completes the command. For reminder commands that also acknowledges the reminder; the `SendReminder` example above deliberately escalates instead, preserving redelivery on failure. Choose that policy explicitly for each operation.
+
+To retry without restarting the entity, re-arm the same reminder key in the failure branch:
+
+```csharp
+onFailure: (error, next) => next.Schedule("reminder", TimeSpan.FromHours(1), new SendReminder())
+```
+
+The old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact; it may log `NotFound` because the old occurrence was superseded.
 
 Events explicitly persisted before `Run` remain committed if the operation fails. This API does not provide a transaction with an external service or automatic retries after a crash.
 
