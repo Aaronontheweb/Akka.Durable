@@ -105,7 +105,8 @@ public static class Railway
             onSuccess: (result, next) => result < 0
                 ? next.Reply(new AdjustmentRejected("negative result"))
                 : next.Persist(new Added(result)).Reply(new Adjusted(next.State.Count + result)),
-            onFailure: (error, next) => next.Reply(new AdjustmentRejected(error.Message)));
+            onFailure: (error, next)
+                => next.Reply(new AdjustmentRejected(error.Message)));
 }
 
 public sealed class Calculator
