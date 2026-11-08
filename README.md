@@ -406,6 +406,8 @@ To resume, call `Subscribe(Offset.Sequence(lastProcessedSequenceNr))`. When that
 
 Each materialization owns an independent Persistence Query stream. Akka.Streams backpressure and the read journal's configured buffers control event delivery; cancellation terminates that query. There is no shared subscription manager, snapshot cache, or custom live handoff buffer. Once the initial snapshot is emitted, the subscription retains only its cursor and stream handles.
 
+All query readers on a node use one owned materializer beneath `/system/durable-queries`. Its stream actors stay in that infrastructure subtree, and stopping the owner shuts down its queries. Consumer pipelines still use the materializer supplied by the caller.
+
 `SnapshotTimeout` defaults to 30 seconds. Polling frequency, database query throttling, and query buffering remain settings of the chosen Persistence Query plugin. A query can emit committed events while the publisher is still running post-commit effects.
 
 This prototype covers queries and ordinary stream cancellation. Durable entity-owned subscription markers, automatic reconstruction of those subscriptions, and automatic reconnect after query failures are separate work. If retention overtakes an active reader, the stream fails on the sequence gap and the consumer can re-subscribe for a new baseline.

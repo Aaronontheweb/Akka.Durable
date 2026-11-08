@@ -37,7 +37,10 @@ public sealed class SqlEntityQuerySpecs(ITestOutputHelper output) : DurableEntit
             .AddHocon("akka.persistence.query.journal.sql.refresh-interval = 20ms", HoconAddMode.Prepend)
             .WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
             .WithDurableEntity(definition)
-            .WithDurableEntityQueries(definition, new EntityQueryOptions("akka.persistence.query.journal.sql"));
+            .WithDurableEntityQueries(definition, new EntityQueryOptions("akka.persistence.query.journal.sql"))
+            .WithCustomSerializer(RailwaySerializer.CreateSerializerDetails)
+            .WithDurableEntity(Railway.Definition)
+            .WithDurableEntityQueries(Railway.Definition, new EntityQueryOptions("akka.persistence.query.journal.sql"));
     }
 
     private IDurableEntityRef<CounterCommand, CounterState, CounterEvent> CounterRef(string id = "a") =>
@@ -112,6 +115,68 @@ public sealed class SqlEntityQuerySpecs(ITestOutputHelper output) : DurableEntit
             if (baselineExpected)
                 Assert.Equal(2, Assert.IsType<StateSnapshot<CounterState>>((await Next(subscription.Queue)).Value).SequenceNr);
             Assert.Equal(3, Assert.IsType<CommittedEvent<CounterEvent>>((await Next(subscription.Queue)).Value).SequenceNr);
+        }
+        finally { subscription.Kill.Shutdown(); }
+    }
+
+    [Fact]
+    public async Task Entity_types_share_one_system_query_owner_and_materialize_readers_beneath_it()
+    {
+        var runtime = EntityQueryRuntime.Get(Sys);
+        var materializer = await runtime.Materializer.WaitAsync(TimeSpan.FromSeconds(5), TestCancellation);
+        Assert.Equal("/system/durable-queries", runtime.Owner.Path.ToStringWithoutAddress());
+        Assert.Equal(runtime.Owner.Path, materializer.Supervisor.Path.Parent);
+        Assert.NotSame(Sys.Materializer(), materializer);
+
+        var counter = Subscribe(CounterRef("counter-reader"));
+        var railway = DurableEntityRef<RailwayCommand, RailwayState, RailwayEvent>("railway-reader").Subscribe()
+            .ViaMaterialized(KillSwitches.Single<EntityUpdate<RailwayState, RailwayEvent>>(), Keep.Right)
+            .ToMaterialized(Sink.Queue<EntityUpdate<RailwayState, RailwayEvent>>(), Keep.Both)
+            .Run(Sys.Materializer());
+        try
+        {
+            Assert.IsType<StateSnapshot<CounterState>>((await Next(counter.Queue)).Value);
+            var railwayBaseline = await railway.Item2.PullAsync().WaitAsync(TimeSpan.FromSeconds(5), TestCancellation);
+            Assert.IsType<StateSnapshot<RailwayState>>(railwayBaseline.Value.Value);
+
+            var probe = CreateTestProbe();
+            Sys.ActorSelection($"{materializer.Supervisor.Path}/*").Tell(new Identify("query-stages"), probe.Ref);
+            var stages = await probe.ReceiveNAsync(2, cancellationToken: TestCancellation).ToListAsync(TestCancellation);
+            Assert.All(stages, stage =>
+            {
+                var actor = Assert.IsType<ActorIdentity>(stage).Subject;
+                Assert.NotNull(actor);
+                Assert.Equal(materializer.Supervisor.Path, actor.Path.Parent);
+            });
+        }
+        finally { counter.Kill.Shutdown(); railway.Item1.Shutdown(); }
+    }
+
+    [Fact]
+    public async Task Stopping_the_system_query_owner_terminates_queries_without_stopping_the_default_materializer()
+    {
+        var runtime = EntityQueryRuntime.Get(Sys);
+        var materializer = await runtime.Materializer.WaitAsync(TimeSpan.FromSeconds(5), TestCancellation);
+        var subscription = Subscribe(CounterRef("owner-stop"));
+        try
+        {
+            Assert.IsType<StateSnapshot<CounterState>>((await Next(subscription.Queue)).Value);
+            var pending = subscription.Queue.PullAsync();
+            Watch(runtime.Owner);
+            Sys.Stop(runtime.Owner);
+            await ExpectTerminatedAsync(runtime.Owner, cancellationToken: TestCancellation);
+
+            var error = await Record.ExceptionAsync(async () =>
+                await pending.WaitAsync(TimeSpan.FromSeconds(5), TestCancellation));
+            if (error is null) Assert.False((await pending).HasValue);
+            else
+            {
+                Assert.IsNotType<TimeoutException>(error);
+                Assert.False(error is OperationCanceledException, error.ToString());
+            }
+            Assert.True(materializer.IsShutdown);
+            Assert.False(Sys.Materializer().IsShutdown);
+            Assert.Equal(7, await Source.Single(7).RunWith(Sink.First<int>(), Sys.Materializer()));
         }
         finally { subscription.Kill.Shutdown(); }
     }

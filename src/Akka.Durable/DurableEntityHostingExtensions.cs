@@ -6,7 +6,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using Akka.Hosting;
 using Akka.Serialization;
-using Akka.Streams;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -49,11 +48,12 @@ public static class DurableEntityHostingExtensions
         EntityQueryOptions options)
     {
         options.Validate();
-        return builder.WithActors((system, _, resolver) =>
+        return builder.WithActors(async (system, _, resolver) =>
         {
             var reader = new EntityQueryReader<TState, TCommand, TEvent>(system, definition, options);
+            var materializer = await EntityQueryRuntime.Get(system).Materializer;
             resolver.GetService<IServiceProvider>().GetRequiredService<EntityQueryRegistry>()
-                .Register<TState, TCommand, TEvent>(definition.TypeName, reader, system.Materializer(), options);
+                .Register<TState, TCommand, TEvent>(definition.TypeName, reader, materializer, options);
         });
     }
 
