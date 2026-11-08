@@ -63,10 +63,10 @@ public sealed class SqlJournalRoundTripSpecs : IDisposable
         using (var writer = await StartHost(definition))
         {
             var counter = CounterRef(writer, "a");
-            await counter.Ask<Accepted>(new Increment(1), AskTimeout());
-            await counter.Ask<Accepted>(new Increment(2), AskTimeout());
+            await counter.Ask(new Increment(1), AskTimeout());
+            await counter.Ask(new Increment(2), AskTimeout());
             // With SnapshotEvery = 2 this third event lands after the snapshot, so recovery needs both.
-            await counter.Ask<Accepted>(new LockCounter(), AskTimeout());
+            await counter.Ask(new LockCounter(), AskTimeout());
             await writer.StopAsync(Ct);
         }
 

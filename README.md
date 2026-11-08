@@ -3,9 +3,94 @@
 > [!NOTE]
 > Akka.Durable is a proof of concept, not an official Akka.NET project. It is published as `Aaron.Akka.Durable` because the `Akka.*` NuGet prefix is reserved for official Akka.NET packages. Expect breaking changes between releases.
 
-Akka.Durable is an early-stage project exploring durable entities and workflows on Akka.NET. The intended foundation is Akka.Persistence and Cluster Sharding, with a local development and execution story as well as clustered deployments. Agent capabilities are a much later possibility, not part of the initial scope.
+Akka.Durable gives you event-sourced entities on Akka.NET. Define their behavior with pure `Decide` and `Evolve` functions, then send commands through typed references. The runtime handles persistence, recovery, and routing in local or clustered deployments.
 
-The design draws on a functional event-sourcing decider: pure decisions and state transitions, with persistence, recovery, delivery, and other effects handled by a runtime shell. A first vertical slice of durable entities exists; workflows are not implemented yet.
+## Inject it. Send a message.
+
+**Entity reference factories are .NET DI services.** Call `AddDurableEntities()` at startup, then inject `IEntityRefs<InvoiceCommand>` into any controller, hosted service, or application service:
+
+```csharp
+public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
+{
+    public Task<IssueReply> IssueAsync(EntityId id, CancellationToken ct) =>
+        invoices.Get(id).Ask(new IssueInvoice(250m, "billing@example.com"), ct);
+
+    public void Remind(EntityId id) =>
+        invoices.Get(id).Tell(new SendReminder());
+}
+```
+
+That's the caller API: choose an ID, send a command, get its declared reply type. The first message creates or recovers the entity. The same calls work with local hosting and Cluster Sharding. [Register and host the entity](#hosting) once at startup.
+
+## Define its behavior
+
+Here is the `Invoice` behind those calls. `Decide` produces events and effects; `Evolve` computes the state from each persisted event. The `InvoiceCommand`, `IssueInvoice`, and `SendReminder` types are the same ones used by the injected service above.
+
+```csharp
+using InvoiceContext = DecisionContext<InvoiceState, InvoiceCommand, InvoiceEvent>;
+
+public static class Invoice
+{
+    public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
+        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
+
+    public static Decision<InvoiceCommand, InvoiceEvent> Decide(
+        InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
+        (state, command) switch
+        {
+            (Draft, IssueInvoice c) when c.Total > 0 =>
+                ctx.For(c).Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
+                    .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
+                    .Reply(new InvoiceAccepted(ctx.EntityId)),
+
+            (Issued s, RecordPayment p) when p.Amount == s.Total =>
+                ctx.For(p).Persist(new PaymentRecorded(p.Amount))
+                    .CancelTimer("reminder")
+                    .Reply(new PaymentAccepted()),
+
+            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>(
+                (mailer, ct) => mailer.RemindAsync(ct),
+                onSuccess: next => next,
+                // Escalate so a failed reminder remains eligible for redelivery.
+                onFailure: (error, _) => throw new InvalidOperationException("Reminder delivery failed", error)),
+            (_, SendReminder) => ctx.Ignore(),
+
+            (_, IssueInvoice c) => ctx.For(c).Reply(new InvoiceRejected("Invalid invoice operation")),
+            (_, RecordPayment p) => ctx.For(p).Reply(new InvoiceRejected("Invalid invoice operation")),
+        };
+
+    public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
+        (state, @event) switch
+        {
+            (Draft, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
+            (Issued s, PaymentRecorded) => new Paid(s.Total),
+            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
+        };
+}
+```
+
+The [state, command, event, and reply declarations](#state-commands-events-and-replies) are below. You write the domain functions; Akka.Durable supplies the actor.
+
+The calling surface is small: `IEntityRef` sends commands, and `IDurableEntityRef` adds state reads:
+
+```csharp
+public interface IEntityRef<in TCommand>
+{
+    EntityId Id { get; }
+
+    void Tell(TCommand command, IActorRef? sender = null);
+
+    Task<TReply> Ask<TReply>(IReplies<TCommand, TReply> command,
+        CancellationToken cancellationToken = default) where TReply : notnull;
+}
+
+public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCommand>
+{
+    Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+}
+```
+
+`Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`. The registry is keyed by command type, so each entity type must have its own command type.
 
 ## Getting started
 
@@ -24,47 +109,95 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 | `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
 | `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
-## Defining an entity
+## State, commands, events, and replies
 
 An entity is an initial state, a `Decide` function and an `Evolve` function. You don't subclass an actor. Its state, commands, events and replies are serialized (see [Serialization](#serialization)), so each one carries a stable manifest and field indexes:
 
 ```csharp
 public interface IInvoiceProtocol;
 
+// State
+
 [AkkaSerializable(Manifest = "invoice-draft-v1", AllowEmpty = true)]
 public sealed record Draft : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "invoice-issued-state-v1")]
-public sealed record Issued([property: AkkaField(0)] decimal Total, [property: AkkaField(1)] string Recipient) : IInvoiceProtocol;
+public sealed record Issued(
+    [property: AkkaField(0)] decimal Total,
+    [property: AkkaField(1)] string Recipient) : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "invoice-paid-state-v1")]
 public sealed record Paid([property: AkkaField(0)] decimal Total) : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "invoice-state-v1")]
-public readonly union InvoiceState(Draft, Issued, Paid) : IInvoiceProtocol;
+public readonly union InvoiceState(
+    Draft,
+    Issued,
+    Paid) : IInvoiceProtocol;
+
+// Commands
 
 [AkkaSerializable(Manifest = "issue-invoice-v1")]
-public sealed record IssueInvoice([property: AkkaField(0)] decimal Total, [property: AkkaField(1)] string Recipient) : IInvoiceProtocol;
+public sealed record IssueInvoice(
+    [property: AkkaField(0)] decimal Total,
+    [property: AkkaField(1)] string Recipient)
+    : IInvoiceProtocol, IReplies<InvoiceCommand, IssueReply>
+{
+    public InvoiceCommand ToCommand() => new(this);
+}
+
 [AkkaSerializable(Manifest = "record-payment-v1")]
-public sealed record RecordPayment([property: AkkaField(0)] decimal Amount) : IInvoiceProtocol;
+public sealed record RecordPayment([property: AkkaField(0)] decimal Amount)
+    : IInvoiceProtocol, IReplies<InvoiceCommand, PaymentReply>
+{
+    public InvoiceCommand ToCommand() => new(this);
+}
+
 [AkkaSerializable(Manifest = "send-reminder-v1", AllowEmpty = true)]
 public sealed record SendReminder : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "invoice-command-v1")]
-public readonly union InvoiceCommand(IssueInvoice, RecordPayment, SendReminder) : IInvoiceProtocol;
+public readonly union InvoiceCommand(
+    IssueInvoice,
+    RecordPayment,
+    SendReminder) : IInvoiceProtocol;
+
+// Events
 
 [AkkaSerializable(Manifest = "invoice-issued-v1")]
 public sealed record InvoiceIssued(
     [property: AkkaField(0)] decimal Total,
     [property: AkkaField(1)] string Recipient,
     [property: AkkaField(2)] DateTimeOffset At) : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "payment-recorded-v1")]
 public sealed record PaymentRecorded([property: AkkaField(0)] decimal Amount) : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "invoice-event-v1")]
-public readonly union InvoiceEvent(InvoiceIssued, PaymentRecorded) : IInvoiceProtocol;
+public readonly union InvoiceEvent(
+    InvoiceIssued,
+    PaymentRecorded) : IInvoiceProtocol;
+
+// Replies
 
 [AkkaSerializable(Manifest = "invoice-accepted-v1")]
 public sealed record InvoiceAccepted([property: AkkaField(0)] EntityId Id) : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "payment-accepted-v1", AllowEmpty = true)]
 public sealed record PaymentAccepted : IInvoiceProtocol;
+
 [AkkaSerializable(Manifest = "invoice-rejected-v1")]
 public sealed record InvoiceRejected([property: AkkaField(0)] string Reason) : IInvoiceProtocol;
+
+[AkkaSerializable(Manifest = "issue-reply-v1")]
+public readonly union IssueReply(
+    InvoiceAccepted,
+    InvoiceRejected) : IInvoiceProtocol;
+
+[AkkaSerializable(Manifest = "payment-reply-v1")]
+public readonly union PaymentReply(
+    PaymentAccepted,
+    InvoiceRejected) : IInvoiceProtocol;
 
 [AkkaSerializer<IInvoiceProtocol>("invoices", 120100)]
 public sealed partial class InvoiceSerializer : AkkaSerializer
@@ -73,51 +206,74 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 }
 ```
 
-`Decide` returns events to persist and effects to run afterwards. `Evolve` applies one event to the state. The invoice state is a union, so each state carries only the data that is valid for it and no sentinel values are needed.
+- **Events first, then effects.** Effects run only after the events are committed, in the order they're declared. The entity handles no other command until they finish.
+- **`Run` branches on the operation's outcome.** Both `onSuccess` and `onFailure` are required. Only the selected continuation executes; its events commit before its effects and reply. Each operation gets a fresh DI scope. Completed invocations dispose their scope before continuing; timed-out invocations that ignore cancellation keep their scope until they actually finish. The entity holds later commands and state reads until the entire graph finishes.
+- **`Run` is best effort.** Neither the operation nor its continuations are journaled or replayed during recovery. Service work and scope cleanup can finish independently of actor shutdown. An invocation timeout selects `onFailure`; actor shutdown does not. Continuation errors and journal failures go to supervision rather than selecting the service's failure branch.
+- **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
+- **Typed replies.** `ctx.For(command)` binds the reply contract once. `Reply` and `Run` finish a request branch: no unconditional reply can follow either. Use `ReplyAndRun` to reply before best effort work, or `ReplyAndStop` to reply and then passivate; `.UnstashAll().Reply(...)` releases stashed commands after this decision completes.
+- **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `ctx.None().Stop()` passivates without replying or deleting the entity.
+
+## Asynchronous request decisions
+
+If an external service determines whether an invoice was issued, persist the outcome in the selected continuation. The command still declares `IssueReply`, and both branches keep that contract:
 
 ```csharp
-using InvoiceContext = DecisionContext<InvoiceCommand, InvoiceEvent>;
-
-public static class Invoice
+public static RequestDecision<InvoiceCommand, InvoiceEvent, IssueReply> IssueExternally(
+    IssueInvoice command, InvoiceContext ctx)
 {
-    public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
-        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
-
-    public static Decision<InvoiceCommand, InvoiceEvent> Decide(
-        InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
-        (state, command) switch
+    var request = ctx.For(command);
+    return request.Run<IInvoiceService, IssueResult>(
+        (service, ct) => service.IssueAsync(command.Total, command.Recipient, ct),
+        onSuccess: (result, next) => result switch
         {
-            (Draft, IssueInvoice c) when c.Total > 0 =>
-                ctx.Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
-                    .Reply(new InvoiceAccepted(ctx.EntityId))
-                    .Run<IInvoiceMailer>((mailer, ct) => mailer.SendAsync(c.Recipient, ct))
-                    .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
-
-            (Issued s, RecordPayment p) when p.Amount == s.Total =>
-                ctx.Persist(new PaymentRecorded(p.Amount))
-                    .Reply(new PaymentAccepted())
-                    .CancelTimer("reminder"),
-
-            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
-            (_, SendReminder) => ctx.Ignore(),
-
-            _ => ctx.None().Reply(new InvoiceRejected("Invalid invoice operation")),
-        };
-
-    public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
-        (state, @event) switch
-        {
-            (Draft, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
-            (Issued s, PaymentRecorded) => new Paid(s.Total),
-            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
-        };
+            Created => next
+                .Persist(new InvoiceIssued(command.Total, command.Recipient, next.UtcNow))
+                .Reply(new InvoiceAccepted(next.EntityId)),
+            Declined rejected => next.Reply(new InvoiceRejected(rejected.Reason)),
+        },
+        onFailure: (error, next) => next.Reply(new InvoiceRejected(error.Message)));
 }
 ```
 
-- **Events first, then effects.** Effects run only after the events are committed, in the order they're declared. The entity handles no other command until they finish.
-- **`Run` is best effort.** Its service is resolved from a fresh DI scope. It runs in-process and is never replayed during recovery. If it fails without an `onFailure` handler, the actor's supervision handles it.
-- **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
-- **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `.Stop()` passivates the current actor without deleting the entity.
+Here `IssueResult` is the service's result union, with `Created` and `Declined` cases. A returned business rejection goes through `onSuccess`, which means the invocation returned normally. Exceptions and timeouts go through `onFailure`. A timeout does not establish whether an external action occurred; domains that need that distinction should include an indeterminate result in their reply contract.
+
+Both branches can call a named pure decider or return another `Run`. Every callback receives `next`: its state includes events committed before the operation, and its time is the operation's completion time. It starts with no events or effects. Build the continuation from `next`; returning a captured, previously committed builder is rejected before its events or effects can run again.
+
+For an operation returning `Task`, use `Run<TService>`. Both handlers remain required:
+
+```csharp
+return request.Run<IInvoiceMailer>(
+    (mailer, ct) => mailer.SendAsync(command.Recipient, ct),
+    onSuccess: next => next.Reply(new InvoiceAccepted(next.EntityId)),
+    onFailure: (error, next) => next.Reply(new InvoiceRejected(error.Message)));
+```
+
+To acknowledge a request before doing best effort work, use `ReplyAndRun`:
+
+```csharp
+return request
+    .Persist(new InvoiceIssued(command.Total, command.Recipient, request.UtcNow))
+    .ReplyAndRun<IInvoiceMailer>(new InvoiceAccepted(request.EntityId),
+        (mailer, ct) => mailer.SendAsync(command.Recipient, ct),
+        onSuccess: next => next,
+        onFailure: (error, next) => next);
+```
+
+The reply follows the event commit and precedes the invocation. These continuations receive an `EffectContext` that can persist events, send messages, schedule reminders, or run further operations, but cannot reply again. The runtime logs invocation failures even when the failure branch does nothing. Later commands still wait until the work finishes.
+
+`ctx.None()` and `ctx.Persist(...)` also produce an `EffectContext` for commands without replies. Its `Run` and `Stop` return a finished `EffectDecision`, so effects cannot be appended after either. `ctx.For(command)` produces a `RequestContext` whose continuations retain that command's reply type.
+
+Returning an empty failure branch accepts the failure and completes the command. For reminder commands that also acknowledges the reminder; the `SendReminder` example above deliberately escalates instead, preserving redelivery on failure. Choose that policy explicitly for each operation.
+
+To retry without restarting the entity, re-arm the same reminder key in the failure branch:
+
+```csharp
+onFailure: (error, next) => next.Schedule("reminder", TimeSpan.FromHours(1), new SendReminder())
+```
+
+The old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact. A `NotFound` acknowledgement for the superseded occurrence is logged at Debug.
+
+Events explicitly persisted before `Run` remain committed if the operation fails. This API does not provide a transaction with an external service or automatic retries after a crash.
 
 ## Serialization
 
@@ -140,6 +296,8 @@ Stored events and snapshots are a long-lived contract, so evolve these types by 
 Register entity refs with DI, then host each entity type either locally or in a shard region:
 
 ```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
 builder.Services.AddDurableEntities();
 builder.Services.AddScoped<IInvoiceMailer, SmtpInvoiceMailer>();
 
@@ -152,7 +310,12 @@ builder.Services.AddAkka("billing", (akka, sp) =>
     // or, in a cluster:
     // akka.WithDurableEntity(Invoice.Definition, new ShardOptions { Role = "billing" });
 });
+
+using var host = builder.Build();
+await host.StartAsync();
 ```
+
+This starts the infrastructure for the entity type. Individual invoices are created or recovered on their first message, as shown below. In a console application, call `await host.StopAsync()` when finished; a web application uses its normal host lifetime.
 
 Without `ShardOptions` the entity type runs in a local host actor in this process. In both modes, `.Stop()` uses sharding's `Passivate` protocol, so an entity that stops itself isn't restarted when remember-entities is enabled. Don't run the same entity type in local mode on more than one node against the same journal. When using Akka.Reminders with locally hosted entities, point it at them with `WithResolver(sys => new DurableEntityReminderResolver(sys))`.
 
@@ -162,18 +325,13 @@ In sharded mode, entity IDs are spread across `EntityOptions.NumberOfShards` sha
 
 ## Sending commands
 
-Inject `IEntityRefs<TCommand>` and get a ref by entity ID. Getting a ref is cheap and doesn't start the entity. The first message does.
+Inject `IEntityRefs<InvoiceCommand>` as shown above, then call `Get(id)` to address an invoice. Getting a reference is cheap and does not activate the entity; the first `Ask` or `Tell` does. On activation, a new ID starts from `InitialState`, and an existing entity recovers from its journal and snapshot.
 
-```csharp
-public sealed class BillingService(IEntityRefs<InvoiceCommand> invoices)
-{
-    public Task<object> IssueAsync(string invoiceId, decimal total, string recipient, CancellationToken ct) =>
-        invoices.Get(new EntityId(invoiceId)).Ask<object>(new IssueInvoice(total, recipient), ct);
+Use the same ID for later commands to the same invoice, and a different ID for another invoice. Calling `Get` again does not reset its state. `Ask` waits for a reply; `Tell` sends without waiting for one. [State-aware references](#reading-state) support both messaging and state reads.
 
-    public void RecordPayment(string invoiceId, decimal amount) =>
-        invoices.Get(new EntityId(invoiceId)).Tell(new RecordPayment(amount));
-}
-```
+`Ask` infers its return type from `IReplies<TCommand, TReply>`. Tell-only commands have no interface and cannot be asked. `IEntityRef<TCommand>` does not implement `ICanTell`, so Akka.NET's unchecked Ask extension methods cannot bypass the contract. Tell effects accept another typed entity ref and convert its command case before boxing it.
+
+`ToCommand()` supplies a direct constructor call for a C# union; F# records can construct their native DU in that method instead. There is no runtime conversion table or per-command registration. F# deciders call `RequestDecision.ToDecision()` explicitly when returning the branch.
 
 A ref's identity is the entity type plus the entity ID. It doesn't change when the entity moves between processes or nodes. Messages always go through the shard region or local host, so a command sent while an entity is stopping is delivered to its next incarnation.
 
@@ -222,9 +380,21 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .Given(new InvoiceIssued(250m, "billing@example.com", DateTimeOffset.UnixEpoch))
         .When(new RecordPayment(250m))
         .ThenPersisted(new PaymentRecorded(250m))
-        .ThenReplied(new PaymentAccepted())
+        .ThenReplied(new RecordPayment(250m), new PaymentAccepted())
         .ThenState(s => Assert.True(s is Paid));
 ```
+
+`WhenRunSucceeded(result)` and `WhenRunFailed(error)` select a continuation without invoking services, so result-dependent decisions remain pure unit tests:
+
+```csharp
+DeciderScenario.For(Invoice.Definition)
+    .When(command)
+    .WhenRunFailed(new InvalidOperationException("unavailable"))
+    .ThenNothingPersisted()
+    .ThenReplied(command, new InvoiceRejected("unavailable"));
+```
+
+Use a definition that routes `command` through `IssueExternally` for that example. `WhenRunSucceeded()` covers an operation returning plain `Task`.
 
 For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite.
 
@@ -244,8 +414,8 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
     {
         var invoice = EntityRef<InvoiceCommand>("invoice-1");
 
-        await invoice.Ask<InvoiceAccepted>(new IssueInvoice(250m, "billing@example.com"), AskCancellation());
-        await invoice.Ask<PaymentAccepted>(new RecordPayment(250m), AskCancellation());
+        await invoice.Ask(new IssueInvoice(250m, "billing@example.com"), AskCancellation());
+        await invoice.Ask(new RecordPayment(250m), AskCancellation());
 
         var snapshot = await DurableEntityRef<InvoiceCommand, InvoiceState, InvoiceEvent>("invoice-1")
             .GetStateAsync(AskCancellation());
@@ -261,7 +431,9 @@ Working today:
 - Recovery, which fails on journal entries it can't interpret.
 - Reminders.
 - Local and sharded hosting.
-- Typed entity refs and state reads.
+- Per-command typed entity refs, typed request graphs, and state reads.
+- Required success/failure continuations for both `Task` and `Task<T>`, including nested operations and continuation-time state.
+- C# compiler contract tests and F# DU command/reply tests.
 - Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
 
 Not done yet:
@@ -271,3 +443,10 @@ Not done yet:
 - **Source generation.**
 - **Durable workflows.**
 - **Agents.** Much later, once the foundations exist.
+
+The bounded Native AOT smoke checks command conversion, typed replies, and request graph construction; it does not certify the actor system or persistence plugins for AOT:
+
+```sh
+dotnet publish tests/Akka.Durable.AotSmoke -c Release -r linux-x64 -p:PublishAot=true -o ./artifacts/aot-smoke
+./artifacts/aot-smoke/Akka.Durable.AotSmoke
+```

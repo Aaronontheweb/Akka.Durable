@@ -253,17 +253,17 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     [Fact]
-    public async Task Run_failure_without_OnFailure_escalates_to_supervision()
+    public async Task Run_failure_explicitly_escalated_by_OnFailure_restarts_the_actor()
     {
         var entity = SpawnEntity("c9");
 
-        await EventFilter.Exception<InvalidOperationException>("boom").ExpectOneAsync(() =>
+        await EventFilter.Custom<Error>(error => error.Cause.GetBaseException() is InvalidOperationException { Message: "boom" }).ExpectOneAsync(() =>
         {
             Send(entity, new IncrementThenFail(1));
             return Task.CompletedTask;
         }, Ct);
 
-        // The Reply after the failed Run never happens...
+        // The success continuation of the failed Run never happens...
         await ExpectNoMsgAsync(NoMsgWindow, Ct);
 
         // ...but the event committed before the effect ran, and the restarted actor recovers it.
@@ -273,7 +273,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     [Fact]
-    public async Task Run_failure_with_OnFailure_feeds_a_command_back_through_Decide()
+    public async Task Run_failure_selects_the_failure_reply()
     {
         var entity = SpawnEntity("c10");
 

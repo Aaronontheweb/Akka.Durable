@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Akka.Durable.Tests" />
+    <InternalsVisibleTo Include="Akka.Durable.TestKit" />
   </ItemGroup>
 
   <ItemGroup>

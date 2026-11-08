@@ -18,7 +18,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     {
         var counter = CounterRef("a");
 
-        await counter.Ask<Accepted>(new Increment(2), AskCancellation());
+        await counter.Ask(new Increment(2), AskCancellation());
 
         Assert.Equal(2, await CountOf(counter));
     }
@@ -29,9 +29,9 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         var a = CounterRef("a");
         var b = CounterRef("b");
 
-        await a.Ask<Accepted>(new Increment(1), AskCancellation());
-        await a.Ask<Accepted>(new Increment(1), AskCancellation());
-        await b.Ask<Accepted>(new Increment(5), AskCancellation());
+        await a.Ask(new Increment(1), AskCancellation());
+        await a.Ask(new Increment(1), AskCancellation());
+        await b.Ask(new Increment(5), AskCancellation());
 
         Assert.Equal(2, await CountOf(a));
         Assert.Equal(5, await CountOf(b));
@@ -48,7 +48,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     {
         var counter = CounterRef("tenant/42 #1");
 
-        await counter.Ask<Accepted>(new Increment(3), AskCancellation());
+        await counter.Ask(new Increment(3), AskCancellation());
 
         Assert.Equal(3, await CountOf(counter));
     }
@@ -63,11 +63,11 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         // Stop sends Passivate to the host; the host must answer with the stop message so the
         // entity's actor actually terminates, rather than leaving the old incarnation running.
         var counter = CounterRef("a");
-        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+        await counter.Ask(new Increment(1), AskCancellation());
         var entity = await EntityActorOf("a");
         Watch(entity);
 
-        await counter.Ask<Accepted>(new Shutdown(), AskCancellation());
+        await counter.Ask(new Shutdown(), AskCancellation());
 
         await ExpectTerminatedAsync(entity, cancellationToken: TestCancellation);
     }
@@ -76,11 +76,11 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     public async Task Stopped_entity_is_reactivated_by_the_next_message_and_recovers_state()
     {
         var counter = CounterRef("a");
-        await counter.Ask<Accepted>(new Increment(3), AskCancellation());
+        await counter.Ask(new Increment(3), AskCancellation());
         var firstIncarnation = await EntityActorOf("a");
         Watch(firstIncarnation);
 
-        await counter.Ask<Accepted>(new Shutdown(), AskCancellation());
+        await counter.Ask(new Shutdown(), AskCancellation());
         await ExpectTerminatedAsync(firstIncarnation, cancellationToken: TestCancellation);
 
         // A new incarnation answers, with its state recovered from the journal.
@@ -96,7 +96,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     public async Task Messages_sent_while_an_entity_passivates_are_delivered_to_its_next_incarnation()
     {
         var counter = CounterRef("a");
-        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+        await counter.Ask(new Increment(1), AskCancellation());
 
         counter.Tell(new Shutdown(), TestActor);
         for (var i = 0; i < 20; i++) counter.Tell(new Increment(1), TestActor);
@@ -127,7 +127,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     [Fact]
     public async Task Run_effects_resolve_services_from_the_host_container()
     {
-        await CounterRef("a").Ask<Accepted>(new IncrementAndRecord(1), AskCancellation());
+        await CounterRef("a").Ask(new IncrementAndRecord(1), AskCancellation());
 
         Assert.Equal(["run:1", "disposed"], Recorder.Entries);
     }
@@ -148,14 +148,16 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     }
 
     [Fact]
-    public async Task Untyped_Tell_accepts_the_command_type_and_rejects_anything_else()
+    public async Task Typed_Tell_effect_converts_the_case_before_boxing()
     {
-        ICanTell counter = CounterRef("a");
+        var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
+            new EntityId("sender"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
+        var effect = Assert.IsType<TellEffect>(
+            Assert.IsType<Handled<CounterCommand, CounterEvent>>(
+                ctx.None().Tell(CounterRef("a"), new Increment(1)).ToDecision().Value).Effects.Single().Value);
 
-        var ex = Assert.Throws<ArgumentException>(() => counter.Tell(new Increment(1), TestActor));
-        Assert.Contains(nameof(CounterCommand), ex.Message);
-
-        counter.Tell((CounterCommand)new Increment(1), TestActor);
+        Assert.IsType<CounterCommand>(effect.Message);
+        effect.Recipient.Tell(effect.Message, TestActor);
         await ExpectMsgAsync<Accepted>(cancellationToken: TestCancellation);
     }
 
@@ -184,7 +186,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
         var unhandled = CreateTestProbe();
         Sys.EventStream.Subscribe(unhandled.Ref, typeof(UnhandledMessage));
         var counter = DurableCounterRef("a");
-        await counter.Ask<Accepted>(new Increment(1), AskCancellation());
+        await counter.Ask(new Increment(1), AskCancellation());
 
         var snapshot = await counter.GetStateAsync(AskCancellation());
 
@@ -197,7 +199,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     public async Task A_plain_ref_can_be_upgraded_by_id_to_read_state()
     {
         var plain = CounterRef("a");
-        await plain.Ask<Accepted>(new Increment(3), AskCancellation());
+        await plain.Ask(new Increment(3), AskCancellation());
 
         var snapshot = await DurableEntityRefs<CounterCommand, CounterState, CounterEvent>().Get(plain.Id)
             .GetStateAsync(AskCancellation());

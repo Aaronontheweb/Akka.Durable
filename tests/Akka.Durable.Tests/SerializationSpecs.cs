@@ -19,6 +19,7 @@ public sealed class SerializationSpecs : IAsyncLifetime
         BootstrapSetup.Create().And(SerializationSetup.Create(system =>
         [
             CounterSerializer.CreateSerializerDetails(system),
+            RailwaySerializer.CreateSerializerDetails(system),
             DurableEntitySerializer.CreateSerializerDetails(system),
             // Registered the same way Akka.Reminders' hosting extensions register it.
             SerializerDetails.Create("reminder-serializer", new ReminderSerializer(system),
@@ -46,6 +47,8 @@ public sealed class SerializationSpecs : IAsyncLifetime
         ["command with TimeSpan"] = (CounterCommand)new RemindLater(TimeSpan.FromSeconds(3)),
         ["event"] = (CounterEvent)new Incremented(5),
         ["fieldless event"] = (CounterEvent)new CounterLocked(),
+        ["typed success reply"] = (AdjustmentReply)new Adjusted(7),
+        ["typed failure reply"] = (AdjustmentReply)new AdjustmentRejected("failed"),
     };
 
     public static TheoryData<string> UnionValueNames => [.. UnionValues.Keys];

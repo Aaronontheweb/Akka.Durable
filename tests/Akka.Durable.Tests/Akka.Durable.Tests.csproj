@@ -17,6 +17,11 @@
     <PackageReference Include="System.Linq.Async" ExcludeAssets="compile" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Use the pinned SDK's compiler so contract tests exercise the same preview language as the build. -->
+    <Reference Include="Microsoft.CodeAnalysis" HintPath="$(MSBuildToolsPath)/Roslyn/bincore/Microsoft.CodeAnalysis.dll" />
+    <Reference Include="Microsoft.CodeAnalysis.CSharp" HintPath="$(MSBuildToolsPath)/Roslyn/bincore/Microsoft.CodeAnalysis.CSharp.dll" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../../src/Akka.Durable/Akka.Durable.csproj" />
     <ProjectReference Include="../../src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
   </ItemGroup>

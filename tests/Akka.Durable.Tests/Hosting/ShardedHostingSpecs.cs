@@ -24,7 +24,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     {
         var counter = CounterRef("a");
 
-        await FirstAsk(ct => counter.Ask<Accepted>(new Increment(2), ct));
+        await FirstAsk(ct => counter.Ask(new Increment(2), ct));
 
         Assert.Equal(2, await CountOf(counter));
     }
@@ -33,9 +33,9 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     public async Task Stop_passivates_through_the_shard_and_the_entity_recovers_on_next_use()
     {
         var counter = CounterRef("a");
-        await FirstAsk(ct => counter.Ask<Accepted>(new Increment(4), ct));
+        await FirstAsk(ct => counter.Ask(new Increment(4), ct));
 
-        await counter.Ask<Accepted>(new Shutdown(), AskCancellation());
+        await counter.Ask(new Shutdown(), AskCancellation());
 
         Assert.Equal(4, await CountOf(counter));
     }
@@ -44,7 +44,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     public async Task Using_an_entity_immediately_after_it_stops_loses_no_messages()
     {
         var counter = CounterRef("a");
-        await FirstAsk(ct => counter.Ask<CountIs>(new GetCount(), ct));
+        await FirstAsk(ct => counter.Ask(new GetCount(), ct));
 
         await AssertStopThenUseLosesNothing(counter, rounds: 10);
     }
@@ -53,7 +53,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     public async Task Reminders_are_delivered_to_sharded_entities()
     {
         var counter = CounterRef("a");
-        await FirstAsk(ct => counter.Ask<CountIs>(new GetCount(), ct));
+        await FirstAsk(ct => counter.Ask(new GetCount(), ct));
 
         counter.Tell(new RemindLater(TimeSpan.FromMilliseconds(200)));
 
@@ -68,7 +68,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     public async Task GetState_returns_the_committed_state_and_sequence_number()
     {
         var counter = DurableCounterRef("a");
-        await FirstAsk(ct => counter.Ask<CountIs>(new GetCount(), ct));
+        await FirstAsk(ct => counter.Ask(new GetCount(), ct));
 
         await AssertGetStateReturnsCommittedStateAndSequenceNr(counter);
     }
@@ -86,7 +86,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     public async Task GetState_waits_for_in_flight_effects()
     {
         var counter = DurableCounterRef("a");
-        await FirstAsk(ct => counter.Ask<CountIs>(new GetCount(), ct));
+        await FirstAsk(ct => counter.Ask(new GetCount(), ct));
 
         await AssertGetStateWaitsForInFlightEffects(counter);
     }
@@ -95,7 +95,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
     public async Task A_plain_ref_can_be_upgraded_by_id_to_read_state()
     {
         var plain = CounterRef("a");
-        await FirstAsk(ct => plain.Ask<Accepted>(new Increment(3), ct));
+        await FirstAsk(ct => plain.Ask(new Increment(3), ct));
 
         var snapshot = await DurableEntityRefs<CounterCommand, CounterState, CounterEvent>().Get(plain.Id)
             .GetStateAsync(AskCancellation());

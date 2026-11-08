@@ -61,7 +61,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     protected Gate Gate => Host.Services.GetRequiredService<Gate>();
 
     protected async Task<int> CountOf(IEntityRef<CounterCommand> counter) =>
-        (await counter.Ask<CountIs>(new GetCount(), AskCancellation())).Count;
+        (await counter.Ask(new GetCount(), AskCancellation())).Count;
 
     /// <summary>
     /// The reply to Shutdown is sent before the entity passivates, so the next command races the stop.
@@ -71,8 +71,8 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     {
         for (var i = 1; i <= rounds; i++)
         {
-            await counter.Ask<Accepted>(new Increment(1), AskCancellation());
-            await counter.Ask<Accepted>(new Shutdown(), AskCancellation());
+            await counter.Ask(new Increment(1), AskCancellation());
+            await counter.Ask(new Shutdown(), AskCancellation());
             Assert.Equal(i, await CountOf(counter));
         }
     }
@@ -80,9 +80,9 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     protected async Task AssertGetStateReturnsCommittedStateAndSequenceNr(
         IDurableEntityRef<CounterCommand, CounterState, CounterEvent> counter)
     {
-        await counter.Ask<Accepted>(new Increment(2), AskCancellation());
-        await counter.Ask<Accepted>(new LockCounter(), AskCancellation());
-        await counter.Ask<Accepted>(new UnlockCounter(), AskCancellation());
+        await counter.Ask(new Increment(2), AskCancellation());
+        await counter.Ask(new LockCounter(), AskCancellation());
+        await counter.Ask(new UnlockCounter(), AskCancellation());
 
         var snapshot = await counter.GetStateAsync(AskCancellation());
 
@@ -96,7 +96,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     /// </summary>
     protected async Task AssertGetStateWaitsForInFlightEffects(IDurableEntityRef<CounterCommand, CounterState, CounterEvent> counter)
     {
-        var opened = counter.Ask<GateOpened>(new WaitForGate(), AskCancellation());
+        var opened = counter.Ask(new WaitForGate(), AskCancellation());
         var read = counter.GetStateAsync(AskCancellation());
 
         await Task.Delay(NoMsgWindow, TestCancellation);
