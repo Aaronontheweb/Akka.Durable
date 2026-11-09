@@ -43,6 +43,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
         services.AddSingleton<EffectRecorder>();
         services.AddSingleton<Gate>();
         services.AddScoped<ScopedRecorder>();
+        services.AddCounterHandlers();
     }
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
@@ -92,7 +93,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
 
     /// <summary>
     /// WaitForGate persists nothing and holds its Run effect open, so a state read sent after it must
-    /// wait until the effect finishes.
+    /// wait until the effect finishes. Run is awaited in place; Execute is not.
     /// </summary>
     protected async Task AssertGetStateWaitsForInFlightEffects(IDurableEntityRef<CounterCommand, CounterState, CounterEvent> counter)
     {

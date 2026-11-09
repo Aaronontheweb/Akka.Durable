@@ -1,7 +1,6 @@
 module Akka.Durable.FSharp.Tests.TypedRequestSpecs
 
 open System
-open System.Threading
 open System.Threading.Tasks
 open Akka.Durable
 open Akka.Durable.TestKit
@@ -13,14 +12,17 @@ type Reply =
 
 type Event = Added of int
 
-type Command = Issue of Request
+type Command =
+    | Issue of Request
+    | Computed of Request * int
+    | Failed of Request * string
 and Request =
     { Amount: int }
     interface IReplies<Command, Reply> with
         member this.ToCommand() = Issue this
 
-type Service() =
-    member _.ExecuteAsync(value: int, _: CancellationToken) = Task.FromResult(value)
+/// The effect: plain data the decider hands to a registered handler.
+type Compute = { Request: Request; Value: int }
 
 // This signature only compiles if the command supplies the Ask reply type.
 let inferAsk (entity: IEntityRef<Command>) (command: Request) : Task<Reply> =
@@ -32,13 +34,9 @@ let definition =
         (fun _ -> 0),
         (fun _ command ctx ->
             match command with
-            | Issue c ->
-                let request = ctx.For(c)
-                request.Run<Service, int>(
-                    (fun (service: Service) ct -> service.ExecuteAsync(c.Amount, ct)),
-                    (fun result next -> next.Persist(Added result).Reply(Accepted result)),
-                    (fun error next -> next.Reply(Rejected error.Message)))
-                    .ToDecision()),
+            | Issue c -> ctx.None().Execute({ Request = c; Value = c.Amount }).ToDecision()
+            | Computed (c, result) -> ctx.Persist(Added result).Reply(c, Accepted result).ToDecision()
+            | Failed (c, reason) -> ctx.None().Reply(c, Rejected reason).ToDecision()),
         (fun state (Added value) -> state + value))
 
 [<Fact>]
@@ -48,55 +46,29 @@ let ``record command converts to its native FSharp DU without reflection`` () =
     Assert.Equal(Issue command, contract.ToCommand())
 
 [<Fact>]
-let ``result continuation persists and replies with the declared FSharp DU`` () =
+let ``request issues its effect as data`` () =
     let command = { Amount = 3 }
     DeciderScenario.For(definition)
         .When(Issue command)
-        .WhenRunSucceeded(7)
+        .ThenNothingPersisted()
+        .ThenExecuted({ Request = command; Value = 3 })
+    |> ignore
+
+[<Fact>]
+let ``success outcome persists and replies with the declared FSharp DU`` () =
+    let command = { Amount = 3 }
+    DeciderScenario.For(definition)
+        .When(Computed(command, 7))
         .ThenPersisted(Added 7)
         .ThenReplied(command, Accepted 7)
         .ThenState(fun state -> Assert.Equal(7, state))
     |> ignore
 
 [<Fact>]
-let ``failure continuation replies without persisting success`` () =
+let ``failure outcome replies without persisting`` () =
     let command = { Amount = 3 }
     DeciderScenario.For(definition)
-        .When(Issue command)
-        .WhenRunFailed(InvalidOperationException("failed"))
+        .When(Failed(command, "failed"))
         .ThenNothingPersisted()
         .ThenReplied(command, Rejected "failed")
-    |> ignore
-
-[<Fact>]
-let ``early replies allow non reply continuations using native FSharp values`` () =
-    let earlyDefinition =
-        EntityDefinition<int, Command, Event>(
-            EntityTypeName("fsharp-early"),
-            (fun _ -> 0),
-            (fun _ command ctx ->
-                match command with
-                | Issue c ->
-                    ctx.For(c).Persist(Added 1).ReplyAndRun<Service, int>(
-                        Accepted 1,
-                        (fun (service: Service) ct -> service.ExecuteAsync(c.Amount, ct)),
-                        (fun result next -> next.Persist(Added result).ToEffectDecision()),
-                        (fun _ next -> next.ToEffectDecision()))
-                        .ToDecision()),
-            (fun state (Added value) -> state + value))
-    let command = { Amount = 3 }
-    let outcome =
-        DeciderScenario.For(earlyDefinition)
-            .When(Issue command)
-            .ThenPersisted(Added 1)
-            .ThenReplied(command, Accepted 1)
-    outcome.WhenRunSucceeded(7)
-        .ThenPersisted(Added 7)
-        .ThenEffects()
-        .ThenState(fun state -> Assert.Equal(8, state))
-    |> ignore
-    outcome.WhenRunFailed(InvalidOperationException("failed"))
-        .ThenNothingPersisted()
-        .ThenEffects()
-        .ThenState(fun state -> Assert.Equal(1, state))
     |> ignore

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Akka.Actor;
+using Akka.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Akka.Durable;
@@ -10,10 +11,48 @@ public sealed record Ignored;
 public sealed record NotHandled;
 public sealed record Stashed;
 
-// Built-in, in-process effects. None of these are journaled.
-// In particular, RunEffect is a deferred delegate, NOT a serialized operation.
+// Built-in, in-process effects. None of these are journaled: an entity that must survive a crash
+// with an effect in flight records that fact in its state and re-derives the effect in Resume.
 public sealed record ReplyEffect(object Response);
 public sealed record TellEffect(ICanTell Recipient, object Message);
+
+/// <summary>
+/// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for <see cref="Effect"/>'s type.
+/// The handler's result comes back to the entity as one of its own commands or events.
+/// </summary>
+/// <remarks>
+/// The effect is plain data: assert on it, log it, store it in state. The handler is resolved from a fresh
+/// DI scope when the effect runs, so <c>Decide</c> never sees a service. The entity does not wait for the
+/// outcome; it keeps handling commands and the outcome arrives as a message.
+/// </remarks>
+public sealed record ExecuteEffect(object Effect)
+{
+    // Bound when the effect is built, where TEffect is known, so no reflection is needed to find the handler.
+    internal Func<IServiceProvider, Func<CancellationToken, Task<object?>>>? Resolve { get; init; }
+
+    public bool Equals(ExecuteEffect? other) => other is not null && Equals(Effect, other.Effect);
+
+    public override int GetHashCode() => Effect.GetHashCode();
+}
+
+/// <summary>
+/// A command for another durable entity, addressed by its command protocol and <see cref="EntityId"/>.
+/// </summary>
+/// <remarks>
+/// The target's reply, if it sends one, comes back to this entity and is turned into one of its own
+/// commands by <see cref="EntityDefinition{TState,TCommand,TEvent}.Accepts{TMessage}"/>. The reply is
+/// handled with the same sender as the command that issued the send, so a later <c>Reply</c> reaches the
+/// original asker.
+/// </remarks>
+public sealed record SendEffect(Type CommandType, EntityId Target, object Command)
+{
+    internal Func<ActorSystem, IActorRef>? ResolveRegion { get; init; }
+
+    public bool Equals(SendEffect? other) =>
+        other is not null && CommandType == other.CommandType && Target.Equals(other.Target) && Equals(Command, other.Command);
+
+    public override int GetHashCode() => HashCode.Combine(CommandType, Target, Command);
+}
 
 // Scheduling effects are backed by Akka.Reminders: the reminder is persisted by the
 // reminder subsystem and delivered back to this entity at least once. Registration
@@ -25,86 +64,103 @@ public sealed record CancelTimerEffect(string Key);
 public sealed record UnstashAllEffect;
 public sealed record StopEffect;
 
-/// <summary>An asynchronous operation with explicit success and failure continuations.</summary>
-/// <remarks>Runs in-process; neither the delegate nor its continuations are journaled.</remarks>
-public sealed class RunEffect<TCommand, TEvent>
+/// <summary>Best-effort asynchronous work whose result the entity does not need.</summary>
+/// <remarks>
+/// Runs in-process in a fresh DI scope and is awaited in place: later effects of the same decision, and
+/// later commands, wait for it. A failure or timeout is logged and the decision continues. Nothing about it
+/// is journaled. When the result matters to the entity, use <c>Execute</c> instead.
+/// </remarks>
+public sealed class RunEffect
 {
-    internal RunEffect(
-        Func<IServiceProvider, CancellationToken, Task<object?>> executeAsync,
-        Func<object, DateTimeOffset, object?, Handled<TCommand, TEvent>> onSuccess,
-        Func<object, DateTimeOffset, Exception, Handled<TCommand, TEvent>> onFailure,
-        TimeSpan? timeout)
+    internal RunEffect(Func<IServiceProvider, CancellationToken, Task> executeAsync, TimeSpan? timeout)
     {
         ExecuteAsync = executeAsync;
-        OnSuccess = onSuccess;
-        OnFailure = onFailure;
         Timeout = timeout;
     }
 
-    public Func<IServiceProvider, CancellationToken, Task<object?>> ExecuteAsync { get; }
+    public Func<IServiceProvider, CancellationToken, Task> ExecuteAsync { get; }
     public TimeSpan? Timeout { get; }
-    internal Func<object, DateTimeOffset, object?, Handled<TCommand, TEvent>> OnSuccess { get; }
-    internal Func<object, DateTimeOffset, Exception, Handled<TCommand, TEvent>> OnFailure { get; }
-
-    internal static RunEffect<TCommand, TEvent> Create<TService, TResult>(
-        Func<TService, CancellationToken, Task<TResult>> action,
-        Func<object, DateTimeOffset, object?, Handled<TCommand, TEvent>> onSuccess,
-        Func<object, DateTimeOffset, Exception, Handled<TCommand, TEvent>> onFailure,
-        TimeSpan? timeout) where TService : notnull
-    {
-        ArgumentNullException.ThrowIfNull(action);
-        if (timeout is { } limit && limit <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(timeout), "An effect timeout must be positive.");
-
-        return new(
-            async (services, ct) => await action(services.GetRequiredService<TService>(), ct),
-            onSuccess, onFailure, timeout);
-    }
 }
 
-public readonly union EntityEffect<TCommand, TEvent>(
+public readonly union EntityEffect(
     ReplyEffect,
     TellEffect,
+    ExecuteEffect,
+    SendEffect,
+    RunEffect,
     ScheduleEffect,
     ScheduleRecurringEffect,
     CancelTimerEffect,
     UnstashAllEffect,
-    StopEffect,
-    RunEffect<TCommand, TEvent>);
+    StopEffect);
 
 /// <summary>
 /// A finished decision: events to persist, then effects to run in order after the commit.
 /// </summary>
 /// <remarks>
 /// Every fluent method returns a new immutable instance. Scheduled messages are typed as
-/// <typeparamref name="TCommand"/>, so the entity can always decide on them.
-/// Run continuations return decisions. For C# 15 union commands, scheduling also forces the
-/// union conversion at the call site rather than boxing the bare case type.
+/// <typeparamref name="TCommand"/>, so the entity can always decide on them. For C# 15 union commands,
+/// scheduling also forces the union conversion at the call site rather than boxing the bare case type.
 /// </remarks>
 public sealed record Handled<TCommand, TEvent>(
     ImmutableArray<TEvent> Events,
-    ImmutableArray<EntityEffect<TCommand, TEvent>> Effects)
+    ImmutableArray<EntityEffect> Effects)
 {
-    // Clones of a builder represent the same execution stage. They must not be committed twice.
-    internal object Stage { get; } = new();
-
-    // Stage is execution metadata, not part of the decision's value semantics.
-    public bool Equals(Handled<TCommand, TEvent>? other) =>
-        ReferenceEquals(this, other) || other is not null && Events.Equals(other.Events) && Effects.Equals(other.Effects);
-
-    public override int GetHashCode() => HashCode.Combine(Events, Effects);
-
-    internal const string ReusedStageMessage =
-        "A Run continuation reused an earlier decision stage. Build it from the supplied next context.";
-
-    internal Handled<TCommand, TEvent> Add(EntityEffect<TCommand, TEvent> effect)
+    internal Handled<TCommand, TEvent> Add(EntityEffect effect)
     {
-        // Stop ends the incarnation; Run transfers control to exactly one continuation.
-        if (!Effects.IsDefaultOrEmpty && Effects[^1] is StopEffect or RunEffect<TCommand, TEvent>)
-            throw new InvalidOperationException(
-                "Stop() and Run() must be the last effect in a decision; place subsequent work in a Run continuation.");
+        // Stop ends the incarnation, so nothing can run after it.
+        if (!Effects.IsDefaultOrEmpty && Effects[^1] is StopEffect)
+            throw new InvalidOperationException("Stop() must be the last effect in a decision.");
 
         return this with { Effects = Effects.IsDefault ? [effect] : Effects.Add(effect) };
+    }
+
+    /// <summary>Appends events to persist before any effect runs.</summary>
+    public Handled<TCommand, TEvent> Persist(params TEvent[] events) =>
+        this with { Events = Events.IsDefault ? [.. events] : Events.AddRange(events) };
+
+    /// <summary>
+    /// Replies to the sender of the command being handled. <paramref name="request"/> fixes the reply type
+    /// and is not sent anywhere: pass the command that declared the reply, even when it arrived earlier and
+    /// was kept in state.
+    /// </summary>
+    public Handled<TCommand, TEvent> Reply<TReply>(IReplies<TCommand, TReply> request, TReply reply)
+        where TReply : notnull
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(reply);
+        return Add(new ReplyEffect(reply));
+    }
+
+    /// <summary>
+    /// Runs <paramref name="effect"/> through its registered <see cref="IEffectHandler{TEffect,TOutcome}"/>.
+    /// The handler's result returns to the entity as a command (decided by <c>Decide</c>) or an event
+    /// (persisted as it is), depending on which handler is registered for <typeparamref name="TEffect"/>.
+    /// </summary>
+    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull
+    {
+        ArgumentNullException.ThrowIfNull(effect);
+        return Add(new ExecuteEffect(effect)
+        {
+            Resolve = services => EffectHandlers.Resolve<TEffect, TCommand, TEvent>(services, effect),
+        });
+    }
+
+    /// <summary>
+    /// Sends a command to another durable entity hosted in this actor system. Its reply comes back as one of
+    /// this entity's commands through <see cref="EntityDefinition{TState,TCommand,TEvent}.Accepts{TMessage}"/>.
+    /// </summary>
+    /// <remarks>
+    /// Name the target's command protocol explicitly, as in <c>Send&lt;InvoiceCommand&gt;(id, new IssueInvoice(...))</c>:
+    /// the compiler would otherwise infer the case type, which no entity type is registered under.
+    /// </remarks>
+    public Handled<TCommand, TEvent> Send<TOther>(EntityId target, TOther command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return Add(new SendEffect(typeof(TOther), target, command)
+        {
+            ResolveRegion = system => ActorRegistry.For(system).Get<EntityRegion<TOther>>(),
+        });
     }
 
     public Handled<TCommand, TEvent> Tell<TMessage>(
@@ -117,6 +173,18 @@ public sealed record Handled<TCommand, TEvent>(
     {
         ArgumentNullException.ThrowIfNull(recipient);
         return Add(new TellEffect(new EntityTellAdapter<TOther>(recipient), message!));
+    }
+
+    /// <summary>Best-effort work with no outcome: a projection write, a notification. See <see cref="RunEffect"/>.</summary>
+    public Handled<TCommand, TEvent> Run<TService>(
+        Func<TService, CancellationToken, Task> action,
+        TimeSpan? timeout = null) where TService : notnull
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (timeout is { } limit && limit <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout), "An effect timeout must be positive.");
+
+        return Add(new RunEffect((services, ct) => action(services.GetRequiredService<TService>(), ct), timeout));
     }
 
     // Durable reminders via Akka.Reminders, scoped to this entity. Delivery is
@@ -144,6 +212,9 @@ public sealed record Handled<TCommand, TEvent>(
     // delete the entity's journal, snapshots, or logical identity.
     public Handled<TCommand, TEvent> Stop() =>
         Add(new StopEffect());
+
+    /// <summary>The union conversion as a method, for F# and other callers without implicit conversions.</summary>
+    public Decision<TCommand, TEvent> ToDecision() => this;
 }
 
 public readonly union Decision<TCommand, TEvent>(Handled<TCommand, TEvent>, Ignored, NotHandled, Stashed);
@@ -162,6 +233,33 @@ public static class Decisions
     public static Ignored Ignore() => new();
     public static NotHandled Unhandled() => new();
     public static Stashed Stash() => new();
+}
+
+internal static class EffectHandlers
+{
+    /// <summary>
+    /// Finds the one handler registered for <typeparamref name="TEffect"/> and returns a call to it. Which of
+    /// the entity's two outcome types the handler produces is fixed by its registration, not by the result.
+    /// </summary>
+    internal static Func<CancellationToken, Task<object?>> Resolve<TEffect, TCommand, TEvent>(
+        IServiceProvider services, TEffect effect) where TEffect : notnull
+    {
+        var decided = services.GetService<IEffectHandler<TEffect, TCommand>>();
+        var journaled = services.GetService<IEffectHandler<TEffect, TEvent>>();
+
+        return (decided, journaled) switch
+        {
+            (not null, not null) => throw new InvalidOperationException(
+                $"Effect {typeof(TEffect)} has both an IEffectHandler<{typeof(TEffect).Name}, {typeof(TCommand).Name}> and an " +
+                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TEvent).Name}> registered. Register one of them."),
+            (not null, null) => async ct => await decided.HandleAsync(effect, ct),
+            (null, not null) => async ct => await journaled.HandleAsync(effect, ct),
+            _ => throw new InvalidOperationException(
+                $"No effect handler is registered for {typeof(TEffect)}. Register an " +
+                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TCommand).Name}> when Decide should decide on the result, or an " +
+                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TEvent).Name}> when the result is a fact to persist as it is."),
+        };
+    }
 }
 
 internal sealed record EntityTellAdapter<TCommand>(IEntityRef<TCommand> Recipient) : ICanTell

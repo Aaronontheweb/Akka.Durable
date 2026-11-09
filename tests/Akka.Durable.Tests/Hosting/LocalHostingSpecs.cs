@@ -133,6 +133,17 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     }
 
     [Fact]
+    public async Task Effect_handlers_resolve_from_the_host_container_and_their_outcome_answers_the_ask()
+    {
+        var counter = CounterRef("a");
+
+        await counter.Ask(new IncrementViaService(2, Wait: false), AskCancellation());
+
+        Assert.Equal(4, await CountOf(counter));
+        Assert.Equal(["compute:2", "disposed"], Recorder.Entries);
+    }
+
+    [Fact]
     public async Task Reminders_are_delivered_to_the_entity_through_its_host()
     {
         var counter = CounterRef("a");
@@ -152,9 +163,7 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
     {
         var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
             new EntityId("sender"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
-        var effect = Assert.IsType<TellEffect>(
-            Assert.IsType<Handled<CounterCommand, CounterEvent>>(
-                ctx.None().Tell(CounterRef("a"), new Increment(1)).ToDecision().Value).Effects.Single().Value);
+        var effect = Assert.IsType<TellEffect>(ctx.None().Tell(CounterRef("a"), new Increment(1)).Effects.Single().Value);
 
         Assert.IsType<CounterCommand>(effect.Message);
         effect.Recipient.Tell(effect.Message, TestActor);

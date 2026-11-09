@@ -1,3 +1,6 @@
+using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
+
 namespace Akka.Durable;
 
 /// <summary>
@@ -12,8 +15,7 @@ public readonly record struct EntityTypeName(string Value);
 /// This is an immutable value: the factory methods only construct decision values and
 /// perform no IO, so Decide remains a pure function of (state, command, context).
 /// The factories exist to bind <typeparamref name="TCommand"/> and <typeparamref name="TEvent"/>
-/// without explicit type arguments. Scheduled messages are constrained to <typeparamref name="TCommand"/>;
-/// request continuations retain their reply contract and receive an updated <typeparamref name="TState"/>.
+/// without explicit type arguments. Scheduled messages are constrained to <typeparamref name="TCommand"/>.
 /// </remarks>
 public readonly record struct DecisionContext<TState, TCommand, TEvent>(
     EntityId EntityId,
@@ -21,19 +23,11 @@ public readonly record struct DecisionContext<TState, TCommand, TEvent>(
     DateTimeOffset UtcNow,
     TState State)
 {
-    /// <summary>Binds all branches of a request to the command's declared reply type.</summary>
-    public RequestContext<TState, TCommand, TEvent, TReply> For<TReply>(IReplies<TCommand, TReply> command)
-        where TReply : notnull
-    {
-        ArgumentNullException.ThrowIfNull(command);
-        return new(this, Decisions.None<TCommand, TEvent>());
-    }
+    public Handled<TCommand, TEvent> Persist(params TEvent[] events) =>
+        Decisions.Persist<TCommand, TEvent>(events);
 
-    public EffectContext<TState, TCommand, TEvent> Persist(params TEvent[] events) =>
-        new(this, Decisions.Persist<TCommand, TEvent>(events));
-
-    public EffectContext<TState, TCommand, TEvent> None() =>
-        new(this, Decisions.None<TCommand, TEvent>());
+    public Handled<TCommand, TEvent> None() =>
+        Decisions.None<TCommand, TEvent>();
 
     public Ignored Ignore() => Decisions.Ignore();
     public NotHandled Unhandled() => Decisions.Unhandled();
@@ -45,7 +39,60 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
     Func<EntityId, TState> InitialState,
     Func<TState, TCommand, DecisionContext<TState, TCommand, TEvent>, Decision<TCommand, TEvent>> Decide,
     Func<TState, TEvent, TState> Evolve,
-    EntityOptions? Options = null);
+    EntityOptions? Options = null)
+{
+    /// <summary>
+    /// The effects that are still pending for a state. Optional.
+    /// </summary>
+    /// <remarks>
+    /// <para>Runs once after recovery, before the entity handles its first command, and its effects go through
+    /// the same path as a decision's. A decider can also call it from a retry arm. It decides nothing, so it
+    /// may not return events; the entity fails to start if it does.</para>
+    /// <para>Everything it returns follows from state alone, so running it twice must be harmless: give the
+    /// effects idempotency keys, and prefer re-sending a query over a change. An entity whose effects never
+    /// wait for an outcome does not need it.</para>
+    /// <para>Replies issued by resumed effects go to dead letters: the asker of the original request belongs
+    /// to the previous incarnation.</para>
+    /// </remarks>
+    public Func<TState, DecisionContext<TState, TCommand, TEvent>, Handled<TCommand, TEvent>>? Resume { get; init; }
+
+    internal ImmutableDictionary<Type, Func<object, TCommand>> Accepted { get; init; } =
+        ImmutableDictionary<Type, Func<object, TCommand>>.Empty;
+
+    /// <summary>
+    /// Declares how a message of another type becomes one of this entity's commands. Needed for the replies
+    /// of entities this one talks to with <c>Send</c>: they arrive as the other entity's reply type.
+    /// </summary>
+    /// <remarks>
+    /// The table lives on the definition rather than on each send so that it survives a restart. The reply
+    /// to a command re-sent by <see cref="Resume"/> is wrapped the same way.
+    /// </remarks>
+    public EntityDefinition<TState, TCommand, TEvent> Accepts<TMessage>(Func<TMessage, TCommand> wrap)
+        where TMessage : notnull
+    {
+        ArgumentNullException.ThrowIfNull(wrap);
+        return this with { Accepted = Accepted.SetItem(typeof(TMessage), message => wrap((TMessage)message)) };
+    }
+
+    internal bool TryAccept(object message, [MaybeNullWhen(false)] out TCommand command)
+    {
+        if (Accepted.TryGetValue(message.GetType(), out var exact))
+        {
+            command = exact(message);
+            return true;
+        }
+
+        foreach (var (type, wrap) in Accepted)
+        {
+            if (!type.IsInstanceOfType(message)) continue;
+            command = wrap(message);
+            return true;
+        }
+
+        command = default;
+        return false;
+    }
+}
 
 public sealed record EntityOptions
 {
@@ -72,7 +119,7 @@ public sealed record EntityOptions
     public int NumberOfShards { get; init; } = 100;
 
     /// <summary>
-    /// For asynchronous effects, this is the default task budget.
+    /// Time budget for one <c>Execute</c> handler call, and the default for <c>Run</c> effects.
     /// </summary>
     public TimeSpan EffectTimeout { get; init; } =
         TimeSpan.FromSeconds(30);

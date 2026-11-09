@@ -5,7 +5,9 @@ using Akka.Serialization.V2;
 namespace Akka.Durable.Tests.Fixtures;
 
 using RailwayContext = DecisionContext<RailwayState, RailwayCommand, RailwayEvent>;
-using RailwayRequest = RequestContext<RailwayState, RailwayCommand, RailwayEvent, AdjustmentReply>;
+
+// Two-track entity: a request becomes an effect, the effect's handler answers with one of two outcome
+// commands, and Decide picks the success or the rejection track from the outcome.
 
 public interface IRailwayProtocol;
 
@@ -18,6 +20,7 @@ public sealed record Adjust([property: AkkaField(0)] int By) : IRailwayProtocol,
     public RailwayCommand ToCommand() => new(this);
 }
 
+/// <summary>Persists <see cref="Before"/> first, then continues as an <see cref="Adjust"/> of <see cref="By"/>.</summary>
 [AkkaSerializable(Manifest = "railway-begin-adjust-v1")]
 public sealed record BeginAdjust([property: AkkaField(0)] int Before, [property: AkkaField(1)] int By)
     : IRailwayProtocol, IReplies<RailwayCommand, AdjustmentReply>
@@ -25,26 +28,14 @@ public sealed record BeginAdjust([property: AkkaField(0)] int Before, [property:
     public RailwayCommand ToCommand() => new(this);
 }
 
-[AkkaSerializable(Manifest = "railway-double-adjust-v1")]
-public sealed record DoubleAdjust([property: AkkaField(0)] int By) : IRailwayProtocol, IReplies<RailwayCommand, AdjustmentReply>
-{
-    public RailwayCommand ToCommand() => new(this);
-}
+[AkkaSerializable(Manifest = "railway-calculated-v1")]
+public sealed record Calculated([property: AkkaField(0)] Adjust Request, [property: AkkaField(1)] int Result) : IRailwayProtocol;
 
-[AkkaSerializable(Manifest = "railway-task-only-v1", AllowEmpty = true)]
-public sealed record TaskOnly : IRailwayProtocol, IReplies<RailwayCommand, AdjustmentReply>
-{
-    public RailwayCommand ToCommand() => new(this);
-}
-
-[AkkaSerializable(Manifest = "railway-throw-continuation-v1", AllowEmpty = true)]
-public sealed record ThrowInContinuation : IRailwayProtocol, IReplies<RailwayCommand, AdjustmentReply>
-{
-    public RailwayCommand ToCommand() => new(this);
-}
+[AkkaSerializable(Manifest = "railway-calculation-failed-v1")]
+public sealed record CalculationFailed([property: AkkaField(0)] Adjust Request, [property: AkkaField(1)] string Reason) : IRailwayProtocol;
 
 [AkkaSerializable(Manifest = "railway-command-v1")]
-public readonly union RailwayCommand(Adjust, BeginAdjust, DoubleAdjust, TaskOnly, ThrowInContinuation) : IRailwayProtocol;
+public readonly union RailwayCommand(Adjust, BeginAdjust, Calculated, CalculationFailed) : IRailwayProtocol;
 
 [AkkaSerializable(Manifest = "railway-added-v1")]
 public sealed record Added([property: AkkaField(0)] int Value) : IRailwayProtocol;
@@ -61,6 +52,9 @@ public sealed record AdjustmentRejected([property: AkkaField(0)] string Reason) 
 [AkkaSerializable(Manifest = "railway-reply-v1")]
 public readonly union AdjustmentReply(Adjusted, AdjustmentRejected) : IRailwayProtocol;
 
+/// <summary>The effect: what to calculate, and for which request.</summary>
+public sealed record Calculate(Adjust Request, int By);
+
 [AkkaSerializer<IRailwayProtocol>("railway-test", 22600)]
 public sealed partial class RailwaySerializer : AkkaSerializer
 {
@@ -76,43 +70,20 @@ public static class Railway
     public static Decision<RailwayCommand, RailwayEvent> Decide(RailwayState state, RailwayCommand command, RailwayContext ctx) =>
         command switch
         {
-            Adjust c => Calculate(ctx.For(c), c.By),
+            Adjust c => ctx.None().Execute(new Calculate(c, c.By)),
 
-            BeginAdjust c => Calculate(ctx.For(c).Persist(new Added(c.Before)), c.By),
+            BeginAdjust c => ctx.Persist(new Added(c.Before)).Execute(new Calculate(new Adjust(c.By), c.By)),
 
-            DoubleAdjust c => ctx.For(c).Run<ScopedCalculator, int>(
-                (service, ct) => service.CalculateAsync(c.By, ct),
-                onSuccess: (result, next)
-                    => Calculate(next, result),
-                onFailure:
-                (error, next)
-                    => next.Reply(new AdjustmentRejected(error.Message))),
+            Calculated { Result: < 0 } r => ctx.None().Reply(r.Request, new AdjustmentRejected("negative result")),
+            Calculated r => ctx.Persist(new Added(r.Result)).Reply(r.Request, new Adjusted(state.Count + r.Result)),
 
-            TaskOnly c => ctx.For(c).Run<ScopedCalculator>(
-                (service, ct) => service.WaitAsync(ct),
-                onSuccess: next => next.Reply(new Adjusted(next.State.Count)),
-                onFailure: (error, next) => next.Reply(new AdjustmentRejected(error.GetType().Name))),
-
-            ThrowInContinuation c => ctx.For(c).Run<ScopedCalculator, int>(
-                (service, ct) => service.CalculateAsync(1, ct),
-                onSuccess: (_, _) => throw new InvalidOperationException("continuation failed"),
-                onFailure: (error, next) => next.Reply(new AdjustmentRejected("incorrect failure branch"))),
+            CalculationFailed f => ctx.None().Reply(f.Request, new AdjustmentRejected(f.Reason)),
         };
-
-    private static RequestDecision<RailwayCommand, RailwayEvent, AdjustmentReply> Calculate(RailwayRequest request, int by) =>
-        request.Run<ScopedCalculator, int>(
-            (service, ct) => service.CalculateAsync(by, ct),
-            onSuccess: (result, next) => result < 0
-                ? next.Reply(new AdjustmentRejected("negative result"))
-                : next.Persist(new Added(result)).Reply(new Adjusted(next.State.Count + result)),
-            onFailure: (error, next)
-                => next.Reply(new AdjustmentRejected(error.Message)));
 }
 
 public sealed class Calculator
 {
     public Func<int, CancellationToken, Task<int>> Calculate { get; set; } = (value, _) => Task.FromResult(value);
-    public Func<CancellationToken, Task> Wait { get; set; } = _ => Task.CompletedTask;
 }
 
 public sealed class ScopedCalculator(Calculator calculator, EffectRecorder recorder) : IAsyncDisposable
@@ -123,15 +94,25 @@ public sealed class ScopedCalculator(Calculator calculator, EffectRecorder recor
         return calculator.Calculate(value, ct);
     }
 
-    public Task WaitAsync(CancellationToken ct)
-    {
-        recorder.Add("wait");
-        return calculator.Wait(ct);
-    }
-
     public ValueTask DisposeAsync()
     {
         recorder.Add("disposed");
         return ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>Turns the service's result or failure into the outcome command the entity decides on.</summary>
+public sealed class CalculateHandler(ScopedCalculator calculator) : IEffectHandler<Calculate, RailwayCommand>
+{
+    public async Task<RailwayCommand> HandleAsync(Calculate effect, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return new Calculated(effect.Request, await calculator.CalculateAsync(effect.By, cancellationToken));
+        }
+        catch (Exception error) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new CalculationFailed(effect.Request, error.Message);
+        }
     }
 }

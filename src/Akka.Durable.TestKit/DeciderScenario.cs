@@ -4,7 +4,7 @@ using Xunit;
 namespace Akka.Durable.TestKit;
 
 /// <summary>
-/// Given / When / Then harness for pure Decide + Evolve tests. No ActorSystem involved.
+/// Given / When / Then harness for pure Decide, Evolve and Resume tests. No ActorSystem involved.
 /// </summary>
 /// <example>
 /// DeciderScenario.For(Counter.Definition)
@@ -47,36 +47,46 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
 
     public DeciderOutcome<TState, TCommand, TEvent> When(TCommand command)
     {
+        var (state, context) = Recover();
+        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, definition.Decide(state, command, context));
+    }
+
+    /// <summary>
+    /// Recovers the entity from the given history and runs its <c>Resume</c>: the effects still pending for
+    /// that state. A definition without <c>Resume</c> has none.
+    /// </summary>
+    public DeciderOutcome<TState, TCommand, TEvent> Resumed()
+    {
+        var (state, context) = Recover();
+        Decision<TCommand, TEvent> pending = definition.Resume is { } resume
+            ? resume(state, context)
+            : Decisions.None<TCommand, TEvent>();
+        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, pending);
+    }
+
+    private (TState State, DecisionContext<TState, TCommand, TEvent> Context) Recover()
+    {
         var state = _history.Aggregate(definition.InitialState(_entityId), definition.Evolve);
-        var context = new DecisionContext<TState, TCommand, TEvent>(_entityId, definition.TypeName, _now, state);
-        return new DeciderOutcome<TState, TCommand, TEvent>(
-            definition, state, definition.Decide(state, command, context), _now);
+        return (state, new DecisionContext<TState, TCommand, TEvent>(_entityId, definition.TypeName, _now, state));
     }
 }
 
 public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     EntityDefinition<TState, TCommand, TEvent> definition,
     TState stateBefore,
-    Decision<TCommand, TEvent> decision,
-    DateTimeOffset? utcNow = null)
+    Decision<TCommand, TEvent> decision)
 {
-    private readonly ImmutableHashSet<object> _earlierStages = [];
-
-    private DeciderOutcome(EntityDefinition<TState, TCommand, TEvent> definition, TState stateBefore,
-        Decision<TCommand, TEvent> decision, DateTimeOffset? utcNow, ImmutableHashSet<object> earlierStages)
-        : this(definition, stateBefore, decision, utcNow) => _earlierStages = earlierStages;
-
     public Decision<TCommand, TEvent> Decision => decision;
 
     public Handled<TCommand, TEvent> Handled => decision is Handled<TCommand, TEvent> handled
         ? handled
         : throw new Xunit.Sdk.XunitException($"Expected a Handled decision but got {decision.Value}");
 
-    public ImmutableArray<EntityEffect<TCommand, TEvent>> Effects => Handled.Effects;
+    public ImmutableArray<EntityEffect> Effects => Handled.Effects.IsDefault ? [] : Handled.Effects;
 
     public DeciderOutcome<TState, TCommand, TEvent> ThenPersisted(params TEvent[] expected)
     {
-        Assert.Equal(expected, Handled.Events);
+        Assert.Equal(expected, Handled.Events.IsDefault ? [] : Handled.Events);
         return this;
     }
 
@@ -85,7 +95,7 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     /// <summary>Asserts on the state after the decision's events are evolved.</summary>
     public DeciderOutcome<TState, TCommand, TEvent> ThenState(Action<TState> assert)
     {
-        assert(Handled.Events.Aggregate(stateBefore, definition.Evolve));
+        assert((Handled.Events.IsDefault ? [] : Handled.Events).Aggregate(stateBefore, definition.Evolve));
         return this;
     }
 
@@ -97,6 +107,23 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
         return this;
     }
 
+    /// <summary>Asserts that the decision issues <paramref name="expected"/> to its effect handler. No handler runs.</summary>
+    public DeciderOutcome<TState, TCommand, TEvent> ThenExecuted(object expected)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        Assert.Contains(Effects, e => e.Value is ExecuteEffect x && Equals(x.Effect, expected));
+        return this;
+    }
+
+    /// <summary>Asserts that the decision sends <paramref name="command"/> to the entity of protocol <typeparamref name="TOther"/> with id <paramref name="target"/>.</summary>
+    public DeciderOutcome<TState, TCommand, TEvent> ThenSent<TOther>(EntityId target, TOther command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        Assert.Contains(Effects, e => e.Value is SendEffect s
+            && s.CommandType == typeof(TOther) && s.Target.Equals(target) && Equals(s.Command, command));
+        return this;
+    }
+
     /// <summary>
     /// Asserts the ordered sequence of effect kinds. Effects that hold delegates (Run) can't be
     /// compared by value, so ordering is checked by type; inspect <see cref="Effects"/> for detail.
@@ -105,34 +132,6 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
     {
         Assert.Equal(expectedEffectTypes, Effects.Select(e => e.Value!.GetType()));
         return this;
-    }
-
-    public DeciderOutcome<TState, TCommand, TEvent> WhenRunSucceeded() => WhenRunSucceeded(true);
-
-    /// <summary>Supplies an operation result without invoking any service.</summary>
-    public DeciderOutcome<TState, TCommand, TEvent> WhenRunSucceeded<TResult>(TResult result, DateTimeOffset? now = null)
-    {
-        var run = Assert.IsType<RunEffect<TCommand, TEvent>>(Effects.Last().Value);
-        var state = Handled.Events.Aggregate(stateBefore, definition.Evolve);
-        var at = now ?? utcNow ?? DateTimeOffset.UnixEpoch;
-        return Continue(state, run.OnSuccess(state!, at, result), at);
-    }
-
-    /// <summary>Supplies an operation failure without invoking any service.</summary>
-    public DeciderOutcome<TState, TCommand, TEvent> WhenRunFailed(Exception error, DateTimeOffset? now = null)
-    {
-        var run = Assert.IsType<RunEffect<TCommand, TEvent>>(Effects.Last().Value);
-        var state = Handled.Events.Aggregate(stateBefore, definition.Evolve);
-        var at = now ?? utcNow ?? DateTimeOffset.UnixEpoch;
-        return Continue(state, run.OnFailure(state!, at, error), at);
-    }
-
-    private DeciderOutcome<TState, TCommand, TEvent> Continue(TState state, Handled<TCommand, TEvent> next, DateTimeOffset at)
-    {
-        var stages = _earlierStages.Add(Handled.Stage);
-        if (stages.Contains(next.Stage))
-            throw new InvalidOperationException(Handled<TCommand, TEvent>.ReusedStageMessage);
-        return new(definition, state, next, at, stages);
     }
 
     public void ThenIgnored() => Assert.True(decision is Ignored, $"Expected Ignored but got {decision.Value}");

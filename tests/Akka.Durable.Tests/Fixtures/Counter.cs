@@ -1,6 +1,7 @@
 using Akka.Actor;
 using Akka.Serialization;
 using Akka.Serialization.V2;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Akka.Durable.Tests.Fixtures;
 
@@ -8,14 +9,15 @@ using CounterContext = DecisionContext<CounterState, CounterCommand, CounterEven
 
 // A deliberately small entity whose commands each exercise one runtime behavior. Every type that can
 // cross a serialization boundary (journal, snapshots, reminders, remoting, replies) is serializable,
-// so hosted specs can run with serialize-messages on.
+// so hosted specs can run with serialize-messages on. Effects are plain records: they never leave the process.
 
 public interface ICounterProtocol;
 
 [AkkaSerializable(Manifest = "counter-state-v1")]
 public sealed record CounterState(
     [property: AkkaField(0)] int Count,
-    [property: AkkaField(1)] bool Locked) : ICounterProtocol;
+    [property: AkkaField(1)] bool Locked,
+    [property: AkkaField(2)] IncrementViaService? Pending = null) : ICounterProtocol;
 
 // Commands
 [AkkaSerializable(Manifest = "counter-increment-v1")]
@@ -60,18 +62,6 @@ public sealed record IncrementThenFail([property: AkkaField(0)] int By) : ICount
     public CounterCommand ToCommand() => new(this);
 }
 
-[AkkaSerializable(Manifest = "counter-fail-with-fallback-v1", AllowEmpty = true)]
-public sealed record FailWithFallback : ICounterProtocol, IReplies<CounterCommand, FailureRecorded>
-{
-    public CounterCommand ToCommand() => new(this);
-}
-
-[AkkaSerializable(Manifest = "counter-record-failure-v1")]
-public sealed record RecordFailure([property: AkkaField(0)] string Reason) : ICounterProtocol, IReplies<CounterCommand, FailureRecorded>
-{
-    public CounterCommand ToCommand() => new(this);
-}
-
 [AkkaSerializable(Manifest = "counter-wait-for-gate-v1", AllowEmpty = true)]
 public sealed record WaitForGate : ICounterProtocol, IReplies<CounterCommand, GateOpened>
 {
@@ -79,7 +69,7 @@ public sealed record WaitForGate : ICounterProtocol, IReplies<CounterCommand, Ga
 }
 
 [AkkaSerializable(Manifest = "counter-wait-for-gate-timeout-v1")]
-public sealed record WaitForGateWithTimeout([property: AkkaField(0)] TimeSpan Timeout) : ICounterProtocol, IReplies<CounterCommand, FailureRecorded>
+public sealed record WaitForGateWithTimeout([property: AkkaField(0)] TimeSpan Timeout) : ICounterProtocol, IReplies<CounterCommand, Accepted>
 {
     public CounterCommand ToCommand() => new(this);
 }
@@ -93,11 +83,39 @@ public sealed record Shutdown : ICounterProtocol, IReplies<CounterCommand, Accep
     public CounterCommand ToCommand() => new(this);
 }
 
+/// <summary>Doubles <see cref="By"/> through a service. The request is kept in state until the outcome lands.</summary>
+[AkkaSerializable(Manifest = "counter-increment-via-service-v1")]
+public sealed record IncrementViaService([property: AkkaField(0)] int By, [property: AkkaField(1)] bool Wait)
+    : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
+
+/// <summary>Outcome of <see cref="Compute"/>: decided by the entity.</summary>
+[AkkaSerializable(Manifest = "counter-computed-v1")]
+public sealed record Computed([property: AkkaField(0)] IncrementViaService Request, [property: AkkaField(1)] int Value) : ICounterProtocol;
+
+/// <summary>Adds a value the service looks up. Its outcome is an event, journaled as it is.</summary>
+[AkkaSerializable(Manifest = "counter-add-from-lookup-v1")]
+public sealed record AddFromLookup([property: AkkaField(0)] int Key) : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
+
+[AkkaSerializable(Manifest = "counter-explode-later-v1", AllowEmpty = true)]
+public sealed record ExplodeLater : ICounterProtocol, IReplies<CounterCommand, Accepted>
+{
+    public CounterCommand ToCommand() => new(this);
+}
+
+[AkkaSerializable(Manifest = "counter-no-handler-v1", AllowEmpty = true)]
+public sealed record NoHandler : ICounterProtocol;
+
 [AkkaSerializable(Manifest = "counter-command-v1")]
 public readonly union CounterCommand(
     Increment, GetCount, Noop, Unsupported, LockCounter, UnlockCounter,
-    IncrementAndRecord, IncrementThenFail, FailWithFallback, RecordFailure,
-    WaitForGate, WaitForGateWithTimeout, RemindLater, Shutdown) : ICounterProtocol;
+    IncrementAndRecord, IncrementThenFail, WaitForGate, WaitForGateWithTimeout, RemindLater, Shutdown,
+    IncrementViaService, Computed, AddFromLookup, ExplodeLater, NoHandler) : ICounterProtocol;
 
 // Events
 [AkkaSerializable(Manifest = "counter-incremented-v1")]
@@ -109,8 +127,15 @@ public sealed record CounterLocked : ICounterProtocol;
 [AkkaSerializable(Manifest = "counter-unlocked-v1", AllowEmpty = true)]
 public sealed record CounterUnlocked : ICounterProtocol;
 
+[AkkaSerializable(Manifest = "counter-service-increment-started-v1")]
+public sealed record ServiceIncrementStarted([property: AkkaField(0)] IncrementViaService Request) : ICounterProtocol;
+
+[AkkaSerializable(Manifest = "counter-service-increment-finished-v1")]
+public sealed record ServiceIncrementFinished([property: AkkaField(0)] int Value) : ICounterProtocol;
+
 [AkkaSerializable(Manifest = "counter-event-v1")]
-public readonly union CounterEvent(Incremented, CounterLocked, CounterUnlocked) : ICounterProtocol;
+public readonly union CounterEvent(
+    Incremented, CounterLocked, CounterUnlocked, ServiceIncrementStarted, ServiceIncrementFinished) : ICounterProtocol;
 
 // Replies (application-defined; no entity-wide response union required)
 [AkkaSerializable(Manifest = "counter-accepted-v1", AllowEmpty = true)]
@@ -122,8 +147,11 @@ public sealed record CountIs([property: AkkaField(0)] int Count) : ICounterProto
 [AkkaSerializable(Manifest = "counter-gate-opened-v1", AllowEmpty = true)]
 public sealed record GateOpened : ICounterProtocol;
 
-[AkkaSerializable(Manifest = "counter-failure-recorded-v1")]
-public sealed record FailureRecorded([property: AkkaField(0)] string Reason) : ICounterProtocol;
+// Effects. Plain data handed to the registered IEffectHandler; never serialized.
+public sealed record Compute(IncrementViaService Request);
+public sealed record Lookup(int Key);
+public sealed record Explode;
+public sealed record Unregistered;
 
 [AkkaSerializer<ICounterProtocol>("counter-test", 22599)]
 public sealed partial class CounterSerializer : AkkaSerializer
@@ -136,56 +164,61 @@ public static class Counter
     public static readonly EntityTypeName TypeName = new("counter");
 
     public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition =
-        new(TypeName, _ => new CounterState(0, false), Decide, Evolve);
+        new(TypeName, _ => new CounterState(0, false), Decide, Evolve) { Resume = Resume };
 
     public static Decision<CounterCommand, CounterEvent> Decide(
         CounterState state, CounterCommand command, CounterContext ctx) =>
         command switch
         {
             Increment when state.Locked => ctx.Stash(),
-            Increment c => ctx.For(c).Persist(new Incremented(c.By)).Reply(new Accepted()),
+            Increment c => ctx.Persist(new Incremented(c.By)).Reply(c, new Accepted()),
 
-            GetCount c => ctx.For(c).Reply(new CountIs(state.Count)),
+            GetCount c => ctx.None().Reply(c, new CountIs(state.Count)),
             Noop => ctx.Ignore(),
             Unsupported => ctx.Unhandled(),
 
-            LockCounter c => ctx.For(c).Persist(new CounterLocked()).Reply(new Accepted()),
-            UnlockCounter c => ctx.For(c).Persist(new CounterUnlocked()).UnstashAll().Reply(new Accepted()),
+            LockCounter c => ctx.Persist(new CounterLocked()).Reply(c, new Accepted()),
+            UnlockCounter c => ctx.Persist(new CounterUnlocked()).UnstashAll().Reply(c, new Accepted()),
 
-            IncrementAndRecord c => ctx.For(c).Persist(new Incremented(c.By))
-                .Run<ScopedRecorder>(
-                    (recorder, ct) => recorder.RecordAsync($"run:{c.By}", ct),
-                    onSuccess: next => next.Reply(new Accepted()),
-                    onFailure: (error, _) => throw error),
+            // Best-effort work: the reply follows once it has run, whether or not it succeeded.
+            IncrementAndRecord c => ctx.Persist(new Incremented(c.By))
+                .Run<ScopedRecorder>((recorder, ct) => recorder.RecordAsync($"run:{c.By}", ct))
+                .Reply(c, new Accepted()),
 
-            IncrementThenFail c => ctx.For(c).Persist(new Incremented(c.By))
-                .Run<ScopedRecorder>(
-                    (_, _) => throw new InvalidOperationException("boom"),
-                    onSuccess: next => next.Reply(new Accepted()),
-                    onFailure: (error, _) => throw error),
+            IncrementThenFail c => ctx.Persist(new Incremented(c.By))
+                .Run<ScopedRecorder>((_, _) => throw new InvalidOperationException("boom"))
+                .Reply(c, new Accepted()),
 
-            FailWithFallback c => ctx.For(c).Run<ScopedRecorder>(
-                (_, _) => throw new InvalidOperationException("boom"),
-                onSuccess: next => next.Reply(new FailureRecorded("unexpected success")),
-                onFailure: (error, next) => next.Reply(new FailureRecorded(error.Message))),
+            WaitForGate c => ctx.None()
+                .Run<Gate>((gate, ct) => gate.WaitAsync(ct))
+                .Reply(c, new GateOpened()),
 
-            RecordFailure f => ctx.For(f).Reply(new FailureRecorded(f.Reason)),
-
-            WaitForGate c => ctx.For(c).Run<Gate>(
-                (gate, ct) => gate.WaitAsync(ct),
-                onSuccess: next => next.Reply(new GateOpened()),
-                onFailure: (error, _) => throw error),
-
-            WaitForGateWithTimeout c => ctx.For(c).Run<Gate>(
-                (gate, ct) => gate.WaitAsync(ct),
-                onSuccess: next => next.Reply(new FailureRecorded("opened")),
-                onFailure: (error, next) => next.Reply(new FailureRecorded(error.GetType().Name)),
-                timeout: c.Timeout),
+            WaitForGateWithTimeout c => ctx.None()
+                .Run<Gate>((gate, ct) => gate.WaitAsync(ct), timeout: c.Timeout)
+                .Reply(c, new Accepted()),
 
             RemindLater r => ctx.None().Schedule("tick", r.Delay, new Increment(1)),
 
-            Shutdown c => ctx.For(c).ReplyAndStop(new Accepted()),
+            Shutdown c => ctx.None().Reply(c, new Accepted()).Stop(),
+
+            // One service increment at a time: the state records the request, the handler answers with Computed.
+            IncrementViaService when state.Pending is not null => ctx.Stash(),
+            IncrementViaService c => ctx.Persist(new ServiceIncrementStarted(c)).Execute(new Compute(c)),
+            Computed r when Equals(state.Pending, r.Request) => ctx.Persist(new ServiceIncrementFinished(r.Value))
+                .Reply(r.Request, new Accepted())
+                .UnstashAll(),
+            Computed => ctx.Ignore(), // a late outcome from a previous incarnation
+
+            // The lookup's outcome is an Incremented event: journaled without a decision.
+            AddFromLookup c => ctx.None().Execute(new Lookup(c.Key)).Reply(c, new Accepted()),
+
+            ExplodeLater c => ctx.None().Execute(new Explode()).Reply(c, new Accepted()),
+            NoHandler => ctx.None().Execute(new Unregistered()),
         };
+
+    /// <summary>A recovered entity with a service increment in flight asks the service again.</summary>
+    public static Handled<CounterCommand, CounterEvent> Resume(CounterState state, CounterContext ctx) =>
+        state.Pending is { } pending ? ctx.None().Execute(new Compute(pending)) : ctx.None();
 
     public static CounterState Evolve(CounterState state, CounterEvent @event) =>
         @event switch
@@ -193,5 +226,42 @@ public static class Counter
             Incremented e => state with { Count = state.Count + e.By },
             CounterLocked => state with { Locked = true },
             CounterUnlocked => state with { Locked = false },
+            ServiceIncrementStarted e => state with { Pending = e.Request },
+            ServiceIncrementFinished e => state with { Count = state.Count + e.Value, Pending = null },
         };
+}
+
+/// <summary>
+/// Doubles the request, optionally waiting for the test's <see cref="Gate"/> first. Goes through the scoped
+/// recorder so tests can see the handler's DI scope being disposed.
+/// </summary>
+public sealed class ComputeHandler(Gate gate, ScopedRecorder recorder) : IEffectHandler<Compute, CounterCommand>
+{
+    public async Task<CounterCommand> HandleAsync(Compute effect, CancellationToken cancellationToken)
+    {
+        await recorder.RecordAsync($"compute:{effect.Request.By}", cancellationToken);
+        if (effect.Request.Wait) await gate.WaitAsync(cancellationToken);
+        return new Computed(effect.Request, effect.Request.By * 2);
+    }
+}
+
+/// <summary>Returns an event: the entity journals it without deciding.</summary>
+public sealed class LookupHandler : IEffectHandler<Lookup, CounterEvent>
+{
+    public Task<CounterEvent> HandleAsync(Lookup effect, CancellationToken cancellationToken) =>
+        Task.FromResult<CounterEvent>(new Incremented(effect.Key));
+}
+
+public sealed class ExplodeHandler : IEffectHandler<Explode, CounterCommand>
+{
+    public Task<CounterCommand> HandleAsync(Explode effect, CancellationToken cancellationToken) =>
+        throw new InvalidOperationException("boom");
+}
+
+public static class CounterHandlers
+{
+    public static IServiceCollection AddCounterHandlers(this IServiceCollection services) => services
+        .AddScoped<IEffectHandler<Compute, CounterCommand>, ComputeHandler>()
+        .AddScoped<IEffectHandler<Lookup, CounterEvent>, LookupHandler>()
+        .AddScoped<IEffectHandler<Explode, CounterCommand>, ExplodeHandler>();
 }

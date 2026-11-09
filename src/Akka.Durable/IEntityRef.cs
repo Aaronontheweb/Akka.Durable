@@ -67,7 +67,8 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
     /// </summary>
     /// <remarks>
     /// The read is queued behind commands the entity has already received: it is answered only after
-    /// their events are committed and their effects have finished.
+    /// their events are committed and their Run effects have finished. Execute effects are not awaited: the
+    /// read may return while one is in flight.
     /// </remarks>
     Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
 }

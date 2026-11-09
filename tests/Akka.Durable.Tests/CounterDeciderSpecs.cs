@@ -5,7 +5,7 @@ using Xunit;
 namespace Akka.Durable.Tests;
 
 /// <summary>
-/// Pure decision tests: Decide / Evolve only, no ActorSystem.
+/// Pure decision tests: Decide / Evolve / Resume only, no ActorSystem.
 /// </summary>
 public class CounterDeciderSpecs
 {
@@ -55,9 +55,7 @@ public class CounterDeciderSpecs
         Scenario()
             .When(new IncrementAndRecord(1))
             .ThenPersisted(new Incremented(1))
-            .ThenEffects(typeof(RunEffect<CounterCommand, CounterEvent>))
-            .WhenRunSucceeded()
-            .ThenEffects(typeof(ReplyEffect));
+            .ThenEffects(typeof(RunEffect), typeof(ReplyEffect));
     }
 
     [Fact]
@@ -68,6 +66,74 @@ public class CounterDeciderSpecs
             .When(new GetCount())
             .ThenNothingPersisted()
             .ThenReplied(new GetCount(), new CountIs(7));
+    }
+
+    [Fact]
+    public void Service_increment_records_the_request_and_issues_the_effect()
+    {
+        var request = new IncrementViaService(2, Wait: false);
+
+        Scenario()
+            .When(request)
+            .ThenPersisted(new ServiceIncrementStarted(request))
+            .ThenExecuted(new Compute(request))
+            .ThenState(s => Assert.Equal(request, s.Pending));
+    }
+
+    [Fact]
+    public void Outcome_of_the_pending_request_is_applied_and_answers_it()
+    {
+        var request = new IncrementViaService(2, Wait: false);
+
+        Scenario()
+            .Given(new ServiceIncrementStarted(request))
+            .When(new Computed(request, 4))
+            .ThenPersisted(new ServiceIncrementFinished(4))
+            .ThenReplied(request, new Accepted())
+            .ThenState(s =>
+            {
+                Assert.Equal(4, s.Count);
+                Assert.Null(s.Pending);
+            });
+    }
+
+    [Fact]
+    public void Outcome_of_a_request_that_is_no_longer_pending_is_ignored()
+    {
+        Scenario()
+            .When(new Computed(new IncrementViaService(2, Wait: false), 4))
+            .ThenIgnored();
+    }
+
+    [Fact]
+    public void Resume_re_issues_the_effect_for_a_pending_request()
+    {
+        var request = new IncrementViaService(2, Wait: false);
+
+        Scenario()
+            .Given(new ServiceIncrementStarted(request))
+            .Resumed()
+            .ThenNothingPersisted()
+            .ThenExecuted(new Compute(request));
+    }
+
+    [Fact]
+    public void Resume_with_nothing_pending_has_no_effects()
+    {
+        Scenario()
+            .Given(new Incremented(1))
+            .Resumed()
+            .ThenNothingPersisted()
+            .ThenEffects();
+    }
+
+    [Fact]
+    public void A_definition_without_Resume_resumes_nothing()
+    {
+        DeciderScenario.For(Counter.Definition with { Resume = null })
+            .Given(new ServiceIncrementStarted(new IncrementViaService(2, Wait: false)))
+            .Resumed()
+            .ThenEffects();
     }
 
     [Fact]
@@ -86,9 +152,18 @@ public class CounterDeciderSpecs
     [Fact]
     public void No_effects_may_follow_Stop()
     {
-        var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
-            new EntityId("x"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
+        Assert.Throws<InvalidOperationException>(() =>
+            Decisions.None<CounterCommand, CounterEvent>().Stop().Schedule("tick", TimeSpan.FromSeconds(1), new Increment(1)));
+    }
 
-        Assert.Throws<InvalidOperationException>(() => Decisions.None<CounterCommand, CounterEvent>().Stop().Schedule("tick", TimeSpan.FromSeconds(1), new Increment(1)));
+    [Fact]
+    public void Execute_and_Send_effects_compare_by_their_data()
+    {
+        var handled = Decisions.None<CounterCommand, CounterEvent>()
+            .Execute(new Lookup(3))
+            .Send<CounterCommand>(new EntityId("other"), new Increment(1));
+
+        Assert.Equal(new ExecuteEffect(new Lookup(3)), handled.Effects[0].Value);
+        Assert.Equal(new SendEffect(typeof(CounterCommand), new EntityId("other"), (CounterCommand)new Increment(1)), handled.Effects[1].Value);
     }
 }

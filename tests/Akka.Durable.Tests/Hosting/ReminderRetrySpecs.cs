@@ -1,6 +1,8 @@
 using Akka.Cluster.Hosting;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Reminders;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace Akka.Durable.Tests.Hosting;
@@ -11,6 +13,14 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
 
     protected override ShardOptions? Sharding => null;
 
+    protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
+    {
+        base.ConfigureTestServices(context, services);
+        services.AddScoped<IEffectHandler<SendMail, CounterCommand>, UnavailableMailer>();
+    }
+
+    // The reminder's command issues an effect. The handler cannot deliver, and says so by returning the
+    // command that re-arms the same reminder key one hour out.
     protected override EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition => Counter.Definition with
     {
         InitialState = id =>
@@ -21,14 +31,7 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
         Decide = (state, command, ctx) => command switch
         {
             RemindLater c => ctx.None().Schedule("reminder", c.Delay, new Noop()),
-            Noop => ctx.None().Run<ScopedRecorder>(
-                async (recorder, ct) =>
-                {
-                    await recorder.RecordAsync("mail", ct);
-                    throw new InvalidOperationException("mailer unavailable");
-                },
-                onSuccess: next => next,
-                onFailure: (error, next) => next.Schedule("reminder", TimeSpan.FromHours(1), new Noop())),
+            Noop => ctx.None().Execute(new SendMail()),
             _ => Counter.Decide(state, command, ctx)
         }
     };
@@ -58,5 +61,16 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
         Assert.Equal(1, snapshot.SequenceNr);
         Assert.Equal(1, Volatile.Read(ref _initializations));
         Assert.Equal(["mail", "disposed"], Recorder.Entries);
+    }
+
+    public sealed record SendMail;
+
+    private sealed class UnavailableMailer(ScopedRecorder recorder) : IEffectHandler<SendMail, CounterCommand>
+    {
+        public async Task<CounterCommand> HandleAsync(SendMail effect, CancellationToken cancellationToken)
+        {
+            await recorder.RecordAsync("mail", cancellationToken);
+            return new RemindLater(TimeSpan.FromHours(1));
+        }
     }
 }
