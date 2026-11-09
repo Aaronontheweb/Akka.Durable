@@ -262,23 +262,186 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 
 ## Effects with outcomes
 
-When an external service decides what happens next, the decision is split in two. The first half persists what must be remembered and issues an effect. The second half is an ordinary command, produced by the effect's handler, that carries the result back into `Decide` against the state at that moment. The invoice above does this for recipient verification: `VerificationStarted` and `Verifying` are the memory, `VerifyRecipient` is the effect, `RecipientVerified` and `RecipientRejected` are the outcomes.
+When an external service decides what happens next, the decision is split in two. The first half persists what must be remembered and issues an effect. The second half is an ordinary command, produced by the effect's handler, that carries the result back into `Decide` against the state at that moment.
 
-Two kinds of outcome, chosen by the handler's registration:
+The invoice above does this for recipient verification. These are its two halves:
 
-- **`IEffectHandler<TEffect, TCommand>`: the entity decides.** The result goes through `Decide` like any other command. Use this when the result can be declined, retried, or ignored, as with the directory's answer.
-- **`IEffectHandler<TEffect, TEvent>`: the entity records.** The result is a fact about the world, such as a number a sequence service assigned. It is persisted as it is, through `Evolve`, in whatever state the entity is in. Use it only when every state can accept the fact.
+```csharp
+// First half. Remember that we asked, then ask.
+(Draft, IssueInvoice c) when c.Total > 0 =>
+    ctx.Persist(new VerificationStarted(c)).Execute(new VerifyRecipient(c.Recipient)),
 
-Exactly one handler is registered per effect type. What the runtime guarantees:
+// Second half. The handler's answer arrives as a command and is decided like any other.
+(Verifying v, RecipientVerified) =>
+    ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
+        .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
+        .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
+(Verifying v, RecipientRejected r) =>
+    ctx.Persist(new VerificationFailed(r.Reason)).Reply(v.Request, new InvoiceRejected(r.Reason)),
 
-- **The entity is not blocked.** `Execute` starts the handler and moves on; the outcome arrives later as a message. Other commands are handled in the meantime, which is why the invoice records `Verifying`: a second `IssueInvoice` meanwhile falls through to the rejection arm. To queue it instead, return `ctx.Stash()` while verifying and add `.UnstashAll()` to the outcome arms.
-- **Replies find their asker.** An outcome is handled on behalf of the command that issued the effect. `Reply(v.Request, ...)` in the second half answers whoever sent `IssueInvoice`, even though several messages later.
-- **Expected failures are outcomes.** A handler that can be declined returns the decline. A thrown exception or a timeout (`EntityOptions.EffectTimeout`, 30 seconds by default) is logged and dropped: the entity's state is unchanged, and no outcome arrives. A missing or ambiguous handler registration is a configuration error and restarts the entity.
-- **Nothing about the effect is journaled.** What survives a crash is the state. That is what `Resume` is for.
+// An answer that arrives in any other state has nothing to finish.
+(_, RecipientVerified or RecipientRejected) => ctx.Ignore(),
+```
+
+`VerificationStarted` and the `Verifying` state are the memory, `VerifyRecipient` is the effect, and `RecipientVerified` and `RecipientRejected` are the outcomes. Between the two halves sits the handler, the only code that touches the directory.
+
+### Command outcomes and event outcomes
+
+The second type argument of the handler's registration says what kind of outcome it produces. Exactly one handler is registered per effect type.
+
+**A command: the entity decides.** The result goes through `Decide` like any other command. Use this when the result can be declined, retried, or ignored. `VerifyRecipientHandler` is one:
+
+```csharp
+public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
+    : IEffectHandler<VerifyRecipient, InvoiceCommand>       // the outcome is a command
+{
+    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, CancellationToken ct) =>
+        await directory.LookupAsync(effect.Recipient, ct) switch
+        {
+            Known => new RecipientVerified(),
+            Unknown u => new RecipientRejected(u.Reason),
+        };
+}
+
+services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
+```
+
+**An event: the entity records.** The result is a fact about the world, and it is persisted as it is. Suppose a sequence service assigns each issued invoice its number, kept in an optional `Number` on `Issued` and `Paid`:
+
+```csharp
+public sealed record AssignNumber;                           // the effect
+
+public sealed class AssignNumberHandler(IInvoiceNumbers numbers)
+    : IEffectHandler<AssignNumber, InvoiceEvent>             // the outcome is an event
+{
+    public async Task<InvoiceEvent> HandleAsync(AssignNumber effect, CancellationToken ct) =>
+        new NumberAssigned(await numbers.NextAsync(ct));
+}
+
+services.AddScoped<IEffectHandler<AssignNumber, InvoiceEvent>, AssignNumberHandler>();
+
+// Decide issues the effect. There is no second arm: nothing is decided when the number arrives.
+(Verifying v, RecipientVerified) =>
+    ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
+        .Execute(new AssignNumber())
+        .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
+
+// Evolve takes the event in every state it can arrive in. The payment can get there first.
+(Issued s, NumberAssigned e) => s with { Number = e.Number },
+(Paid s, NumberAssigned e) => s with { Number = e.Number },
+```
+
+An event outcome skips `Decide`, so there is no arm in which to ignore it. Use one only when every state it can arrive in can accept the fact. Otherwise return a command and decide.
+
+### The entity is not blocked
+
+`Execute` starts the handler and moves on; the outcome arrives later as a message. Other commands are handled in the meantime, which is why the invoice records `Verifying`. A second `IssueInvoice` that arrives during verification matches no `Draft` arm and falls through to the rejection:
+
+```csharp
+(_, IssueInvoice c) => ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
+```
+
+To queue it instead, stash it while verifying and release the stash from both outcome arms:
+
+```csharp
+(Verifying, IssueInvoice) => ctx.Stash(),
+
+(Verifying v, RecipientVerified) =>
+    ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
+        .Reply(v.Request, new InvoiceAccepted(ctx.EntityId))
+        .UnstashAll(),
+(Verifying v, RecipientRejected r) =>
+    ctx.Persist(new VerificationFailed(r.Reason))
+        .Reply(v.Request, new InvoiceRejected(r.Reason))
+        .UnstashAll(),
+```
+
+A released command is decided against the new state. After a rejection the invoice is a `Draft` again, so the queued request starts its own verification.
+
+### Replies find their asker
+
+An outcome is handled on behalf of the command that issued the effect. The caller makes one call and awaits one reply; it does not see that the entity answered in two steps:
+
+```csharp
+// The caller.
+IssueReply reply = await invoices.Get(id).Ask(new IssueInvoice(250m, "billing@example.com"), ct);
+
+// The entity, several messages later. This reply completes the caller's Ask.
+(Verifying v, RecipientRejected r) =>
+    ctx.Persist(new VerificationFailed(r.Reason)).Reply(v.Request, new InvoiceRejected(r.Reason)),
+```
+
+`v.Request` is the `IssueInvoice` kept in state. It fixes the reply type. The reply itself goes to whoever sent the command that issued `VerifyRecipient`.
+
+### When the handler fails
+
+Expected failures are outcomes. A directory that does not know the recipient has given an answer, so the handler returns it and the entity decides what it means:
+
+```csharp
+Unknown u => new RecipientRejected(u.Reason),   // a decline is a result, not an exception
+```
+
+An exception from `HandleAsync`, or a handler that runs longer than `EntityOptions.EffectTimeout` (30 seconds by default), is logged as a warning and dropped. No outcome arrives and the state is unchanged: the invoice stays `Verifying`. To try again, arm a recurring timer in the first half, re-issue the effect from it, and cancel it from the outcome arms:
+
+```csharp
+(Draft, IssueInvoice c) when c.Total > 0 =>
+    ctx.Persist(new VerificationStarted(c))
+        .Execute(new VerifyRecipient(c.Recipient))
+        .Schedule("verify-retry", TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1), new RetryVerification()),
+
+// Still waiting: ask again. Resume already lists what is pending for this state.
+(Verifying, RetryVerification) => Resume(state, ctx),
+(_, RetryVerification) => ctx.Ignore(),
+
+(Verifying v, RecipientRejected r) =>
+    ctx.Persist(new VerificationFailed(r.Reason))
+        .CancelTimer("verify-retry")
+        .Reply(v.Request, new InvoiceRejected(r.Reason)),
+```
+
+The `RecipientVerified` arm cancels the timer the same way. A retried effect can produce two answers; the second finds the invoice no longer `Verifying` and is ignored by the `(_, RecipientVerified or RecipientRejected)` arm.
+
+The timeout is set per entity type:
+
+```csharp
+Invoice.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(5) } }
+```
+
+A missing handler registration is a configuration error, and so is registering both a command handler and an event handler for one effect type. Either one restarts the entity instead of being logged.
+
+Nothing about the effect is journaled. What survives a crash is the state, and [`Resume`](#resuming-after-a-restart) turns that state back into the pending effect.
 
 ## Run or Execute
 
 Both run service code after the decision's events commit, in a fresh DI scope, under `EntityOptions.EffectTimeout`. They differ in what the entity gets back.
+
+Take the invoice's reminder mail. With `Run` it is one line:
+
+```csharp
+(Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
+```
+
+There is no effect record, no handler and no second arm. If the mail server is down, a warning is logged and the invoice never knows.
+
+Now suppose the invoice must act on the result: remind again in 30 days if the mail went out, and stop if the address bounced. That is `Execute`:
+
+```csharp
+public sealed record MailReminder(string Recipient);         // the effect
+
+public sealed class MailReminderHandler(IInvoiceMailer mailer)
+    : IEffectHandler<MailReminder, InvoiceCommand>
+{
+    public async Task<InvoiceCommand> HandleAsync(MailReminder effect, CancellationToken ct) =>
+        await mailer.DeliverAsync(effect.Recipient, ct) ? new ReminderDelivered() : new ReminderBounced();
+}
+
+(Issued s, SendReminder) => ctx.None().Execute(new MailReminder(s.Recipient)),
+(Issued, ReminderDelivered) => ctx.None().Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
+(Issued, ReminderBounced) => ctx.None(),                     // no more reminders
+(_, ReminderDelivered or ReminderBounced) => ctx.Ignore(),
+```
+
+It costs an effect record, a handler and the outcome arms, and the result is now something `Decide` can see.
 
 | | `Run` | `Execute` |
 |---|---|---|
@@ -289,7 +452,46 @@ Both run service code after the decision's events commit, in a fresh DI scope, u
 | After a crash | Lost | Re-issued by `Resume`, if the state records it |
 | In tests | Checked by type (`ThenEffects`) | Compared by value (`ThenExecuted`); the handler is tested on its own |
 
-Use `Run` when nothing in the entity depends on the result and losing one is tolerable: a notification, a cache invalidation, a metric. The invoice's reminder mail is one. Use `Execute` when the result changes what the entity does next, or when the work has to survive a restart. If you find yourself wanting to know whether a `Run` succeeded, that is an `Execute`.
+**While it runs.** `Run` is awaited, so everything after it in the chain waits for it. This reply leaves only after the read model is written, and the caller can read what it wrote:
+
+```csharp
+(Issued s, RecordPayment p) when p.Amount == s.Total =>
+    ctx.Persist(new PaymentRecorded(p.Amount))
+        .Run<IInvoiceReadModel>((model, ct) => model.MarkPaidAsync(ctx.EntityId, ct))
+        .Reply(p, new PaymentAccepted()),
+```
+
+If the write fails, it is logged and the reply still goes out. An `Execute` in the same place does not hold the reply: it leaves at once, while the handler is still running.
+
+**In tests.** The difference is what a test can see:
+
+```csharp
+var command = new IssueInvoice(250m, "billing@example.com");
+InvoiceEvent[] issued =
+[
+    new VerificationStarted(command),
+    new InvoiceIssued(250m, "billing@example.com", DateTimeOffset.UnixEpoch),
+];
+
+// Run holds a lambda. A test can check that one was issued, and nothing about what it does.
+DeciderScenario.For(Invoice.Definition)
+    .Given(issued)
+    .When(new SendReminder())
+    .ThenEffects(typeof(RunEffect));
+
+// Execute is data. The decision is compared by value, and the handler is tested as a plain class.
+DeciderScenario.For(Invoice.Definition)
+    .Given(issued)
+    .When(new SendReminder())
+    .ThenExecuted(new MailReminder("billing@example.com"));
+
+var handler = new MailReminderHandler(new FakeInvoiceMailer(delivers: false));
+Assert.True(await handler.HandleAsync(new MailReminder("billing@example.com"), ct) is ReminderBounced);
+```
+
+**After a crash.** An `Execute` survives a restart only if the state records it. The reminder above does not: nothing is persisted before `MailReminder` is issued, so a crash loses it, as it would a `Run`. To keep it, persist a fact first, as the invoice does with `VerificationStarted`, and list the effect in `Resume`.
+
+Use `Run` when nothing in the entity depends on the result and losing one is tolerable: a notification, a cache invalidation, a metric. Use `Execute` when the result changes what the entity does next, or when the work has to survive a restart. If you find yourself wanting to know whether a `Run` succeeded, that is an `Execute`.
 
 ## Resuming after a restart
 
