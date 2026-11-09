@@ -17,8 +17,8 @@ namespace Akka.Durable;
 /// </summary>
 /// <remarks>
 /// The registry is keyed by command type, so each entity type must have its own command type
-/// (typically an entity-specific command union). Registering two entity types with the same command
-/// type makes the second registration collide in the ActorRegistry.
+/// (typically an entity-specific command union). <c>WithDurableEntity</c> rejects a second entity type
+/// with the same command type.
 /// </remarks>
 public sealed class EntityRegion<TCommand>
 {
@@ -73,6 +73,7 @@ public static class DurableEntityHostingExtensions
         var stopMessage = EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
         var passivateIdleAfter = options.PassivateIdleAfter;
 
+        EnsureOwnCommandType(builder, definition.TypeName, typeof(TCommand));
         AddFrameworkSerializerOnce(builder);
 
         // Fail at startup, before any entity runs, if an entity type would fall back to the
@@ -114,6 +115,25 @@ public static class DurableEntityHostingExtensions
             registry.Register<EntityRegion<TCommand>>(host);
             registry.Register<EntityRegion<TCommand, TState, TEvent>>(host);
         });
+    }
+
+    private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, Dictionary<Type, EntityTypeName>> CommandTypeOwners = [];
+
+    /// <summary>
+    /// Entity refs and <c>Send</c> find an entity type by its command type, so one actor system cannot host
+    /// two entity types with the same one. Without this check the second registration fails later, in the
+    /// ActorRegistry, with an error that names neither entity type.
+    /// </summary>
+    private static void EnsureOwnCommandType(AkkaConfigurationBuilder builder, EntityTypeName typeName, Type commandType)
+    {
+        var owners = CommandTypeOwners.GetOrCreateValue(builder);
+        if (owners.TryAdd(commandType, typeName)) return;
+
+        var owner = owners[commandType];
+        throw new InvalidOperationException(owner == typeName
+            ? $"Durable entity [{typeName.Value}] is registered twice. Call WithDurableEntity once for each entity type."
+            : $"Durable entities [{owner.Value}] and [{typeName.Value}] both use the command type {commandType.FullName}. " +
+              "Each entity type needs its own command type, because entity refs and Send find the entity type by it.");
     }
 
     private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, object> FrameworkSerializerAdded = [];
