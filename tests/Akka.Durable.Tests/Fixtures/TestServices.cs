@@ -35,7 +35,7 @@ public sealed class ScopedRecorder(EffectRecorder recorder) : IAsyncDisposable
 }
 
 /// <summary>
-/// Lets a test hold a Run effect open until it chooses to release it.
+/// Lets a test hold a Run effect or an effect handler open until it chooses to release it.
 /// </summary>
 public sealed class Gate
 {
@@ -50,8 +50,11 @@ public sealed class Gate
 /// </summary>
 internal sealed class TestEntityParent : ReceiveActor
 {
-    public TestEntityParent(Props entityProps, IActorRef probe)
+    private readonly bool _stopOnFailure;
+
+    public TestEntityParent(Props entityProps, IActorRef probe, bool stopOnFailure = false)
     {
+        _stopOnFailure = stopOnFailure;
         var child = Context.ActorOf(entityProps, "entity");
         Context.Watch(child);
 
@@ -65,6 +68,10 @@ internal sealed class TestEntityParent : ReceiveActor
         Receive<Terminated>(t => probe.Tell(new EntityStopped(t.ActorRef)));
         ReceiveAny(m => child.Forward(m));
     }
+
+    // Stopping instead of restarting keeps a failure during recovery from looping.
+    protected override SupervisorStrategy SupervisorStrategy() =>
+        _stopOnFailure ? new OneForOneStrategy(_ => Directive.Stop) : base.SupervisorStrategy();
 }
 
 internal sealed record EntityStopped(IActorRef Entity);

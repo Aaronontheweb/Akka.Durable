@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Event;
+using Akka.Hosting;
 using Akka.Persistence;
 using Akka.Reminders;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,7 +25,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private readonly ITimeProvider _timeProvider;
     private readonly ILoggingAdapter _log;
 
-    // Cancelled when this incarnation stops so in-flight Run effects are asked to stop.
+    // Cancelled when this incarnation stops. In-flight Run and Execute work is asked to stop, and an
+    // outcome that arrives afterwards is dropped: the next incarnation re-derives pending effects in Resume.
     private readonly CancellationTokenSource _lifetime = new();
 
     // Created lazily so entities that never touch reminders don't require them to be configured.
@@ -67,6 +69,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private IReminderClient Reminders =>
         _reminderClient ??= Context.ReminderClient().CreateClient(EntityType.Value, _entityId.Value);
 
+    private DecisionContext<TState, TCommand, TEvent> NewContext() =>
+        new(_entityId, EntityType, _timeProvider.Now, State);
+
     #region Recovery
 
     private void Recovers()
@@ -98,7 +103,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Recover<TEvent>(Apply);
 
         Recover<RecoveryCompleted>(_ =>
-            _log.Debug("Recovery completed at SeqNr {0}", LastSequenceNr));
+        {
+            _log.Debug("Recovery completed at SeqNr {0}", LastSequenceNr);
+            ResumePendingEffects();
+        });
 
         // Catch-all, registered last (handlers match in registration order). An unmatched journal entry
         // is otherwise skipped silently by Akka.Persistence, leaving the entity with missing state.
@@ -126,6 +134,28 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void Apply(TEvent @event) => State = _definition.Evolve(State, @event);
 
+    /// <summary>
+    /// Re-issues the effects the recovered state says are still pending. Committing here, before the
+    /// internal stash is released, makes them run before any command that arrived during recovery.
+    /// </summary>
+    private void ResumePendingEffects()
+    {
+        if (_definition.Resume is null) return;
+
+        var pending = _definition.Resume(State, NewContext());
+        if (!pending.Events.IsDefaultOrEmpty)
+            throw new InvalidOperationException(
+                $"{EntityType.Value}.Resume returned events for entity [{_entityId.Value}]. Resume lists the effects " +
+                "that are still pending for the recovered state; it decides nothing, so it cannot persist. " +
+                "Return the events from Decide instead.");
+
+        if (pending.Effects.IsDefaultOrEmpty) return;
+
+        _log.Debug("Resuming {0} pending effects", pending.Effects.Length);
+        // The asker of the request that started this work belongs to the previous incarnation.
+        Commit(pending, Context.System.DeadLetters, reminder: null);
+    }
+
     #endregion
 
     #region Command processing
@@ -136,12 +166,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Command<ReminderEnvelope>(HandleReminder);
 
         // State query, handled outside TCommand so Decide never sees it. Akka.Persistence stashes
-        // incoming messages while events persist and effects run, so a query sent after a command is
-        // answered only once that command's events are committed and its effects have finished.
+        // incoming messages while events persist and Run effects execute, so a query sent after a command is
+        // answered only once that command's events are committed and its Run effects have finished.
         // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
         Command<GetEntityState>(_ => Sender.Tell(new EntityStateReply(State!, LastSequenceNr)));
 
-        Command<TCommand>(command => HandleCommand(command, reminder: null));
+        Command<TCommand>(command => HandleCommand(command, Sender, reminder: null));
+        Command<EffectCompleted>(HandleEffectCompleted);
+        Command<ForeignReply>(reply => HandleForeign(reply.Message, reply.Origin));
         Command<StopEntity>(_ => Context.Stop(Self));
 
         Command<SaveSnapshotSuccess>(HandleSnapshotSaved);
@@ -153,17 +185,21 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Command<DeleteMessagesSuccess>(_ => { });
         Command<DeleteMessagesFailure>(f =>
             _log.Warning(f.Cause, "Failed to delete events up to SeqNr {0}", f.ToSequenceNr));
+
+        // Last: a message of any other type is a command only if the definition says how (Accepts).
+        Command<object>(message => HandleForeign(message, Sender));
     }
 
-    private void HandleCommand(TCommand command, ReminderEnvelope? reminder)
+    /// <summary>
+    /// Decides on a command. <paramref name="origin"/> is who <c>Reply</c> answers: the command's sender, or,
+    /// for a command produced by an effect, the sender of the command that issued that effect.
+    /// </summary>
+    private void HandleCommand(TCommand command, IActorRef origin, ReminderEnvelope? reminder)
     {
-        var sender = Sender; // captured per-command; Reply targets this after async completion
-        var context = new DecisionContext<TState, TCommand, TEvent>(_entityId, EntityType, _timeProvider.Now, State);
-
-        switch (_definition.Decide(State, command, context))
+        switch (_definition.Decide(State, command, NewContext()))
         {
             case Handled<TCommand, TEvent> handled:
-                Commit(handled, sender, reminder);
+                Commit(handled, origin, reminder);
                 break;
 
             case Ignored:
@@ -203,7 +239,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // The check still guards against a payload that changed type in reminder storage.
         if (envelope.Message is TCommand command)
         {
-            HandleCommand(command, envelope);
+            HandleCommand(command, Sender, envelope);
             return;
         }
 
@@ -213,26 +249,71 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Unhandled(envelope);
     }
 
-    private void Commit(Handled<TCommand, TEvent> handled, IActorRef sender, ReminderEnvelope? reminder,
-        HashSet<object>? earlierStages = null)
+    /// <summary>A message that is not a <typeparamref name="TCommand"/>: typically another entity's reply.</summary>
+    private void HandleForeign(object message, IActorRef origin)
     {
-        var stages = earlierStages ?? [];
-        if (!stages.Add(handled.Stage))
-            throw new InvalidOperationException(Handled<TCommand, TEvent>.ReusedStageMessage);
+        if (message is TCommand command)
+        {
+            HandleCommand(command, origin, reminder: null);
+            return;
+        }
 
+        if (_definition.TryAccept(message, out var accepted))
+        {
+            HandleCommand(accepted, origin, reminder: null);
+            return;
+        }
+
+        Unhandled(message);
+    }
+
+    private void HandleEffectCompleted(EffectCompleted completed)
+    {
+        if (completed.Failure is { } failure)
+        {
+            // The state already records that the effect was issued. Resume re-derives it on the next
+            // incarnation and a retry arm in Decide can re-issue it sooner. A handler that has to report a
+            // failure to the entity returns it as an outcome instead of throwing.
+            _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. State is unchanged.",
+                completed.Effect, EntityType.Value, _entityId.Value);
+            return;
+        }
+
+        switch (completed.Outcome)
+        {
+            case TCommand command:
+                HandleCommand(command, completed.Origin, reminder: null);
+                break;
+
+            case TEvent @event:
+                // A fact from the outside world: journaled as it is, no decision involved.
+                Commit(Decisions.Persist<TCommand, TEvent>(@event), completed.Origin, reminder: null);
+                break;
+
+            case null:
+                _log.Debug("Effect {0} completed with no outcome", completed.Effect);
+                break;
+
+            default:
+                throw new InvalidOperationException(
+                    $"The handler for effect {completed.Effect} returned a {completed.Outcome.GetType()}, which is " +
+                    $"neither a {typeof(TCommand)} nor a {typeof(TEvent)}.");
+        }
+    }
+
+    private void Commit(Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder)
+    {
         ImmutableArray<TEvent> events = handled.Events.IsDefault ? [] : handled.Events;
-        ImmutableArray<EntityEffect<TCommand, TEvent>> effects = handled.Effects.IsDefault ? [] : handled.Effects;
+        ImmutableArray<EntityEffect> effects = handled.Effects.IsDefault ? [] : handled.Effects;
 
         // Zero events is fine here: PersistAll routes onCompleteAsync through the internal
-        // *stashing* Defer, so no further commands are processed until effects complete.
+        // *stashing* Defer, so no further commands are processed until the effects are dispatched.
         // (Public DeferAsync does NOT stash - don't swap it in.)
         PersistAll(events, Apply, onCompleteAsync: async () =>
         {
             if (!events.IsEmpty) MaybeSnapshot();
-
-            // A Run starts a new persistence stage. Its terminal branch owns the acknowledgement.
-            if (await ExecuteEffectsAsync(effects, sender, reminder, stages) && reminder is not null)
-                AckReminder(reminder);
+            await ExecuteEffectsAsync(effects, origin);
+            if (reminder is not null) AckReminder(reminder);
         });
     }
 
@@ -240,44 +321,43 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     #region Effects
 
-    private async Task<bool> ExecuteEffectsAsync(
-        ImmutableArray<EntityEffect<TCommand, TEvent>> effects, IActorRef sender, ReminderEnvelope? reminder,
-        HashSet<object> stages)
+    private async Task ExecuteEffectsAsync(ImmutableArray<EntityEffect> effects, IActorRef origin)
     {
         foreach (var effect in effects)
         {
             switch (effect)
             {
                 case ReplyEffect reply:
-                    sender.Tell(reply.Response, Self);
+                    origin.Tell(reply.Response, Self);
                     break;
 
                 case TellEffect tell:
                     tell.Recipient.Tell(tell.Message, Self);
                     break;
 
-                case RunEffect<TCommand, TEvent> run:
-                    // Keep this await on the actor scheduler: reading State and committing the next
-                    // decision must remain inside the actor, even though service work is independent.
-                    var outcome = await ExecuteRunAsync(run);
+                case ExecuteEffect execute:
+                    // Started, not awaited: the outcome returns as an EffectCompleted message.
+                    await StartExecuteAsync(execute, origin);
+                    break;
+
+                case SendEffect send:
+                    StartSend(send, origin);
+                    break;
+
+                case RunEffect run:
+                    // Awaited in place; later effects and commands wait. Keep this await on the actor
+                    // scheduler so the rest of the decision stays inside the actor.
+                    var outcome = await InvokeAsync(_services.CreateAsyncScope(),
+                        async (services, ct) =>
+                        {
+                            await run.ExecuteAsync(services, ct);
+                            return null;
+                        }, run.Timeout);
                     _lifetime.Token.ThrowIfCancellationRequested();
-                    // Only the invocation is inside ExecuteRunAsync's failure boundary. Exceptions in
-                    // continuation construction, persistence, and later effects go to supervision.
-                    Handled<TCommand, TEvent> next;
                     if (outcome.Failure is { } failure)
-                    {
-                        _log.Warning(failure, "Run effect failed for entity [{0}/{1}]. Executing failure continuation.",
+                        _log.Warning(failure, "Run effect failed for entity [{0}/{1}]. Continuing with the next effect.",
                             EntityType.Value, _entityId.Value);
-                        next = run.OnFailure(State!, _timeProvider.Now, failure);
-                    }
-                    else
-                    {
-                        next = run.OnSuccess(State!, _timeProvider.Now, outcome.Result);
-                    }
-                    // Register the next persist before releasing this callback. Do not await it here:
-                    // its journal acknowledgements must be processed by the persistent actor.
-                    Commit(next, sender, reminder, stages);
-                    return false;
+                    break;
 
                 case ScheduleEffect schedule:
                     EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
@@ -312,23 +392,99 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
                 case StopEffect:
                     Passivate();
-                    return true; // Handled.Add guarantees Stop is the last effect
+                    return; // Handled.Add guarantees Stop is the last effect
 
                 default:
                     throw new InvalidOperationException($"Unsupported entity effect: {effect.Value}");
             }
         }
-        return true;
     }
 
-    private sealed record RunOutcome(object? Result, Exception? Failure);
-
-    private async Task<RunOutcome> ExecuteRunAsync(RunEffect<TCommand, TEvent> effect)
+    private async Task StartExecuteAsync(ExecuteEffect execute, IActorRef origin)
     {
-        var timeout = effect.Timeout ?? _options.EffectTimeout;
+        if (execute.Resolve is null)
+            throw new InvalidOperationException("An ExecuteEffect must be created through Handled.Execute.");
+
         var scope = _services.CreateAsyncScope();
+        Func<CancellationToken, Task<object?>> invoke;
+        try
+        {
+            // A missing or ambiguous handler is a configuration error and goes to supervision.
+            // Only the handler's own run is best effort.
+            invoke = execute.Resolve(scope.ServiceProvider);
+        }
+        catch
+        {
+            await scope.DisposeAsync();
+            throw;
+        }
+
+        var self = Self;
+        var lifetime = _lifetime.Token;
+        var log = _log;
+        var effect = execute.Effect;
+        _ = InvokeAsync(scope, (_, ct) => invoke(ct), timeout: null).ContinueWith(t =>
+        {
+            // This incarnation is gone; its successor re-derives pending effects in Resume.
+            if (lifetime.IsCancellationRequested) return;
+
+            if (t.IsCompletedSuccessfully)
+                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin), self);
+            else
+                log.Error(t.Exception, "The outcome of effect {0} could not be observed", effect);
+        }, TaskScheduler.Default);
+    }
+
+    private void StartSend(SendEffect send, IActorRef origin)
+    {
+        if (send.ResolveRegion is null)
+            throw new InvalidOperationException("A SendEffect must be created through Handled.Send.");
+
+        IActorRef region;
+        try
+        {
+            region = send.ResolveRegion(Context.System);
+        }
+        catch (MissingActorRegistryEntryException error)
+        {
+            throw new InvalidOperationException(
+                $"No durable entity type with command protocol {send.CommandType} is hosted in this ActorSystem, so " +
+                $"entity [{EntityType.Value}/{_entityId.Value}] cannot send to [{send.Target.Value}]. For a union " +
+                $"protocol, name it explicitly: Send<{send.CommandType.Name}Command>(...).", error);
+        }
+
+        var self = Self;
+        var lifetime = _lifetime.Token;
+        var log = _log;
+        // Ask gives the target a reply address that lives until it answers, and ties the answer to the origin
+        // of the command that issued the send. The entity's own reminders are its deadline, not this call.
+        _ = region.Ask(new ShardingEnvelope(send.Target.Value, send.Command), timeout: null, cancellationToken: lifetime)
+            .ContinueWith(t =>
+            {
+                if (lifetime.IsCancellationRequested) return;
+
+                if (t.IsCompletedSuccessfully)
+                    self.Tell(new ForeignReply(t.Result, origin), self);
+                else
+                    log.Warning(t.Exception, "Send of {0} to [{1}] got no reply", send.Command, send.Target.Value);
+            }, TaskScheduler.Default);
+    }
+
+    private readonly record struct EffectOutcome(object? Result, Exception? Failure);
+
+    /// <summary>
+    /// Runs one piece of service work inside <paramref name="scope"/> under a time budget. Never throws for the
+    /// work's own failure or timeout; those come back in the outcome. Disposes the scope once the work has
+    /// really finished, which can be after a timeout.
+    /// </summary>
+    private async Task<EffectOutcome> InvokeAsync(
+        AsyncServiceScope scope,
+        Func<IServiceProvider, CancellationToken, Task<object?>> invoke,
+        TimeSpan? timeout)
+    {
+        var limit = timeout ?? _options.EffectTimeout;
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-        cts.CancelAfter(timeout);
+        cts.CancelAfter(limit);
 
         Task<object?> task;
         try
@@ -338,7 +494,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             task = Task.Run(() =>
             {
                 cts.Token.ThrowIfCancellationRequested();
-                return effect.ExecuteAsync(scope.ServiceProvider, cts.Token);
+                return invoke(scope.ServiceProvider, cts.Token);
             });
         }
         catch
@@ -350,17 +506,17 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         try
         {
-            return new RunOutcome(await task.WaitAsync(timeout, _lifetime.Token).ConfigureAwait(false), null);
+            return new EffectOutcome(await task.WaitAsync(limit, _lifetime.Token).ConfigureAwait(false), null);
         }
         catch (Exception ex) when (!_lifetime.IsCancellationRequested)
         {
             // Either WaitAsync gave up first, or our CancelAfter fired and the task honoured it.
             var timedOut = (ex is TimeoutException && !task.IsCompleted) || cts.IsCancellationRequested;
             var failure = timedOut
-                ? new TimeoutException($"Run effect did not complete within {timeout}.", ex)
+                ? new TimeoutException($"Effect did not complete within {limit}.", ex)
                 : ex;
 
-            return new RunOutcome(null, failure);
+            return new EffectOutcome(null, failure);
         }
         finally
         {
@@ -387,13 +543,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             try
             {
                 if (t.IsFaulted)
-                    log.Warning(t.Exception, "Run effect failed after it had already timed out");
+                    log.Warning(t.Exception, "Effect failed after it had already timed out");
                 cts.Dispose();
                 await scope.DisposeAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                log.Error(ex, "Failed to dispose DI scope of a timed-out Run effect");
+                log.Error(ex, "Failed to dispose the DI scope of a timed-out effect");
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
@@ -490,4 +646,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         public static readonly StopEntity Instance = new();
         private StopEntity() { }
     }
+
+    /// <summary>The result of an <c>Execute</c> handler, sent by the entity to itself.</summary>
+    private sealed record EffectCompleted(object Effect, object? Outcome, Exception? Failure, IActorRef Origin)
+        : INoSerializationVerificationNeeded;
+
+    /// <summary>Another entity's reply to a <c>Send</c>, with the origin of the command that sent it.</summary>
+    private sealed record ForeignReply(object Message, IActorRef Origin) : INoSerializationVerificationNeeded;
 }

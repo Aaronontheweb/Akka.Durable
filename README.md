@@ -39,24 +39,21 @@ public static class Invoice
         (state, command) switch
         {
             (Draft, IssueInvoice c) when c.Total > 0 =>
-                ctx.For(c).Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
+                ctx.Persist(new InvoiceIssued(c.Total, c.Recipient, ctx.UtcNow))
                     .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
-                    .Reply(new InvoiceAccepted(ctx.EntityId)),
+                    .Reply(c, new InvoiceAccepted(ctx.EntityId)),
 
             (Issued s, RecordPayment p) when p.Amount == s.Total =>
-                ctx.For(p).Persist(new PaymentRecorded(p.Amount))
+                ctx.Persist(new PaymentRecorded(p.Amount))
                     .CancelTimer("reminder")
-                    .Reply(new PaymentAccepted()),
+                    .Reply(p, new PaymentAccepted()),
 
-            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>(
-                (mailer, ct) => mailer.RemindAsync(ct),
-                onSuccess: next => next,
-                // Escalate so a failed reminder remains eligible for redelivery.
-                onFailure: (error, _) => throw new InvalidOperationException("Reminder delivery failed", error)),
+            // Nothing comes back from a reminder, so best-effort Run is enough.
+            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
             (_, SendReminder) => ctx.Ignore(),
 
-            (_, IssueInvoice c) => ctx.For(c).Reply(new InvoiceRejected("Invalid invoice operation")),
-            (_, RecordPayment p) => ctx.For(p).Reply(new InvoiceRejected("Invalid invoice operation")),
+            (_, IssueInvoice c) => ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
+            (_, RecordPayment p) => ctx.None().Reply(p, new InvoiceRejected("Invalid invoice operation")),
         };
 
     public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
@@ -206,74 +203,114 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 }
 ```
 
-- **Events first, then effects.** Effects run only after the events are committed, in the order they're declared. The entity handles no other command until they finish.
-- **`Run` branches on the operation's outcome.** Both `onSuccess` and `onFailure` are required. Only the selected continuation executes; its events commit before its effects and reply. Each operation gets a fresh DI scope. Completed invocations dispose their scope before continuing; timed-out invocations that ignore cancellation keep their scope until they actually finish. The entity holds later commands and state reads until the entire graph finishes.
-- **`Run` is best effort.** Neither the operation nor its continuations are journaled or replayed during recovery. Service work and scope cleanup can finish independently of actor shutdown. An invocation timeout selects `onFailure`; actor shutdown does not. Continuation errors and journal failures go to supervision rather than selecting the service's failure branch.
+- **Events first, then effects.** Effects run only after the events are committed, in the order they're declared.
+- **Typed replies.** `Reply(command, reply)` takes the command that declared the reply type, so a wrong reply is a compile error. The command fixes the type and is not sent anywhere: it can be the command being handled, or one kept in state from earlier.
+- **`Execute` for work whose result matters.** The decider issues a plain effect record; a registered handler runs it; the result comes back as one of the entity's commands or events. See [Effects with outcomes](#effects-with-outcomes).
+- **`Run` for work whose result doesn't.** A projection write, a notification. It runs in a fresh DI scope and is awaited in place, so later effects and later commands wait for it. A failure or timeout is logged and the decision continues.
 - **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
-- **Typed replies.** `ctx.For(command)` binds the reply contract once. `Reply` and `Run` finish a request branch: no unconditional reply can follow either. Use `ReplyAndRun` to reply before best effort work, or `ReplyAndStop` to reply and then passivate; `.UnstashAll().Reply(...)` releases stashed commands after this decision completes.
-- **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `ctx.None().Stop()` passivates without replying or deleting the entity.
+- **`Send` talks to another entity.** Its reply arrives as one of this entity's commands. See [Talking to other entities](#talking-to-other-entities).
+- **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `.UnstashAll()` releases stashed commands after this decision completes. `.Stop()` must be the last effect; it passivates without deleting the entity.
 
-## Asynchronous request decisions
+## Effects with outcomes
 
-If an external service determines whether an invoice was issued, persist the outcome in the selected continuation. The command still declares `IssueReply`, and both branches keep that contract:
+When an external service decides what happens next, the decision is split in two. The first half issues an effect and, if something must be remembered, persists that the work started. The second half is an ordinary command, produced by the effect's handler, that carries the result back into `Decide`.
+
+Suppose a recipient directory must approve an invoice before it is issued. The effect and its outcomes are plain records; the outcomes are cases of `InvoiceCommand`:
 
 ```csharp
-public static RequestDecision<InvoiceCommand, InvoiceEvent, IssueReply> IssueExternally(
-    IssueInvoice command, InvoiceContext ctx)
+public sealed record VerifyRecipient(IssueInvoice Request);                       // the effect: never serialized
+
+public sealed record RecipientVerified(IssueInvoice Request);                     // outcome commands: add them
+public sealed record RecipientRejected(IssueInvoice Request, string Reason);      // to the InvoiceCommand union
+
+(Draft, IssueInvoice c) when c.Total > 0 => ctx.None().Execute(new VerifyRecipient(c)),
+
+(Draft, RecipientVerified v) => ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
+    .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
+    .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
+
+(Draft, RecipientRejected r) => ctx.None().Reply(r.Request, new InvoiceRejected(r.Reason)),
+```
+
+The handler is the only impure code. It is resolved from a fresh DI scope each time the effect runs, and its return type says what kind of outcome it produces:
+
+```csharp
+public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
+    : IEffectHandler<VerifyRecipient, InvoiceCommand>
 {
-    var request = ctx.For(command);
-    return request.Run<IInvoiceService, IssueResult>(
-        (service, ct) => service.IssueAsync(command.Total, command.Recipient, ct),
-        onSuccess: (result, next) => result switch
+    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, CancellationToken ct) =>
+        await directory.LookupAsync(effect.Request.Recipient, ct) switch
         {
-            Created => next
-                .Persist(new InvoiceIssued(command.Total, command.Recipient, next.UtcNow))
-                .Reply(new InvoiceAccepted(next.EntityId)),
-            Declined rejected => next.Reply(new InvoiceRejected(rejected.Reason)),
-        },
-        onFailure: (error, next) => next.Reply(new InvoiceRejected(error.Message)));
+            Known => new RecipientVerified(effect.Request),
+            Unknown u => new RecipientRejected(effect.Request, u.Reason),
+        };
 }
+
+// at startup, next to the other services
+services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
 ```
 
-Here `IssueResult` is the service's result union, with `Created` and `Declined` cases. A returned business rejection goes through `onSuccess`, which means the invocation returned normally. Exceptions and timeouts go through `onFailure`. A timeout does not establish whether an external action occurred; domains that need that distinction should include an indeterminate result in their reply contract.
+Two kinds of outcome, chosen by the handler's registration:
 
-Both branches can call a named pure decider or return another `Run`. Every callback receives `next`: its state includes events committed before the operation, and its time is the operation's completion time. It starts with no events or effects. Build the continuation from `next`; returning a captured, previously committed builder is rejected before its events or effects can run again.
+- **`IEffectHandler<TEffect, TCommand>`: the entity decides.** The result goes through `Decide` like any other command, against the state at that moment. Use this when the result can be declined, retried, or ignored.
+- **`IEffectHandler<TEffect, TEvent>`: the entity records.** The result is a fact about the world, such as a number a sequence service assigned. It is persisted as it is, through `Evolve`, in whatever state the entity is in. Use it only when every state can accept the fact.
 
-For an operation returning `Task`, use `Run<TService>`. Both handlers remain required:
+What the runtime guarantees:
+
+- **The entity is not blocked.** `Execute` starts the handler and moves on; the outcome arrives later as a message. Other commands are handled in the meantime. If a second request must wait for the first outcome, say so: persist that the work started and return `ctx.Stash()` while it is pending, as the invoice would with a `Verifying` state.
+- **Replies find their asker.** An outcome is handled on behalf of the command that issued the effect. `Reply(v.Request, ...)` in the second half answers whoever sent `IssueInvoice`, even though several messages later.
+- **Expected failures are outcomes.** A handler that can be declined returns the decline. A thrown exception or a timeout (`EntityOptions.EffectTimeout`, 30 seconds by default) is logged and dropped: the entity's state is unchanged, and no outcome arrives. A missing or ambiguous handler registration is a configuration error and restarts the entity.
+- **Nothing about the effect is journaled.** What survives a crash is the state. That is what `Resume` is for.
+
+## Resuming after a restart
+
+An entity that is waiting for an outcome when its process dies recovers into the state that says so. `Resume` is the optional function that lists the effects still pending for a state. It runs once after recovery, before the first command, through the same effect path as a decision.
 
 ```csharp
-return request.Run<IInvoiceMailer>(
-    (mailer, ct) => mailer.SendAsync(command.Recipient, ct),
-    onSuccess: next => next.Reply(new InvoiceAccepted(next.EntityId)),
-    onFailure: (error, next) => next.Reply(new InvoiceRejected(error.Message)));
+// Suppose Decide also persisted VerificationStarted(c), which Evolve turns into a Verifying(Request) state.
+public static Handled<InvoiceCommand, InvoiceEvent> Resume(InvoiceState state, InvoiceContext ctx) =>
+    state switch
+    {
+        Verifying v => ctx.None().Execute(new VerifyRecipient(v.Request)),
+        _ => ctx.None(),
+    };
+
+public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
+    new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve) { Resume = Resume };
 ```
 
-To acknowledge a request before doing best effort work, use `ReplyAndRun`:
+Two rules make it safe, and the runtime enforces the first: `Resume` may not return events, because nothing was decided, and everything it returns must follow from state alone, so running it twice is harmless. Give effects idempotency keys, and prefer re-sending a query to re-sending a change. The same function serves a retry timer: `(var s, RetryVerification) => Resume(s, ctx)`.
+
+Replies issued by resumed work go to dead letters: the asker belongs to the previous incarnation. Its retry gets the answer from an arm that handles the repeated request, such as `(Issued, IssueInvoice c) => ctx.None().Reply(c, new InvoiceAccepted(ctx.EntityId))`. A repeated command should return the same reply it returned the first time; callers will retry.
+
+Entities whose effects never wait for an outcome do not need `Resume`. Timers re-arm themselves through Akka.Reminders, and `Run` work is best effort by definition. To retry a reminder-driven effect without restarting the entity, re-arm the same key from the outcome: the old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact.
+
+## Talking to other entities
+
+`Send` addresses another durable entity by its command protocol and ID. The target's reply, if any, comes back to the sender as a foreign type, and `Accepts` on the definition says how it becomes one of the sender's commands. Together they are what a workflow needs to drive other entities.
 
 ```csharp
-return request
-    .Persist(new InvoiceIssued(command.Total, command.Recipient, request.UtcNow))
-    .ReplyAndRun<IInvoiceMailer>(new InvoiceAccepted(request.EntityId),
-        (mailer, ct) => mailer.SendAsync(command.Recipient, ct),
-        onSuccess: next => next,
-        onFailure: (error, next) => next);
+public sealed record InvoiceReplied(IssueReply Reply);      // a CheckoutCommand case
+
+public static readonly EntityDefinition<CheckoutState, CheckoutCommand, CheckoutEvent> Definition =
+    new EntityDefinition<CheckoutState, CheckoutCommand, CheckoutEvent>(
+            new EntityTypeName("checkouts"), _ => new NotStarted(), Decide, Evolve) { Resume = Resume }
+        .Accepts<IssueReply>(reply => new InvoiceReplied(reply));
+
+(NotStarted, StartCheckout c) => ctx.Persist(new Started(c, InvoiceFor(ctx.EntityId)))
+    .Send<InvoiceCommand>(InvoiceFor(ctx.EntityId), new IssueInvoice(c.Total, c.Recipient))
+    .Schedule("deadline", TimeSpan.FromMinutes(10), new CheckoutTimedOut()),
+
+(AwaitingInvoice a, InvoiceReplied { Reply: InvoiceAccepted }) => ctx.Persist(new Completed())
+    .CancelTimer("deadline").Reply(a.Request, new CheckoutCompleted()).Stop(),
+
+(AwaitingInvoice a, InvoiceReplied { Reply: InvoiceRejected r }) => ctx.Persist(new Abandoned(r.Reason))
+    .CancelTimer("deadline").Reply(a.Request, new CheckoutFailed(r.Reason)).Stop(),
 ```
 
-The reply follows the event commit and precedes the invocation. These continuations receive an `EffectContext` that can persist events, send messages, schedule reminders, or run further operations, but cannot reply again. The runtime logs invocation failures even when the failure branch does nothing. Later commands still wait until the work finishes.
+Name the target's command type explicitly in `Send<InvoiceCommand>(...)`: the compiler would otherwise infer the case type, which no entity type is registered under. The target must be hosted in the same actor system, locally or as a shard region. The reply is handled on behalf of the command that sent it, so `Reply(a.Request, ...)` reaches the caller that started the checkout. The `Accepts` table lives on the definition rather than on the send so that a reply to a command re-sent by `Resume` is wrapped the same way after a restart.
 
-`ctx.None()` and `ctx.Persist(...)` also produce an `EffectContext` for commands without replies. Its `Run` and `Stop` return a finished `EffectDecision`, so effects cannot be appended after either. `ctx.For(command)` produces a `RequestContext` whose continuations retain that command's reply type.
-
-Returning an empty failure branch accepts the failure and completes the command. For reminder commands that also acknowledges the reminder; the `SendReminder` example above deliberately escalates instead, preserving redelivery on failure. Choose that policy explicitly for each operation.
-
-To retry without restarting the entity, re-arm the same reminder key in the failure branch:
-
-```csharp
-onFailure: (error, next) => next.Schedule("reminder", TimeSpan.FromHours(1), new SendReminder())
-```
-
-The old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact. A `NotFound` acknowledgement for the superseded occurrence is logged at Debug.
-
-Events explicitly persisted before `Run` remain committed if the operation fails. This API does not provide a transaction with an external service or automatic retries after a crash.
+There is no timeout on a send. The entity's own reminder is its deadline, as above. A message of a type the definition does not accept is unhandled, as before.
 
 ## Serialization
 
@@ -283,6 +320,7 @@ Events and snapshots go to the journal, scheduled commands go to the reminder st
 - **Register the serializer** next to the entity: `akka.WithCustomSerializer(InvoiceSerializer.CreateSerializerDetails)`.
 - **`WithDurableEntity` checks this at startup.** If `TState`, `TCommand` or `TEvent` would fall back to the default JSON serializer, the host fails to start and the error names the types. Akka.Durable registers its own serializer (id 22560) for the framework's messages.
 - **Recovery fails on an entry it can't read** rather than continuing with missing state. `EntityOptions.SkipUnrecognizedJournalEntries` lets an entity skip such entries, logging an error for each. An `IReadEventAdapter` on the journal can repair or drop them instead.
+- **Effects are not serialized.** `Execute` and `Send` payloads stay in the process that issued them. Outcome commands and events are part of the entity's protocol and are serialized like the rest of it.
 
 Stored events and snapshots are a long-lived contract, so evolve these types by extension only:
 
@@ -293,13 +331,14 @@ Stored events and snapshots are a long-lived contract, so evolve these types by 
 
 ## Hosting
 
-Register entity refs with DI, then host each entity type either locally or in a shard region:
+Register entity refs and effect handlers with DI, then host each entity type either locally or in a shard region:
 
 ```csharp
 var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddDurableEntities();
 builder.Services.AddScoped<IInvoiceMailer, SmtpInvoiceMailer>();
+builder.Services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
 
 builder.Services.AddAkka("billing", (akka, sp) =>
 {
@@ -331,7 +370,7 @@ Use the same ID for later commands to the same invoice, and a different ID for a
 
 `Ask` infers its return type from `IReplies<TCommand, TReply>`. Tell-only commands have no interface and cannot be asked. `IEntityRef<TCommand>` does not implement `ICanTell`, so Akka.NET's unchecked Ask extension methods cannot bypass the contract. Tell effects accept another typed entity ref and convert its command case before boxing it.
 
-`ToCommand()` supplies a direct constructor call for a C# union; F# records can construct their native DU in that method instead. There is no runtime conversion table or per-command registration. F# deciders call `RequestDecision.ToDecision()` explicitly when returning the branch.
+`ToCommand()` supplies a direct constructor call for a C# union; F# records can construct their native DU in that method instead. There is no runtime conversion table or per-command registration. F# deciders call `Handled.ToDecision()` explicitly when returning a decision.
 
 A ref's identity is the entity type plus the entity ID. It doesn't change when the entity moves between processes or nodes. Messages always go through the shard region or local host, so a command sent while an entity is stopping is delivered to its next incarnation.
 
@@ -367,7 +406,7 @@ public sealed class InvoiceQueries(IDurableEntityRefs<InvoiceCommand, InvoiceSta
 }
 ```
 
-The snapshot carries the state and the sequence number of the last applied event. The read waits behind commands the entity has already received, so it sees their committed events and runs only after their effects finish. To read the state of an entity you hold a plain ref or an ID for, get a state-aware ref by ID: `invoices.Get(invoiceRef.Id)`. `TState` must match the registered definition; otherwise `Get` throws Akka.Hosting's `MissingActorRegistryEntryException`.
+The snapshot carries the state and the sequence number of the last applied event. The read waits behind commands the entity has already received, so it sees their committed events and runs only after their `Run` effects finish. It does not wait for an `Execute` outcome that is still in flight; the state tells you whether one is. To read the state of an entity you hold a plain ref or an ID for, get a state-aware ref by ID: `invoices.Get(invoiceRef.Id)`. `TState` must match the registered definition; otherwise `Get` throws Akka.Hosting's `MissingActorRegistryEntryException`.
 
 ## Testing
 
@@ -384,25 +423,37 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .ThenState(s => Assert.True(s is Paid));
 ```
 
-`WhenRunSucceeded(result)` and `WhenRunFailed(error)` select a continuation without invoking services, so result-dependent decisions remain pure unit tests:
+Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value; `Resumed()` runs `Resume` against the recovered state:
 
 ```csharp
+var command = new IssueInvoice(250m, "billing@example.com");
+
 DeciderScenario.For(Invoice.Definition)
     .When(command)
-    .WhenRunFailed(new InvalidOperationException("unavailable"))
     .ThenNothingPersisted()
-    .ThenReplied(command, new InvoiceRejected("unavailable"));
+    .ThenExecuted(new VerifyRecipient(command));
+
+DeciderScenario.For(Invoice.Definition)
+    .When(new RecipientRejected(command, "unknown recipient"))
+    .ThenNothingPersisted()
+    .ThenReplied(command, new InvoiceRejected("unknown recipient"));
+
+DeciderScenario.For(Invoice.Definition)
+    .Given(new VerificationStarted(command))
+    .Resumed()
+    .ThenExecuted(new VerifyRecipient(command));
 ```
 
-Use a definition that routes `command` through `IssueExternally` for that example. `WhenRunSucceeded()` covers an operation returning plain `Task`.
-
-For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite.
+For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite.
 
 ```csharp
 public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
 {
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
-        services.AddScoped<IInvoiceMailer, FakeInvoiceMailer>();
+        services
+            .AddScoped<IInvoiceMailer, FakeInvoiceMailer>()
+            .AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>()
+            .AddSingleton<IRecipientDirectory, FakeDirectory>();
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
         builder
@@ -428,11 +479,11 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
 
 Working today:
 - Decide, persist, evolve, then effects.
-- Recovery, which fails on journal entries it can't interpret.
+- Recovery, which fails on journal entries it can't interpret, followed by `Resume` for effects still pending.
 - Reminders.
 - Local and sharded hosting.
-- Per-command typed entity refs, typed request graphs, and state reads.
-- Required success/failure continuations for both `Task` and `Task<T>`, including nested operations and continuation-time state.
+- Per-command typed entity refs and state reads.
+- `Execute` with handlers whose outcome is a command or an event; `Send` and `Accepts` between entities; best-effort `Run`.
 - C# compiler contract tests and F# DU command/reply tests.
 - Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
 
@@ -440,11 +491,11 @@ Not done yet:
 - **Snapshot retention tests.** Snapshots are written and recovered, but pruning old snapshots and deleting covered events aren't covered by tests yet.
 - **Message serialization checks in the TestKit.** `VerifyMessageSerialization` stays off by default until [akkadotnet/akka.net#8910](https://github.com/akkadotnet/akka.net/issues/8910) is fixed.
 - **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
+- **Entity contracts and proxies.** `Send` resolves the target by command type in the same actor system; addressing an entity type hosted only on other nodes, without its definition, is tracked in [#30](https://github.com/Aaronontheweb/Akka.Durable/issues/30).
 - **Source generation.**
-- **Durable workflows.**
 - **Agents.** Much later, once the foundations exist.
 
-The bounded Native AOT smoke checks command conversion, typed replies, and request graph construction; it does not certify the actor system or persistence plugins for AOT:
+The bounded Native AOT smoke checks command conversion, typed replies, and effect construction; it does not certify the actor system or persistence plugins for AOT:
 
 ```sh
 dotnet publish tests/Akka.Durable.AotSmoke -c Release -r linux-x64 -p:PublishAot=true -o ./artifacts/aot-smoke

@@ -18,6 +18,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         services.AddSingleton<Calculator>();
         services.AddSingleton<EffectRecorder>();
         services.AddScoped<ScopedCalculator>();
+        services.AddScoped<IEffectHandler<Calculate, RailwayCommand>, CalculateHandler>();
     }
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
@@ -39,7 +40,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         DurableEntityRef<RailwayCommand, RailwayState, RailwayEvent>("a");
 
     [Fact]
-    public async Task Operation_result_selects_a_reply_and_is_committed_before_the_reply()
+    public async Task Outcome_selects_a_reply_and_is_committed_before_the_reply()
     {
         Calculator.Calculate = (value, _) => Task.FromResult(value * 2);
 
@@ -66,7 +67,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Synchronous_and_asynchronous_failures_select_only_the_failure_branch(bool synchronous)
+    public async Task Synchronous_and_asynchronous_failures_become_the_failure_outcome(bool synchronous)
     {
         Calculator.Calculate = (_, _) => synchronous
             ? throw new InvalidOperationException("service failed")
@@ -82,7 +83,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
     }
 
     [Fact]
-    public async Task Continuation_receives_state_after_the_initial_commit_without_repeating_its_events()
+    public async Task Outcome_is_decided_against_the_state_after_the_initial_commit()
     {
         var reply = await Ref.Ask(new BeginAdjust(10, 3), AskCancellation());
 
@@ -93,7 +94,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
     }
 
     [Fact]
-    public async Task Failure_does_not_undo_events_committed_before_the_operation()
+    public async Task Failure_does_not_undo_events_committed_with_the_request()
     {
         Calculator.Calculate = (_, _) => Task.FromException<int>(new InvalidOperationException("service failed"));
 
@@ -106,56 +107,26 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
     }
 
     [Fact]
-    public async Task Task_without_a_result_uses_a_parameterless_success_continuation()
+    public async Task State_reads_are_not_held_while_a_handler_runs()
     {
-        var reply = await Ref.Ask(new TaskOnly(), AskCancellation());
-
-        Assert.Equal(0, Assert.IsType<Adjusted>(reply.Value).Count);
-        Assert.Equal(["wait", "disposed"], Recorder.Entries);
-    }
-
-    [Fact]
-    public async Task Task_without_a_result_selects_its_failure_continuation()
-    {
-        Calculator.Wait = _ => Task.FromException(new InvalidOperationException("service failed"));
-
-        var reply = await Ref.Ask(new TaskOnly(), AskCancellation());
-
-        Assert.Equal(nameof(InvalidOperationException), Assert.IsType<AdjustmentRejected>(reply.Value).Reason);
-        Assert.Equal(0, (await Ref.GetStateAsync(AskCancellation())).SequenceNr);
-    }
-
-    [Fact]
-    public async Task Nested_operations_keep_the_original_reply_type_and_hold_state_queries_until_completion()
-    {
-        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var firstResult = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var secondResult = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var calls = 0;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var result = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         Calculator.Calculate = (_, _) =>
         {
-            if (Interlocked.Increment(ref calls) == 1)
-            {
-                firstEntered.SetResult();
-                return firstResult.Task;
-            }
-            secondEntered.SetResult();
-            return secondResult.Task;
+            entered.TrySetResult();
+            return result.Task;
         };
 
-        var reply = Ref.Ask(new DoubleAdjust(2), AskCancellation());
-        await firstEntered.Task.WaitAsync(AskCancellation());
-        var read = Ref.GetStateAsync(AskCancellation());
-        firstResult.SetResult(4);
-        await secondEntered.Task.WaitAsync(AskCancellation());
-        Assert.False(reply.IsCompleted);
-        Assert.False(read.IsCompleted);
-        secondResult.SetResult(8);
+        var reply = Ref.Ask(new Adjust(2), AskCancellation());
+        await entered.Task.WaitAsync(AskCancellation());
 
-        Assert.Equal(8, Assert.IsType<Adjusted>((await reply).Value).Count);
-        Assert.Equal(8, (await read).State.Count);
-        Assert.Equal(["calculate:2", "disposed", "calculate:4", "disposed"], Recorder.Entries);
+        var read = await Ref.GetStateAsync(AskCancellation());
+        Assert.Equal(0, read.State.Count);
+        Assert.False(reply.IsCompleted);
+
+        result.SetResult(4);
+        Assert.Equal(4, Assert.IsType<Adjusted>((await reply).Value).Count);
+        Assert.Equal(["calculate:2", "disposed"], Recorder.Entries);
     }
 }
 

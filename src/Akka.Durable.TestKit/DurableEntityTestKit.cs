@@ -52,7 +52,7 @@ public abstract class DurableEntityTestKit(
     /// <summary>Register durable entities (and any other actors) for the test host.</summary>
     protected abstract void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider);
 
-    /// <summary>Register application services, e.g. those resolved by <c>Run</c> effects.</summary>
+    /// <summary>Register application services: effect handlers and the services <c>Run</c> effects resolve.</summary>
     protected virtual void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
     {
     }

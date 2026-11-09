@@ -25,6 +25,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         services.AddSingleton<EffectRecorder>();
         services.AddSingleton<Gate>();
         services.AddScoped<ScopedRecorder>();
+        services.AddCounterHandlers();
     }
 
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
@@ -33,6 +34,8 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     private EffectRecorder Recorder => Host.Services.GetRequiredService<EffectRecorder>();
+
+    private Gate Gate => Host.Services.GetRequiredService<Gate>();
 
     private Props EntityProps(
         string entityId,
@@ -61,6 +64,15 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         return await probe.ExpectMsgAsync<object[]>(cancellationToken: Ct);
     }
 
+    private async Task<int> CountOf(IActorRef entity)
+    {
+        Send(entity, new GetCount());
+        return (await ExpectMsgAsync<CountIs>(cancellationToken: Ct)).Count;
+    }
+
+    private Task AssertCountBecomes(IActorRef entity, int expected) =>
+        AwaitAssertAsync(async () => Assert.Equal(expected, await CountOf(entity)), cancellationToken: Ct);
+
     #region Persist -> Evolve -> effects
 
     [Fact]
@@ -71,8 +83,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         Send(entity, new Increment(5));
         await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
 
-        Send(entity, new GetCount());
-        await ExpectMsgAsync<CountIs>(c => c.Count == 5, cancellationToken: Ct);
+        Assert.Equal(5, await CountOf(entity));
     }
 
     [Fact]
@@ -106,8 +117,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         await ExpectTerminatedAsync(entity, cancellationToken: Ct);
 
         var recovered = SpawnEntity("c3");
-        Send(recovered, new GetCount());
-        await ExpectMsgAsync<CountIs>(c => c.Count == 7, cancellationToken: Ct);
+        Assert.Equal(7, await CountOf(recovered));
 
         Assert.Equal(["run:3", "disposed"], Recorder.Entries);
     }
@@ -216,8 +226,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
         await otherSender.ExpectMsgAsync<Accepted>(cancellationToken: Ct);
 
-        Send(entity, new GetCount());
-        await ExpectMsgAsync<CountIs>(c => c.Count == 2, cancellationToken: Ct);
+        Assert.Equal(2, await CountOf(entity));
     }
 
     #endregion
@@ -225,7 +234,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     #region Run effects
 
     [Fact]
-    public async Task Zero_event_decision_holds_the_mailbox_until_effects_complete()
+    public async Task Zero_event_decision_holds_the_mailbox_until_Run_effects_complete()
     {
         var entity = SpawnEntity("c7");
 
@@ -235,7 +244,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         // GetCount must not be processed while the Run effect is outstanding.
         await ExpectNoMsgAsync(NoMsgWindow, Ct);
 
-        Host.Services.GetRequiredService<Gate>().Open();
+        Gate.Open();
         await ExpectMsgAsync<GateOpened>(cancellationToken: Ct);
         await ExpectMsgAsync<CountIs>(c => c.Count == 0, cancellationToken: Ct);
     }
@@ -253,43 +262,196 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     [Fact]
-    public async Task Run_failure_explicitly_escalated_by_OnFailure_restarts_the_actor()
+    public async Task Run_failure_is_logged_and_later_effects_still_run()
     {
         var entity = SpawnEntity("c9");
 
-        await EventFilter.Custom<Error>(error => error.Cause.GetBaseException() is InvalidOperationException { Message: "boom" }).ExpectOneAsync(() =>
-        {
-            Send(entity, new IncrementThenFail(1));
-            return Task.CompletedTask;
-        }, Ct);
+        await EventFilter.Custom<Warning>(warning => warning.Cause is InvalidOperationException { Message: "boom" })
+            .ExpectOneAsync(async () =>
+            {
+                Send(entity, new IncrementThenFail(1));
+                await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+            }, Ct);
 
-        // The success continuation of the failed Run never happens...
-        await ExpectNoMsgAsync(NoMsgWindow, Ct);
-
-        // ...but the event committed before the effect ran, and the restarted actor recovers it.
-        Send(entity, new GetCount());
-        await ExpectMsgAsync<CountIs>(c => c.Count == 1, cancellationToken: Ct);
+        // The event committed before the effect ran, and the entity was not restarted.
+        Assert.Equal(1, await CountOf(entity));
         Assert.Equal(["disposed"], Recorder.Entries);
     }
 
     [Fact]
-    public async Task Run_failure_selects_the_failure_reply()
-    {
-        var entity = SpawnEntity("c10");
-
-        Send(entity, new FailWithFallback());
-
-        await ExpectMsgAsync<FailureRecorded>(f => f.Reason == "boom", cancellationToken: Ct);
-    }
-
-    [Fact]
-    public async Task Run_timeout_is_reported_as_a_TimeoutException()
+    public async Task Run_timeout_is_logged_and_later_effects_still_run()
     {
         var entity = SpawnEntity("c11");
 
-        Send(entity, new WaitForGateWithTimeout(TimeSpan.FromMilliseconds(200)));
+        await EventFilter.Custom<Warning>(warning => warning.Cause is TimeoutException)
+            .ExpectOneAsync(async () =>
+            {
+                Send(entity, new WaitForGateWithTimeout(TimeSpan.FromMilliseconds(200)));
+                await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+            }, Ct);
+    }
 
-        await ExpectMsgAsync<FailureRecorded>(f => f.Reason == nameof(TimeoutException), cancellationToken: Ct);
+    #endregion
+
+    #region Execute effects
+
+    [Fact]
+    public async Task Effect_outcome_is_decided_and_replies_to_the_asker_of_the_command_that_issued_it()
+    {
+        var entity = SpawnEntity("e1");
+
+        Send(entity, new IncrementViaService(2, Wait: false));
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+
+        Assert.Equal(4, await CountOf(entity));
+        Assert.Equal(["compute:2", "disposed"], Recorder.Entries);
+    }
+
+    [Fact]
+    public async Task Each_outcome_answers_its_own_asker()
+    {
+        var entity = SpawnEntity("e2");
+        var first = CreateTestProbe();
+        var second = CreateTestProbe();
+
+        Send(entity, new IncrementViaService(1, Wait: false), first.Ref);
+        Send(entity, new IncrementViaService(2, Wait: false), second.Ref); // stashed until the first outcome lands
+
+        await first.ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        await second.ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        Assert.Equal(6, await CountOf(entity));
+    }
+
+    [Fact]
+    public async Task Entity_keeps_handling_commands_while_an_effect_is_in_flight()
+    {
+        var entity = SpawnEntity("e3");
+
+        Send(entity, new IncrementViaService(3, Wait: true));
+        Assert.Equal(0, await CountOf(entity)); // answered while the handler waits on the gate
+
+        Gate.Open();
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        Assert.Equal(6, await CountOf(entity));
+    }
+
+    [Fact]
+    public async Task Event_outcome_is_journaled_through_Evolve_and_recovered()
+    {
+        var entity = SpawnEntity("e4");
+
+        Send(entity, new AddFromLookup(5));
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct); // declared after Execute, sent before the outcome lands
+        await AssertCountBecomes(entity, 5);
+
+        Watch(entity);
+        entity.Tell(PoisonPill.Instance);
+        await ExpectTerminatedAsync(entity, cancellationToken: Ct);
+
+        Assert.Equal(5, await CountOf(SpawnEntity("e4")));
+        Assert.Equal([(CounterEvent)new Incremented(5)], await ReadJournal("counter-e4"));
+    }
+
+    [Fact]
+    public async Task Failed_effect_is_logged_and_the_entity_keeps_running()
+    {
+        var entity = SpawnEntity("e5");
+
+        await EventFilter.Custom<Warning>(warning => warning.Cause is InvalidOperationException { Message: "boom" })
+            .ExpectOneAsync(async () =>
+            {
+                Send(entity, new ExplodeLater());
+                await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+            }, Ct);
+
+        Assert.Equal(0, await CountOf(entity));
+    }
+
+    [Fact]
+    public async Task Missing_effect_handler_is_a_configuration_error_that_restarts_the_entity()
+    {
+        var entity = SpawnEntity("e6");
+
+        await EventFilter.Exception<InvalidOperationException>(contains: "No effect handler is registered")
+            .ExpectOneAsync(() =>
+            {
+                Send(entity, new NoHandler());
+                return Task.CompletedTask;
+            }, Ct);
+
+        Assert.Equal(0, await CountOf(entity));
+    }
+
+    #endregion
+
+    #region Resume
+
+    [Fact]
+    public async Task Resume_re_issues_the_effect_a_recovered_state_says_is_pending()
+    {
+        var entity = SpawnEntity("r1");
+        Send(entity, new IncrementViaService(2, Wait: true));
+        await AwaitAssertAsync(() => Assert.Equal(["compute:2"], Recorder.Entries), cancellationToken: Ct);
+
+        Watch(entity);
+        entity.Tell(PoisonPill.Instance);
+        await ExpectTerminatedAsync(entity, cancellationToken: Ct);
+
+        // The request is in the journal, so the next incarnation asks the service again.
+        var recovered = SpawnEntity("r1");
+        await AwaitAssertAsync(() => Assert.Equal(2, Recorder.Entries.Count(e => e == "compute:2")), cancellationToken: Ct);
+
+        // Both handler calls finish. The first incarnation's outcome is dropped; the second's is applied.
+        Gate.Open();
+        await AssertCountBecomes(recovered, 4);
+        await ExpectNoMsgAsync(NoMsgWindow, Ct); // the original asker belongs to the old incarnation
+    }
+
+    [Fact]
+    public async Task Resume_may_not_persist_events()
+    {
+        var definition = Counter.Definition with
+        {
+            Resume = (_, ctx) => ctx.Persist(new Incremented(1)),
+        };
+        var probe = CreateTestProbe();
+        var props = EntityProps("r2", definition);
+
+        await EventFilter.Exception<InvalidOperationException>(contains: "Resume returned events").ExpectOneAsync(() =>
+        {
+            Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref, true)));
+            return Task.CompletedTask;
+        }, Ct);
+
+        await probe.ExpectMsgAsync<EntityStopped>(cancellationToken: Ct);
+    }
+
+    #endregion
+
+    #region Accepted messages
+
+    [Fact]
+    public async Task A_message_the_definition_accepts_becomes_a_command_from_its_sender()
+    {
+        var entity = SpawnEntity("a1", Counter.Definition.Accepts<string>(text => new Increment(text.Length)));
+
+        entity.Tell("abcd", TestActor);
+
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        Assert.Equal(4, await CountOf(entity));
+    }
+
+    [Fact]
+    public async Task A_message_the_definition_does_not_accept_is_unhandled()
+    {
+        var unhandled = CreateTestProbe();
+        Sys.EventStream.Subscribe(unhandled.Ref, typeof(UnhandledMessage));
+        var entity = SpawnEntity("a2");
+
+        entity.Tell(42.0, TestActor);
+
+        await unhandled.ExpectMsgAsync<UnhandledMessage>(m => m.Message is 42.0, cancellationToken: Ct);
+        await ExpectNoMsgAsync(NoMsgWindow, Ct);
     }
 
     #endregion
@@ -301,7 +463,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     {
         var parentProbe = CreateTestProbe();
         var entityProps = EntityProps("c12");
-        var parent = Sys.ActorOf(Props.Create(() => new TestEntityParent(entityProps, parentProbe.Ref)));
+        var parent = Sys.ActorOf(Props.Create(() => new TestEntityParent(entityProps, parentProbe.Ref, false)));
 
         Send(parent, new Shutdown());
 

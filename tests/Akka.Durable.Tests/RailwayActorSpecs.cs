@@ -1,8 +1,8 @@
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures;
-using Akka.Hosting.TestKit;
 using Akka.Event;
+using Akka.Hosting.TestKit;
 using Akka.Persistence;
 using Akka.Persistence.TestKit;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,6 +11,9 @@ using Xunit;
 
 namespace Akka.Durable.Tests;
 
+/// <summary>
+/// The runtime side of Execute: handler scopes, timeouts, shutdown, and how outcomes rejoin the entity.
+/// </summary>
 public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTestKit(output: output)
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -23,6 +26,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         services.AddSingleton<Calculator>();
         services.AddSingleton<EffectRecorder>();
         services.AddScoped<ScopedCalculator>();
+        services.AddScoped<IEffectHandler<Calculate, RailwayCommand>, CalculateHandler>();
     }
 
     private IActorRef Spawn(string id, TimeSpan? timeout = null,
@@ -36,7 +40,8 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
             new EntityId(id), definition, Host.Services, Sys.Scheduler)));
     }
 
-    private void Send(IActorRef actor, RailwayCommand command) => actor.Tell(command, TestActor);
+    private void Send(IActorRef actor, RailwayCommand command, IActorRef? sender = null) =>
+        actor.Tell(command, sender ?? TestActor);
 
     private async Task<EntityStateReply> ReadState(IActorRef actor)
     {
@@ -45,7 +50,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
     }
 
     [Fact]
-    public async Task Failure_to_persist_the_success_branch_never_replies_success_or_selects_OnFailure()
+    public async Task Failure_to_persist_the_outcome_never_replies()
     {
         var actor = Spawn("journal-failure");
         await ReadState(actor);
@@ -64,7 +69,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
     }
 
     [Fact]
-    public async Task State_queries_stay_queued_while_the_continuation_is_persisting()
+    public async Task State_queries_stay_queued_while_the_outcome_is_persisting()
     {
         var actor = Spawn("journal-held");
         await ReadState(actor);
@@ -93,28 +98,31 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
     }
 
     [Fact]
-    public async Task Exceptions_in_a_success_continuation_go_to_supervision_not_the_service_failure_branch()
+    public async Task State_queries_are_answered_while_a_handler_is_still_running()
     {
-        var actor = Spawn("continuation-failure");
-        await EventFilter.Custom<Error>(error => error.Cause.GetBaseException() is InvalidOperationException { Message: "continuation failed" }).ExpectOneAsync(() =>
-        {
-            Send(actor, new ThrowInContinuation());
-            return Task.CompletedTask;
-        }, Ct);
+        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Calculator.Calculate = (_, ct) => finish.Task.WaitAsync(ct);
+        var actor = Spawn("in-flight");
 
-        await ExpectNoMsgAsync(NoMessageWindow, Ct);
+        Send(actor, new Adjust(3));
+        await AwaitAssertAsync(() => Assert.Equal(["calculate:3"], Recorder.Entries), cancellationToken: Ct);
+
         Assert.Equal(0, (await ReadState(actor)).SequenceNr);
+
+        finish.SetResult(3);
+        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
+        Assert.Equal(new Adjusted(3), reply.Value);
     }
 
     [Fact]
-    public async Task Timeout_selects_the_failure_branch_and_cancels_the_invocation()
+    public async Task Timeout_is_logged_and_cancels_the_invocation_and_no_outcome_is_delivered()
     {
         var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Calculator.Wait = async ct =>
+        Calculator.Calculate = async (_, ct) =>
         {
             try
             {
-                await new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously).Task.WaitAsync(ct);
+                return await new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously).Task.WaitAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -124,217 +132,96 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         };
         var actor = Spawn("timeout", TimeSpan.FromMilliseconds(100));
 
-        Send(actor, new TaskOnly());
+        await EventFilter.Custom<Warning>(warning => warning.Cause is TimeoutException).ExpectOneAsync(() =>
+        {
+            Send(actor, new Adjust(3));
+            return Task.CompletedTask;
+        }, Ct);
 
-        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
-        Assert.Equal(nameof(TimeoutException), Assert.IsType<AdjustmentRejected>(reply.Value).Reason);
         await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+        await ExpectNoMsgAsync(NoMessageWindow, Ct);
         Assert.Equal(0, (await ReadState(actor)).SequenceNr);
     }
 
     [Fact]
-    public async Task A_timed_out_service_that_ignores_cancellation_keeps_its_scope_until_it_finishes()
+    public async Task A_timed_out_handler_that_ignores_cancellation_keeps_its_scope_until_it_finishes()
     {
-        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Calculator.Wait = _ => finish.Task;
+        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Calculator.Calculate = (_, _) => finish.Task;
         var actor = Spawn("late-completion", TimeSpan.FromMilliseconds(100));
-        Send(actor, new TaskOnly());
 
-        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
-        Assert.IsType<AdjustmentRejected>(reply.Value);
-        Assert.Equal(["wait"], Recorder.Entries);
-        finish.SetResult();
+        await EventFilter.Custom<Warning>(warning => warning.Cause is TimeoutException).ExpectOneAsync(() =>
+        {
+            Send(actor, new Adjust(3));
+            return Task.CompletedTask;
+        }, Ct);
 
-        await AwaitAssertAsync(() => Assert.Equal(["wait", "disposed"], Recorder.Entries),
+        Assert.Equal(["calculate:3"], Recorder.Entries);
+        finish.SetResult(3);
+
+        await AwaitAssertAsync(() => Assert.Equal(["calculate:3", "disposed"], Recorder.Entries),
             cancellationToken: Ct);
-        // A late success cannot emit another reply or persist success events.
+        // A late result cannot reply or persist.
         Assert.Equal(0, (await ReadState(actor)).SequenceNr);
         await ExpectNoMsgAsync(NoMessageWindow, Ct);
     }
 
     [Fact]
-    public async Task Shutdown_cancellation_does_not_execute_a_domain_failure_continuation()
+    public async Task Outcome_of_a_stopped_incarnation_is_dropped()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Calculator.Wait = _ =>
+        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Calculator.Calculate = (_, _) =>
         {
             entered.SetResult();
             return finish.Task;
         };
         var actor = Spawn("shutdown");
         Watch(actor);
-        Send(actor, new TaskOnly());
+        Send(actor, new Adjust(3));
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
         Sys.Stop(actor);
         await ExpectTerminatedAsync(actor, cancellationToken: Ct);
-        finish.SetResult();
+        finish.SetResult(3);
 
-        await AwaitAssertAsync(() => Assert.Equal(["wait", "disposed"], Recorder.Entries),
+        await AwaitAssertAsync(() => Assert.Equal(["calculate:3", "disposed"], Recorder.Entries),
             cancellationToken: Ct);
         await ExpectNoMsgAsync(NoMessageWindow, Ct);
     }
 
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public async Task Captured_stages_are_rejected_before_repeating_events_or_messages(bool typed, bool fails)
+    [Fact]
+    public async Task Each_outcome_replies_to_the_asker_of_the_request_that_issued_it()
     {
-        if (fails)
-            Calculator.Calculate = (_, _) => Task.FromException<int>(new InvalidOperationException("service failed"));
-        var definition = Railway.Definition with
-        {
-            Decide = (_, command, ctx) =>
-            {
-                var c = (BeginAdjust)command.Value;
-                if (typed)
-                {
-                    var captured = ctx.For(c).Persist(new Added(c.Before)).Tell(TestActor, "stage");
-                    return captured.Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(c.By, ct),
-                        onSuccess: (_, _) => captured.Reply(new Adjusted(999)),
-                        onFailure: (_, _) => captured.Reply(new AdjustmentRejected("incorrect reply")));
-                }
-                var effects = ctx.Persist(new Added(c.Before)).Tell(TestActor, "stage");
-                return effects.Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(c.By, ct),
-                    onSuccess: (_, _) => effects,
-                    onFailure: (_, _) => effects);
-            }
-        };
-        var actor = Spawn($"captured-{typed}-{fails}", definition: definition);
-        await EventFilter.Custom<Error>(error => error.Cause.GetBaseException() is InvalidOperationException ex
-            && ex.Message.Contains("reused an earlier decision stage", StringComparison.Ordinal)).ExpectOneAsync(() =>
-        {
-            Send(actor, new BeginAdjust(10, 3));
-            return Task.CompletedTask;
-        }, Ct);
+        Calculator.Calculate = (value, _) => Task.FromResult(value * 10);
+        var actor = Spawn("origins");
+        var first = CreateTestProbe();
+        var second = CreateTestProbe();
 
-        await ExpectMsgAsync("stage", cancellationToken: Ct);
-        var state = await ReadState(actor);
-        Assert.Equal(new RailwayState(10), state.State);
-        Assert.Equal(1, state.SequenceNr);
-        Assert.Equal(["calculate:3", "disposed"], Recorder.Entries);
-        await ExpectNoMsgAsync(NoMessageWindow, Ct);
-    }
+        Send(actor, new Adjust(1), first.Ref);
+        Send(actor, new Adjust(2), second.Ref);
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Non_reply_continuations_receive_fresh_state_and_log_handled_failures(bool fails)
-    {
-        if (fails)
-            Calculator.Calculate = (_, _) => Task.FromException<int>(new InvalidOperationException("service failed"));
-        var definition = Railway.Definition with
-        {
-            Decide = (_, command, ctx) => ctx.Persist(new Added(10))
-                .Run<ScopedCalculator, int>((service, ct) => service.CalculateAsync(3, ct),
-                    onSuccess: (result, next) => next.Persist(new Added(result)).Tell(TestActor, next.State.Count),
-                    onFailure: (error, next) => next.Tell(TestActor, next.State.Count))
-        };
-        var actor = Spawn($"non-reply-{fails}", definition: definition);
-        if (fails)
-        {
-            await EventFilter.Custom<Warning>(warning => warning.Message.ToString()!.Contains("Run effect failed",
-                StringComparison.Ordinal)).ExpectOneAsync(() =>
-            {
-                Send(actor, new BeginAdjust(10, 3));
-                return Task.CompletedTask;
-            }, Ct);
-        }
-        else
-            Send(actor, new BeginAdjust(10, 3));
-
-        await ExpectMsgAsync(10, cancellationToken: Ct);
-        var state = await ReadState(actor);
-        Assert.Equal(new RailwayState(fails ? 10 : 13), state.State);
-        Assert.Equal(fails ? 1 : 2, state.SequenceNr);
-        await ExpectNoMsgAsync(NoMessageWindow, Ct);
-    }
-
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public async Task ReplyAndRun_replies_once_before_Task_or_result_work_finishes(bool hasResult, bool fails)
-    {
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Calculator.Calculate = (_, ct) =>
-        {
-            entered.TrySetResult();
-            return finish.Task.WaitAsync(ct);
-        };
-        Calculator.Wait = async ct =>
-        {
-            entered.TrySetResult();
-            await finish.Task.WaitAsync(ct);
-        };
-        var definition = Railway.Definition with
-        {
-            Decide = (_, command, ctx) =>
-            {
-                var request = ctx.For((BeginAdjust)command.Value).Persist(new Added(10));
-                return hasResult
-                    ? request.ReplyAndRun<ScopedCalculator, int>(new Adjusted(10),
-                        (service, ct) => service.CalculateAsync(3, ct),
-                        onSuccess: (result, next) => next.Persist(new Added(result)),
-                        onFailure: (error, next) => next)
-                    : request.ReplyAndRun<ScopedCalculator>(new Adjusted(10),
-                        (service, ct) => service.WaitAsync(ct),
-                        onSuccess: next => next.Persist(new Added(1)),
-                        onFailure: (error, next) => next);
-            }
-        };
-        var actor = Spawn($"early-{hasResult}-{fails}", definition: definition);
-        Send(actor, new BeginAdjust(10, 3));
-        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
-        Assert.Equal(new Adjusted(10), reply.Value);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
-        actor.Tell(GetEntityState.Instance, TestActor);
-        try
-        {
-            await ExpectNoMsgAsync(NoMessageWindow, Ct);
-        }
-        finally
-        {
-            if (fails)
-                finish.TrySetException(new InvalidOperationException("service failed"));
-            else
-                finish.TrySetResult(3);
-        }
-
-        var state = await ExpectMsgAsync<EntityStateReply>(cancellationToken: Ct);
-        Assert.Equal(new RailwayState(fails ? 10 : hasResult ? 13 : 11), state.State);
-        Assert.Equal(fails ? 1 : 2, state.SequenceNr);
-        await ExpectNoMsgAsync(NoMessageWindow, Ct);
+        Assert.IsType<Adjusted>((await first.ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct)).Value);
+        Assert.IsType<Adjusted>((await second.ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct)).Value);
+        Assert.Equal(new RailwayState(30), (await ReadState(actor)).State);
     }
 
     [Fact]
-    public async Task ReplyAndStop_after_an_asynchronous_continuation_passivates_on_the_actor_scheduler()
+    public async Task Stop_after_an_outcome_passivates_on_the_actor_scheduler()
     {
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var finish = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Calculator.Calculate = (_, ct) =>
-        {
-            entered.TrySetResult();
-            return finish.Task.WaitAsync(ct);
-        };
         var definition = Railway.Definition with
         {
-            Decide = (_, command, ctx) => ctx.For((Adjust)command.Value).Run<ScopedCalculator, int>(
-                (service, ct) => service.CalculateAsync(3, ct),
-                onSuccess: (result, next) => next.Persist(new Added(result)).ReplyAndStop(new Adjusted(result)),
-                onFailure: (error, next) => next.Reply(new AdjustmentRejected(error.Message)))
+            Decide = (state, command, ctx) => command switch
+            {
+                Calculated r => ctx.Persist(new Added(r.Result)).Reply(r.Request, new Adjusted(state.Count + r.Result)).Stop(),
+                _ => Railway.Decide(state, command, ctx),
+            }
         };
         var probe = CreateTestProbe();
         var props = Props.Create(() => new EntityActor<RailwayState, RailwayCommand, RailwayEvent>(
             new EntityId("async-stop"), definition, Host.Services, Sys.Scheduler));
-        var parent = Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref)));
+        var parent = Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref, false)));
+
         Send(parent, new Adjust(3));
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
-        finish.SetResult(3);
 
         var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
         Assert.Equal(new Adjusted(3), reply.Value);
