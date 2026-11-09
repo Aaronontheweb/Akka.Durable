@@ -408,6 +408,35 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     [Fact]
+    public async Task Resume_re_issues_the_effect_when_the_state_comes_from_a_snapshot_alone()
+    {
+        // A snapshot after every event, and the events behind it deleted: a compacted journal.
+        var definition = Counter.Definition with
+        {
+            Options = EntityOptions.Default with { SnapshotEvery = 1, KeepSnapshots = 1, DeleteEventsOnSnapshot = true },
+        };
+        var entity = SpawnEntity("r3", definition);
+        Send(entity, new Increment(1));
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        Send(entity, new IncrementViaService(2, Wait: true));
+        await AwaitAssertAsync(() => Assert.Equal(["compute:2"], Recorder.Entries), cancellationToken: Ct);
+
+        // The latest snapshot covers every event, so a recovery replays none of them.
+        await AwaitAssertAsync(async () => Assert.Empty(await ReadJournal("counter-r3")), cancellationToken: Ct);
+
+        Watch(entity);
+        entity.Tell(PoisonPill.Instance);
+        await ExpectTerminatedAsync(entity, cancellationToken: Ct);
+
+        // The pending request comes back in the snapshot, and Resume needs nothing else.
+        var recovered = SpawnEntity("r3", definition);
+        await AwaitAssertAsync(() => Assert.Equal(2, Recorder.Entries.Count(e => e == "compute:2")), cancellationToken: Ct);
+
+        Gate.Open();
+        await AssertCountBecomes(recovered, 5);
+    }
+
+    [Fact]
     public async Task Resume_may_not_persist_events()
     {
         var definition = Counter.Definition with
