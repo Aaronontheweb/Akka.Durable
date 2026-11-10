@@ -119,7 +119,7 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
 
 ## Getting started
 
-Install the .NET 11 RC SDK pinned in `global.json` (including prerelease SDKs), then run:
+Install the .NET 11 SDK pinned in `global.json`, then run:
 
 ```sh
 dotnet restore

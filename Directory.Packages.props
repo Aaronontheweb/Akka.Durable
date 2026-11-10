@@ -17,9 +17,7 @@
     <PackageVersion Include="Akka.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaRemindersVersion)" />
     <PackageVersion Include="Akka.Serialization.V2" Version="$(AkkaVersion)" />
-    <!-- This prerelease matches the .NET 11 RC SDK pinned in global.json;
-         move to stable FSharp.Core 11.0.x together with the SDK. -->
-    <PackageVersion Include="FSharp.Core" Version="11.0.101-rc3.26522.148" />
+    <PackageVersion Include="FSharp.Core" Version="11.0.101" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
   </ItemGroup>
   <!-- Test dependencies -->
