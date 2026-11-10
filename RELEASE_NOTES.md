@@ -1,3 +1,30 @@
+#### 0.1.0-alpha.2 November 10th 2026 ####
+
+Second alpha release of Akka.Durable. It adds durable workflows and effects whose result the entity decides on, and it changes parts of the 0.1.0-alpha.1 API. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **Durable workflows.** A workflow is a finite process that survives restarts. It starts once, moves through states that you define, and ends once with an outcome. A `WorkflowDefinition` holds five functions: `Start`, `Work`, `Decide`, `Cancel` and `GaveUp`.
+* **Work is issued once.** When a workflow enters a state, the library issues that state's work one time and does not issue it again on its own. Work that fails, times out or is interrupted by a restart gives the workflow the fact that `GaveUp` returns, and `Decide` chooses what happens next.
+* **Workflow hosting and refs.** `WithDurableWorkflow` hosts a workflow type, locally or in a shard region. `IWorkflowRefs<TInput, TFact, TOutcome>` hands out refs with `Start`, `Status`, `WaitForOutcome`, `Notify` and `Cancel`.
+* **Facts from outside.** `Notify(fact)` sends a fact to a workflow, and `Cancel(reason, by)` asks it to stop. `Accepts<TMessage>` on the definition turns a message of another type into a fact. A fact that arrives while work is in flight is journaled and held, then decided when that work settles.
+* **Workflow timers.** `ctx.Timer` in `Work` delivers a fact after a duration or at a date, and `ctx.All` gives one state several pieces of work and timers. Each workflow has one durable reminder, stored through Akka.Reminders, so a workflow type needs Akka.Reminders configured.
+* **Commands from a workflow to an entity.** `ctx.Send` in `Work` sends a command to a durable entity, and the reply becomes one of the workflow's facts. The command is sent once. A send that gets no reply gives the workflow the give-up fact.
+* **Effects with outcomes.** `Execute(effect)` issues a plain effect record, and the `IEffectHandler<TEffect, TCommand>` registered for it in DI runs it. The handler returns one of the entity's commands, which goes through `Decide`. The entity handles other commands while the handler runs, and a handler that throws or times out is logged and no command arrives.
+* **`Run` is best effort.** `Run` no longer takes `onSuccess` or `onFailure`, and no result returns to the entity. A failure or timeout is logged and the decision continues. Use `Execute` when the entity needs the result.
+* **`Resume` after a restart.** `EntityDefinition.Resume` lists the effects that are still pending for a recovered state. It runs once after recovery, before the first command, and it may not return events.
+* **Entity to entity.** `Send<TOther>(id, command)` sends a command to another durable entity, and `Accepts<TMessage>` on the entity definition turns the reply into one of the sender's commands. `Send` replaces `Tell` to an entity ref from a decision, because `IEntityRef` no longer implements `ICanTell`.
+* **Typed replies.** A command declares its reply type with `IReplies<TCommand, TReply>`. `Ask` infers the reply type from the command, and `Reply(request, reply)` takes the command that declared the reply. A command without the interface can be sent with `Tell` only.
+* **`DecisionContext` has three type arguments.** It is now `DecisionContext<TState, TCommand, TEvent>`. `Decide` still receives the state as a parameter.
+* **A stop waits for `Execute` work.** An entity that is asked to stop while an `Execute` handler is running finishes that work and decides its outcome before it stops. This applies to idle passivation in local and sharded hosting.
+* **`ShardedHosting` replaces `ShardOptions`.** `WithDurableEntity` and `WithDurableWorkflow` take a `ShardedHosting` record with `Role`, `StateStoreMode`, `RememberEntities` and `RememberEntitiesStore`. Akka.Durable sets the stop message and idle passivation itself. Use `EntityOptions.PassivateIdleAfter` for the idle timeout.
+* **One command type per entity type.** `WithDurableEntity` rejects a second entity type that uses a command type another entity type already uses. The error names both entity types and the command type.
+* **Refused messages are logged.** An entity logs a warning when it receives a message that is not one of its commands and that its definition does not accept. The warning names the entity type, the entity ID and the message type.
+* **TestKit.** `DeciderScenario` adds `Resumed()`, `ThenExecuted` and `ThenSent`. `DurableEntityTestKit` adds a `WorkflowRef` helper for hosted workflow tests.
+* **Documentation.** The README is now a short overview. The guide is in `docs/`, one topic per page, with pages for workflows and workflow rules.
+
+Not yet implemented: workflow retry policies, `Again` with a delay, child workflows, a scenario test kit for workflows, state and event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests. `VerifyMessageSerialization` stays off by default in the TestKit until akkadotnet/akka.net#8910 is fixed.
+
+Known issue: on Akka.NET 1.6.0-beta6, commands that arrive while a decision's asynchronous effect (`Run`, `Schedule` or `CancelTimer`) is running can be handled out of order. This comes from Akka.Persistence, and a fix is being prepared upstream.
+
 #### 0.1.0-alpha.1 November 6th 2026 ####
 
 First public release of Akka.Durable, an early-stage exploration of durable entities on Akka.NET. This is a proof of concept, not an official Akka.NET project, and breaking changes are expected between releases.
