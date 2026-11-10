@@ -119,6 +119,8 @@ public sealed record EntityOptions
 
     /// <summary>
     /// Time budget for one <c>Execute</c> handler call, and the default for <c>Run</c> effects.
+    /// Must be positive: registering an entity or workflow with zero or a negative value throws
+    /// <see cref="ArgumentOutOfRangeException"/>.
     /// </summary>
     public TimeSpan EffectTimeout { get; init; } =
         TimeSpan.FromSeconds(30);

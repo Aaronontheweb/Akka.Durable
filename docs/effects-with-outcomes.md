@@ -94,7 +94,7 @@ Expected failures are outcomes. A directory that does not know the recipient has
 Unknown u => new RecipientRejected(u.Reason),   // a decline is a result, not an exception
 ```
 
-An exception from `HandleAsync`, or a handler that runs longer than `EntityOptions.EffectTimeout` (30 seconds by default), is logged as a warning and dropped. No outcome arrives and the state is unchanged: the invoice stays `Verifying`. To try again, arm a recurring timer in the first half, re-issue the effect from it, and cancel it from the outcome arms:
+An exception from `HandleAsync`, or a handler that runs longer than `EntityOptions.EffectTimeout` (30 seconds by default), is logged as a warning and dropped (`EffectTimeout` must be positive; registering an entity or workflow with zero or a negative value throws `ArgumentOutOfRangeException`). No outcome arrives and the state is unchanged: the invoice stays `Verifying`. To try again, arm a recurring timer in the first half, re-issue the effect from it, and cancel it from the outcome arms:
 
 ```csharp
 (Draft, IssueInvoice c) when c.Total > 0 =>

@@ -88,6 +88,11 @@ public static class DurableEntityHostingExtensions
         }
 
         var options = definition.Options ?? EntityOptions.Default;
+        if (options.EffectTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(definition), options.EffectTimeout,
+                $"EntityOptions.EffectTimeout for [{definition.TypeName.Value}] was {options.EffectTimeout}; " +
+                "the limit on one piece of work must be positive, or every effect would time out at once.");
+
         var stopMessage = StopEntity.Instance;
         var passivateIdleAfter = options.PassivateIdleAfter;
 
