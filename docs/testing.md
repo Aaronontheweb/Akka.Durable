@@ -1,0 +1,76 @@
+# Testing
+
+Part of the [Akka.Durable guide](../README.md#guide).
+
+Use the `Aaron.Akka.Durable.TestKit` package. Decisions can be tested as plain functions:
+
+```csharp
+[Fact]
+public void Paying_in_full_marks_the_invoice_paid() =>
+    DeciderScenario.For(Invoice.Definition)
+        .Given(
+            new VerificationStarted(new IssueInvoice(250m, "billing@example.com")),
+            new InvoiceIssued(250m, "billing@example.com", DateTimeOffset.UnixEpoch))
+        .When(new RecordPayment(250m))
+        .ThenPersisted(new PaymentRecorded(250m))
+        .ThenReplied(new RecordPayment(250m), new PaymentAccepted())
+        .ThenState(s => Assert.True(s is Paid));
+```
+
+Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value; `Resumed()` runs `Resume` against the recovered state:
+
+```csharp
+var command = new IssueInvoice(250m, "billing@example.com");
+
+DeciderScenario.For(Invoice.Definition)
+    .When(command)
+    .ThenPersisted(new VerificationStarted(command))
+    .ThenExecuted(new VerifyRecipient("billing@example.com"));
+
+DeciderScenario.For(Invoice.Definition)
+    .Given(new VerificationStarted(command))
+    .When(new RecipientRejected("unknown recipient"))
+    .ThenPersisted(new VerificationFailed("unknown recipient"))
+    .ThenReplied(command, new InvoiceRejected("unknown recipient"))
+    .ThenState(s => Assert.True(s is Draft));
+
+DeciderScenario.For(Invoice.Definition)
+    .Given(new VerificationStarted(command))
+    .Resumed()
+    .ThenExecuted(new VerifyRecipient("billing@example.com"));
+```
+
+For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite.
+
+```csharp
+public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
+{
+    protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
+        services
+            .AddScoped<IInvoiceMailer, FakeInvoiceMailer>()
+            .AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>()
+            .AddSingleton<IRecipientDirectory, FakeDirectory>();
+
+    protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
+        builder
+            .WithCustomSerializer(InvoiceSerializer.CreateSerializerDetails)
+            .WithDurableEntity(Invoice.Definition);
+
+    [Fact]
+    public async Task Issued_invoice_accepts_payment()
+    {
+        var invoice = EntityRef<InvoiceCommand>("invoice-1");
+
+        await invoice.Ask(new IssueInvoice(250m, "billing@example.com"), AskCancellation());
+        await invoice.Ask(new RecordPayment(250m), AskCancellation());
+
+        var snapshot = await DurableEntityRef<InvoiceCommand, InvoiceState, InvoiceEvent>("invoice-1")
+            .GetStateAsync(AskCancellation());
+        Assert.True(snapshot.State is Paid);
+    }
+}
+```
+
+---
+
+Next: [Status and direction](status.md)
