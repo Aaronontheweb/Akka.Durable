@@ -1,3 +1,18 @@
+#### 0.1.0-alpha.3 November 10th 2026 ####
+
+Third alpha release of Akka.Durable. It makes a workflow read typed, moves to Akka.NET 1.6.0-beta7, refuses an effect time limit that is not positive, and logs a missing effect handler as an error. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **A workflow is read the way an entity is read.** `GetStateAsync()` on a workflow ref returns `StateSnapshot<WorkflowStatus<TState, TOutcome>>`. The status is `WorkflowNotStarted`, `WorkflowRunning<TState>` with the state as you typed it, or `WorkflowFinished<TOutcome>` with the outcome. For a state type that is a union, a `switch` expression over `WorkflowRunning<TState>.State` needs no catch-all arm. `StateName` gives the name of the state for logs. `Status()` is removed.
+* **Workflow refs have four type arguments.** They are now `IWorkflowRef<TInput, TState, TFact, TOutcome>` and `IWorkflowRefs<TInput, TState, TFact, TOutcome>`, in the same order as `WorkflowDefinition`. A workflow type is found by all four types, and `Get` throws `InvalidOperationException` when no hosted workflow type has them. The `WorkflowRef` helper in `DurableEntityTestKit` takes the same four.
+* **`SequenceNr` on a workflow read.** It is the sequence number of the hosting entity's journal. Compare it with an earlier read to see whether anything changed. It is not a count of state changes: a fact that keeps the state also adds one.
+* **An effect time limit of zero or less is refused.** `WithDurableEntity` and `WithDurableWorkflow` throw `ArgumentOutOfRangeException` when `EntityOptions.EffectTimeout` is zero or negative. `Timeout.InfiniteTimeSpan` is negative, so it is refused too. The message names the entity or workflow type and the value.
+* **A missing effect handler is an error in the log.** When an entity or a workflow issues an effect with `Execute` and no `IEffectHandler` is registered for it, the library logs an error. The entry names the effect type, the handler interface to register, and the entity or workflow type and ID. It does not contain the effect's contents. A workflow still receives the give-up fact with the reason `Failed`, and `WorkGaveUp.Error` names the interface. An entity still fails and restarts, as before.
+* **Akka.NET 1.6.0-beta7.** It contains the fix for the command-order issue listed for 0.1.0-alpha.2 (akkadotnet/akka.net#8942).
+
+Not yet implemented: workflow retry policies, `Again` with a delay, child workflows, a scenario test kit for workflows, state and event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests. `VerifyMessageSerialization` stays off by default in the TestKit (see akkadotnet/akka.net#8910).
+
+Known issue: an entity that fails right after recovery is restarted with no delay, so a failure that repeats on every recovery restarts it in a loop.
+
 #### 0.1.0-alpha.2 November 10th 2026 ####
 
 Second alpha release of Akka.Durable. It adds durable workflows and effects whose result the entity decides on, and it changes parts of the 0.1.0-alpha.1 API. Akka.Durable is still a proof of concept, not an official Akka.NET project.
