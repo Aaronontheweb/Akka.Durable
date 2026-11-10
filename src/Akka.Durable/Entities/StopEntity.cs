@@ -4,8 +4,7 @@ namespace Akka.Durable;
 
 /// <summary>
 /// The message a host sends a durable entity to stop it: after <c>Passivate</c>, on idle passivation, and as the
-/// shard's hand-off stop message. One type and one instance serve every entity type, so a <c>ShardOptions</c>
-/// object reused for several entity types stops all of them.
+/// shard's hand-off stop message. One type and one instance serve every entity type.
 /// </summary>
 /// <remarks>
 /// <para>An entity with an <c>Execute</c> handler in flight stops only once that handler's outcome is decided.</para>
