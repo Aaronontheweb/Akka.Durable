@@ -30,6 +30,9 @@ public sealed record ExecuteEffect(object Effect)
     // Bound when the effect is built, where TEffect is known, so no reflection is needed to find the handler.
     internal Func<IServiceProvider, Func<CancellationToken, Task<object?>>>? Resolve { get; init; }
 
+    // Turns a handler failure or timeout into an outcome. Without it the failure is logged and dropped.
+    internal Func<Exception, object?>? Failed { get; init; }
+
     public bool Equals(ExecuteEffect? other) => other is not null && Equals(Effect, other.Effect);
 
     public override int GetHashCode() => Effect.GetHashCode();
