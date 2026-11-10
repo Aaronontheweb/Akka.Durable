@@ -46,6 +46,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // them. While one is in flight, that reminder does not issue the start again.
     private readonly Dictionary<string, int> _startsInFlight = [];
 
+    // Starts whose reminder this incarnation removed, after an answer or a give-up. A delivery of that reminder that
+    // was already on its way is stale: it must not issue the start again.
+    private readonly HashSet<string> _startsSettled = [];
+
     public EntityActor(
         EntityId entityId,
         EntityDefinition<TState, TCommand, TEvent> definition,
@@ -336,7 +340,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             var key = PendingStart.KeyOf(start.Workflow, start.Id);
             var stillInFlight = Settle(key);
             if (!stillInFlight && (completed.Failure is null || completed.Failed is not null))
+            {
                 first = new CancelTimerEffect(key);
+                _startsSettled.Add(key);
+            }
         }
 
         var outcome = completed.Outcome;
@@ -483,6 +490,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     var key = PendingStart.KeyOf(start.Workflow, start.Id);
                     await StorePendingStartAsync(key, new PendingStart(start.Workflow.Value, start.Id.Value, start.Input));
                     _startsInFlight[key] = _startsInFlight.GetValueOrDefault(key) + 1;
+                    _startsSettled.Remove(key);
                     await StartExecuteAsync(execute, origin);
                     break;
 
@@ -677,6 +685,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         if (_startsInFlight.ContainsKey(key))
         {
             Commit(none.Add(new ScheduleEffect(key, StartRetryInterval, pending)), Context.System.DeadLetters, envelope);
+            return;
+        }
+
+        if (_startsSettled.Contains(key))
+        {
+            // Delivered while the answer or the give-up was removing the reminder. The start is settled.
+            _log.Debug("Dropping a stale delivery of the pending start of workflow [{0}/{1}]", pending.Workflow, pending.Id);
+            Commit(none.Add(new CancelTimerEffect(key)), Context.System.DeadLetters, envelope);
             return;
         }
 

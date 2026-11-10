@@ -104,6 +104,22 @@ public sealed class SerializationSpecs : IAsyncLifetime
     }
 
     [Fact]
+    public void Reminder_envelope_carries_a_pending_start_with_the_authors_input()
+    {
+        // How a start the workflow has not answered travels from reminder storage back to the entity.
+        var due = new DateTimeOffset(2026, 11, 7, 12, 0, 0, TimeSpan.Zero);
+        var sent = new ReminderEnvelope(new ReminderEntity("billing", "b1"), new ReminderKey("pending"), due,
+            ReminderDeadline.Infinite, new PendingStart("campaigns", "campaign-b1", new CounterState(4, true)));
+
+        var received = (ReminderEnvelope)RoundTrip(sent);
+
+        var pending = Assert.IsType<PendingStart>(received.Message);
+        Assert.Equal("campaigns", pending.Workflow);
+        Assert.Equal("campaign-b1", pending.Id);
+        Assert.Equal(new CounterState(4, true), pending.Input);
+    }
+
+    [Fact]
     public void Sharding_envelope_carries_a_union_command()
     {
         var envelope = (ShardingEnvelope)RoundTrip(new ShardingEnvelope("a", (CounterCommand)new Increment(4)));

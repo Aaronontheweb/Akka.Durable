@@ -1,6 +1,7 @@
 using Akka.Actor;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Durable.Tests.Fixtures.Campaigns;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Akka.Durable.Tests.Hosting;
@@ -143,6 +144,29 @@ public sealed class LocalEntityCallsSpecs(ITestOutputHelper output) : EntityCall
 
         await AwaitAnswers("gaveup", expected, "Started");
         await AwaitCampaign<WorkflowRunning<CampaignState>>("gaveup");
+    }
+
+    // The give-up and the reminder are both due one EffectTimeout after the send. A delivery that was already on its
+    // way when the give-up removed the reminder must not issue the start again. Found by review, not by a spec.
+    [Fact]
+    public async Task A_reminder_delivered_after_a_give_up_does_not_issue_the_start_again()
+    {
+        Calls.Fail("start", upTo: 1, Break.Throw);
+        await Issue("stale", watched: true);
+        await AwaitAnswers("stale", "gave up: Failed");
+
+        var campaign = Billing.CampaignOf(new EntityId("stale"));
+        var key = PendingStart.KeyOf(Campaign.Definition.TypeName, campaign);
+        var stale = new Akka.Reminders.ReminderEnvelope(
+            new Akka.Reminders.ReminderEntity(Billing.TypeName.Value, "stale"), new Akka.Reminders.ReminderKey(key),
+            DateTimeOffset.UtcNow, Akka.Reminders.ReminderDeadline.Infinite,
+            new PendingStart(Campaign.Definition.TypeName.Value, campaign.Value, Billing.InputOf(new EntityId("stale"), FarAway)));
+        Host.Services.GetRequiredService<Akka.Hosting.IRequiredActor<EntityRegion<BillingCommand>>>().ActorRef
+            .Tell(new Akka.Cluster.Sharding.ShardingEnvelope("stale", stale), ActorRefs.NoSender);
+
+        await LetTimePass();
+        Assert.Equal(1, Calls.Count("start"));
+        Assert.IsType<WorkflowNotStarted>((await CampaignOf("stale")).Value);
     }
 
     [Theory]
