@@ -87,7 +87,7 @@ public abstract class WorkflowJournalSpecs(ITestOutputHelper output) : CheckoutW
         // A state that holds the state it came from, which holds an outcome: equal to the last value, to the tick.
         Assert.Equal(before, await HostedState("o1"));
         var status = Assert.IsType<WorkflowRunning>((await CheckoutRef("o1").Status(AskCancellation())).Value);
-        Assert.Equal(nameof(NeedsAttention), status.State);
+        Assert.Equal(nameof(NeedsAttention), status.StateName);
     }
 }
 

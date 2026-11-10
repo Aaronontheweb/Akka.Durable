@@ -32,9 +32,29 @@ public readonly union StartResult<TOutcome>(Started, AlreadyRunning, AlreadyFini
 // The conditions a workflow can be in.
 public sealed record WorkflowNotStarted;
 
-/// <param name="State">The name of the state the workflow is in.</param>
+/// <summary>The workflow is running. It carries the state the workflow is in, so a reader can read its data.</summary>
+/// <param name="State">
+/// The state the workflow is in. When the state type is a C# union, this is the case the union holds, such as a
+/// record, so a reader can match on its type: <c>status.Value is WorkflowRunning { State: Charging charging }</c>.
+/// For any other state type, it is the state object as it is.
+/// </param>
 /// <param name="Since">When it entered that state.</param>
-public sealed record WorkflowRunning(string State, DateTimeOffset Since);
+public sealed record WorkflowRunning(object State, DateTimeOffset Since)
+{
+    /// <summary>
+    /// The name of the state's type. For a union, the name of the case it holds. Use it for logs and simple
+    /// displays. To read the state's data, match on <see cref="State"/>.
+    /// </summary>
+    public string StateName => Unwrap(State).GetType().Name;
+
+    /// <summary>The record a state holds. A union gives the case it holds, also when that case is a union itself.</summary>
+    internal static object Unwrap(object state)
+    {
+        while (state is IUnion { Value: { } value })
+            state = value;
+        return state;
+    }
+}
 
 public sealed record WorkflowFinished<TOutcome>(TOutcome Outcome, DateTimeOffset At);
 
@@ -170,7 +190,7 @@ internal sealed class WorkflowRef<TInput, TFact, TOutcome>(WorkflowId id, IActor
         return snapshot.State switch
         {
             WfNotStarted => new WorkflowNotStarted(),
-            WfRunning running => new WorkflowRunning(NameOf(running.State), running.EnteredAt),
+            WfRunning running => new WorkflowRunning(WorkflowRunning.Unwrap(running.State), running.EnteredAt),
             WfFinished finished => new WorkflowFinished<TOutcome>((TOutcome)finished.Outcome, finished.At),
         };
     }
@@ -196,9 +216,6 @@ internal sealed class WorkflowRef<TInput, TFact, TOutcome>(WorkflowId id, IActor
         }
     }
 
-    /// <summary>The name of the state's type. For a union, the name of the case it holds.</summary>
-    private static string NameOf(object state) =>
-        (state is IUnion { Value: { } value } ? value : state).GetType().Name;
 }
 
 public static class DurableWorkflowHostingExtensions
