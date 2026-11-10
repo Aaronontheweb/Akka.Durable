@@ -29,9 +29,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
     /// <see cref="Inner"/>: it reads the journal the nest workflow wrote, under the same persistence ids.
     /// </summary>
     private static readonly WorkflowDefinition<Go, Inner, NestFact, Over> Redeployed = Nest.Holding<Inner>(
-        "nests-redeployed", go => new Low(go.Level),
-        EntityOptions.Default.WithPersistenceId((id, _) =>
-            EntityOptions.DefaultPersistenceIdFactory(id, new EntityTypeName(Nest.Definition.TypeName.Value))));
+        "nests-redeployed", go => new Low(go.Level), Nest.ReadsJournalOf(Nest.Definition.TypeName));
 
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddCheckoutHandlers()

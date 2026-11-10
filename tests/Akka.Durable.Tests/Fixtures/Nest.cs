@@ -64,6 +64,11 @@ public static class Nest
     public static readonly WorkflowDefinition<Go, Tagged<int>, NestFact, Over> Tagged =
         Holding("nests-tagged", go => new Tagged<int>(go.Level));
 
+    /// <summary>Options under which a workflow type reads the journal of <paramref name="writer"/>, as a later deployment would.</summary>
+    public static EntityOptions ReadsJournalOf(WorkflowTypeName writer) =>
+        EntityOptions.Default.WithPersistenceId((id, _) =>
+            EntityOptions.DefaultPersistenceIdFactory(id, new EntityTypeName(writer.Value)));
+
     /// <summary>A workflow that starts in the state <paramref name="start"/> gives it and is held there.</summary>
     public static WorkflowDefinition<Go, TState, NestFact, Over> Holding<TState>(
         string typeName, Func<Go, TState> start, EntityOptions? options = null) where TState : notnull =>
