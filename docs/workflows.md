@@ -183,7 +183,7 @@ Sometimes work gets no answer. The workflow then receives the give-up fact: the 
 | Case | `GaveUpReason` |
 |---|---|
 | The handler throws. | `Failed` |
-| No handler is registered for the effect. | `Failed` |
+| No handler is registered for the effect. This is a deployment mistake: an error is logged that names the effect type, the `IEffectHandler<,>` to register and the workflow. `Error` says the same. | `Failed` |
 | The entity type that a `Send` is for is not hosted. | `Failed` |
 | The entity does not reply to a `Send` within `EntityOptions.EffectTimeout`. | `TimedOut` |
 | The handler does not answer within `EntityOptions.EffectTimeout` (30 seconds by default). | `TimedOut` |

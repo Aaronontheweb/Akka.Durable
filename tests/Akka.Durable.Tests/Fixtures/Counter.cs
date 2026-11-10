@@ -102,7 +102,7 @@ public sealed record ExplodeLater : ICounterProtocol, IReplies<CounterCommand, A
 }
 
 [AkkaSerializable(Manifest = "counter-no-handler-v1", AllowEmpty = true)]
-public sealed record NoHandler : ICounterProtocol;
+public sealed record NoHandler([property: AkkaField(0)] string Note = "") : ICounterProtocol;
 
 [AkkaSerializable(Manifest = "counter-command-v1")]
 public readonly union CounterCommand(
@@ -143,7 +143,7 @@ public sealed record GateOpened : ICounterProtocol;
 // Effects. Plain data handed to the registered IEffectHandler; never serialized.
 public sealed record Compute(IncrementViaService Request);
 public sealed record Explode;
-public sealed record Unregistered;
+public sealed record Unregistered(string Note);
 
 [AkkaSerializer<ICounterProtocol>("counter-test", 22599)]
 public sealed partial class CounterSerializer : AkkaSerializer
@@ -202,7 +202,7 @@ public static class Counter
             Computed => ctx.Ignore(), // a late outcome from a previous incarnation
 
             ExplodeLater c => ctx.None().Execute(new Explode()).Reply(c, new Accepted()),
-            NoHandler => ctx.None().Execute(new Unregistered()),
+            NoHandler c => ctx.None().Execute(new Unregistered(c.Note)),
         };
 
     /// <summary>A recovered entity with a service increment in flight asks the service again.</summary>

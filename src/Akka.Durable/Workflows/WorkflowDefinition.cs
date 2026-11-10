@@ -370,9 +370,7 @@ internal static class WorkHandlers
     {
         var handler = services.GetService<IEffectHandler<TEffect, TFact>>();
         if (handler is null)
-            return _ => Task.FromException<TFact>(new InvalidOperationException(
-                $"No effect handler is registered for {typeof(TEffect)}. Register an " +
-                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TFact).Name}>."));
+            return _ => Task.FromException<TFact>(new MissingEffectHandlerException(typeof(TEffect), typeof(TFact)));
 
         return ct => handler.HandleAsync(effect, ct);
     }
