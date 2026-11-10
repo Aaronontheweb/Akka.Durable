@@ -5,7 +5,7 @@ if (command.ToCommand() is not Calculate { Value: 3 })
     throw new InvalidOperationException("Command conversion failed.");
 
 var context = new DecisionContext<int, Command, Event>(
-    new EntityId("smoke"), new EntityTypeName("aot"), DateTimeOffset.UnixEpoch, 0);
+    new EntityId("smoke"), new EntityTypeName("aot"), DateTimeOffset.UnixEpoch);
 
 Decision<Command, Event> reply = context.Persist(new Added(3)).Reply(command, new Answer(3));
 if (reply is not Handled<Command, Event> { Events.Length: 1, Effects: [ReplyEffect { Response: Answer { Value: 3 } }] })

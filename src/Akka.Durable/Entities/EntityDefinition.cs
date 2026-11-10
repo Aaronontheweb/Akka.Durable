@@ -20,8 +20,7 @@ public readonly record struct EntityTypeName(string Value);
 public readonly record struct DecisionContext<TState, TCommand, TEvent>(
     EntityId EntityId,
     EntityTypeName EntityType,
-    DateTimeOffset UtcNow,
-    TState State)
+    DateTimeOffset UtcNow)
 {
     public Handled<TCommand, TEvent> Persist(params TEvent[] events) =>
         Decisions.Persist<TCommand, TEvent>(events);

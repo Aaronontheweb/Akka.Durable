@@ -172,12 +172,6 @@ public sealed record Handled<TCommand, TEvent>(
         where TMessage : notnull =>
         Add(new TellEffect(recipient, message));
 
-    public Handled<TCommand, TEvent> Tell<TOther>(IEntityRef<TOther> recipient, TOther message)
-    {
-        ArgumentNullException.ThrowIfNull(recipient);
-        return Add(new TellEffect(new EntityTellAdapter<TOther>(recipient), message!));
-    }
-
     /// <summary>Best-effort work with no outcome: a projection write, a notification. See <see cref="RunEffect"/>.</summary>
     public Handled<TCommand, TEvent> Run<TService>(
         Func<TService, CancellationToken, Task> action,
@@ -263,9 +257,4 @@ internal static class EffectHandlers
                 $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TEvent).Name}> when the result is a fact to persist as it is."),
         };
     }
-}
-
-internal sealed record EntityTellAdapter<TCommand>(IEntityRef<TCommand> Recipient) : ICanTell
-{
-    public void Tell(object message, IActorRef sender) => Recipient.Tell((TCommand)message, sender);
 }
