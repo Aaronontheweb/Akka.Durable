@@ -1,4 +1,4 @@
-﻿using Akka.Actor;
+using Akka.Actor;
 using Akka.Serialization.V2;
 
 namespace Akka.Durable;
