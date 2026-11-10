@@ -275,7 +275,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             return;
         }
 
-        // The sender gets no reply, and Akka.NET logs an unhandled message only at debug level when asked to.
+        // The sender gets no reply. Akka.NET reports an unhandled message at info level at most, and only
+        // the first few of them, so say here what was refused and how to accept it.
         var type = message.GetType().Name;
         _log.Warning(
             "[{0}/{1}] received a message of type {2}, which its definition does not accept. " +
