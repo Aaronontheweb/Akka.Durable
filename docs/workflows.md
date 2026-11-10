@@ -160,7 +160,7 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
         GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
 ```
 
-`failure` is a `WorkGaveUp`. `What` is the name of the effect type. `Reason` is a `GaveUpReason`. `Error` holds the failure's message when there is one.
+`failure` is a `WorkGaveUp`. `What` is the name of the effect type, or for a `Send`, the name of the command's type. `Reason` is a `GaveUpReason`. `Error` holds the failure's message when there is one.
 
 ## Transitions
 
@@ -178,12 +178,14 @@ The journal records every fact, including those answered with `Stay` or `Unexpec
 
 When a workflow enters a state, the library issues that state's work one time. It does not issue it again on its own.
 
-Sometimes work gets no answer. The workflow then receives the give-up fact: the fact that your `GaveUp` function returns. The fact table decides what it means. This happens in four cases:
+Sometimes work gets no answer. The workflow then receives the give-up fact: the fact that your `GaveUp` function returns. The fact table decides what it means. This happens in these cases:
 
 | Case | `GaveUpReason` |
 |---|---|
 | The handler throws. | `Failed` |
 | No handler is registered for the effect. | `Failed` |
+| The entity type that a `Send` is for is not hosted. | `Failed` |
+| The entity does not reply to a `Send` within `EntityOptions.EffectTimeout`. | `TimedOut` |
 | The handler does not answer within `EntityOptions.EffectTimeout` (30 seconds by default). | `TimedOut` |
 | The workflow restarted after it entered the state and before the answer arrived. | `Interrupted` |
 
@@ -198,6 +200,40 @@ To set the time one attempt may take, pass options to the definition:
 ```csharp
 Checkout.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(10) } }
 ```
+
+## Sending a command to an entity
+
+`Work` can send a command to a durable entity with `ctx.Send`. The entity's reply becomes one of the workflow's facts. You do not write an effect record or a handler.
+
+```csharp
+// The command declares its entity's command protocol and its reply type.
+public sealed record RecordSettlement(decimal Amount) : IReplies<InvoiceCommand, SettlementRecorded>
+{
+    public InvoiceCommand ToCommand() => new(this);
+}
+
+public static WorkList<BillingFact> Work(BillingState state, WorkContext<Billing, BillingFact> ctx) =>
+    state switch
+    {
+        Recording r => ctx.Send(new EntityId(ctx.Input.Invoice), new RecordSettlement(r.Amount), reply => new InvoiceRecorded(reply.Number)),
+        // ...
+    };
+```
+
+`Send` takes the entity's ID, the command, and a function that turns the reply into a fact. The compiler reads the command protocol and the reply type from the command's `IReplies<TCommand, TReply>`, so you write no type arguments. The entity type is found by its command protocol. Host it in the same actor system with `WithDurableEntity`.
+
+A send is work, like `Execute`:
+
+- The command is sent once. The library does not send it again.
+- Facts from outside are held while the send has no reply.
+- If the entity sends no reply within the time limit for work, the work times out. The workflow receives the give-up fact with `TimedOut`.
+- If the entity type is not hosted, the workflow receives the give-up fact with `Failed`. The error names the command protocol.
+
+After a give-up, the command may or may not have been applied. The entity can journal its event and the reply can still be lost. So the entity must answer a repeated command safely. For example, it can reply with the result it recorded the first time.
+
+The work is plain data. Its effect is a `SendEffect` that holds the command protocol, the target and the command. Two sends are equal when their target and command are equal. The function that turns the reply into a fact is not compared. A test can check what `Work` returns without an actor system.
+
+`Send` works for durable entities only. To call any other actor or service, use `Execute` with a handler.
 
 ## Timers, and several things in one state
 
@@ -220,7 +256,7 @@ public static WorkList<CampaignFact> Work(CampaignState state, WorkContext<Invoi
 - `ctx.All` gives a state several things at once: here a piece of work and a time limit for it.
 - When the workflow leaves a state, that state's timers are gone. There is nothing to cancel.
 
-Work and a wait are different. An `Execute` is work: it expects an answer within `EffectTimeout`, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
+Work and a wait are different. An `Execute` or a `Send` is work: it expects an answer within `EffectTimeout`, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
 
 ### The reminder
 
@@ -357,7 +393,6 @@ These are not in Akka.Durable today:
 
 - Retry policies. To repeat work, the table uses `Again`, or moves to a state with the same work.
 - `Again` with a delay. `Again` issues the work at once. A table that answers a timer's own fact with `Again` loops, because the timer is still due.
-- Calls to entities from `Work`. `Work` has no `Send`.
 - Child workflows.
 - A scenario test kit for workflows, like `DeciderScenario` for entities. Test a workflow through the hosted `DurableEntityTestKit`. You can test `Decide` and `Work` as plain functions too.
 

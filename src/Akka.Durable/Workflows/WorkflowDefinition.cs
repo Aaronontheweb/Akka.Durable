@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Akka.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Akka.Durable;
@@ -12,7 +13,10 @@ public readonly record struct WorkflowTypeName(string Value);
 /// <summary>Why a piece of work got no answer.</summary>
 public enum GaveUpReason
 {
-    /// <summary>The handler threw, or no handler is registered for the effect.</summary>
+    /// <summary>
+    /// The handler threw, or no handler is registered for the effect. For a send: the entity type is not
+    /// hosted, or the send failed.
+    /// </summary>
     Failed = 0,
 
     /// <summary>The handler did not answer within <see cref="EntityOptions.EffectTimeout"/>.</summary>
@@ -39,8 +43,11 @@ public enum GaveUpReason
 /// </remarks>
 public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error = null)
 {
-    /// <summary>The name of the effect type, for a message or a log line.</summary>
-    public string What => Work.GetType().Name;
+    /// <summary>
+    /// The name of the effect type, for a message or a log line. For a send to an entity, the name of the
+    /// command's type.
+    /// </summary>
+    public string What => Work is SendEffect send ? send.Command.GetType().Name : Work.GetType().Name;
 }
 
 /// <summary>The request to stop a workflow. The definition's <c>Cancel</c> function turns it into a fact.</summary>
@@ -145,8 +152,8 @@ public abstract record Work<TFact>
 }
 
 /// <summary>
-/// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for the effect's type, whose result
-/// is one of the workflow's facts.
+/// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for the effect's type, or a command
+/// sent to a durable entity (a <see cref="SendEffect"/>). Its result is one of the workflow's facts.
 /// </summary>
 /// <remarks>The effect is plain data: assert on it, log it. Two pieces of work are equal when their effects are.</remarks>
 public sealed record ExecuteWork<TFact> : Work<TFact>
@@ -236,6 +243,30 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
     {
         ArgumentNullException.ThrowIfNull(effect);
         return new ExecuteWork<TFact>(effect) { Resolve = services => WorkHandlers.Resolve<TEffect, TFact>(services, effect) };
+    }
+
+    /// <summary>
+    /// Sends <paramref name="command"/> to the durable entity <paramref name="target"/>. Its reply becomes one of
+    /// the workflow's facts through <paramref name="then"/>. The entity type is found by the command's protocol.
+    /// </summary>
+    /// <remarks>
+    /// <para>This is work like <see cref="Execute{TEffect}"/>, with no effect handler to write. The command is sent
+    /// once. When the entity does not reply in the time limit for work, or its entity type is not hosted, the
+    /// workflow receives the give-up fact.</para>
+    /// <para>After a give-up the command may have been applied, so the entity must answer a repeated command
+    /// safely. Two sends are equal when their target and command are equal.</para>
+    /// </remarks>
+    public ExecuteWork<TFact> Send<TCommand, TReply>(
+        EntityId target, IReplies<TCommand, TReply> command, Func<TReply, TFact> then)
+        where TReply : notnull
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(then);
+        return new ExecuteWork<TFact>(new SendEffect(typeof(TCommand), target, command))
+        {
+            Resolve = services => async ct =>
+                then(await WorkHandlers.Entity<TCommand>(services, target, command).Ask(command, ct)),
+        };
     }
 
     /// <summary>
@@ -339,5 +370,24 @@ internal static class WorkHandlers
                 $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TFact).Name}>."));
 
         return ct => handler.HandleAsync(effect, ct);
+    }
+
+    /// <summary>
+    /// The ref a workflow's <c>Send</c> goes through. Called when the work runs, so an entity type that is not
+    /// hosted makes the work fail, and the workflow receives the give-up fact.
+    /// </summary>
+    internal static IEntityRef<TCommand> Entity<TCommand>(IServiceProvider services, EntityId target, object command)
+    {
+        try
+        {
+            return services.GetRequiredService<IEntityRefs<TCommand>>().Get(target);
+        }
+        catch (MissingActorRegistryEntryException error)
+        {
+            throw new InvalidOperationException(
+                $"No durable entity type with the command protocol {typeof(TCommand)} is hosted in this ActorSystem, " +
+                $"so the workflow cannot send {command.GetType().Name} to [{target.Value}]. Host that entity type " +
+                "with WithDurableEntity.", error);
+        }
     }
 }

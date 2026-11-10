@@ -42,10 +42,12 @@ public sealed record ExecuteEffect(object Effect)
 /// A command for another durable entity, addressed by its command protocol and <see cref="EntityId"/>.
 /// </summary>
 /// <remarks>
-/// The target's reply, if it sends one, comes back to this entity and is turned into one of its own
-/// commands by <see cref="EntityDefinition{TState,TCommand,TEvent}.Accepts{TMessage}"/>. The reply is
+/// <para>From an entity: the target's reply, if it sends one, comes back to this entity and is turned into one
+/// of its own commands by <see cref="EntityDefinition{TState,TCommand,TEvent}.Accepts{TMessage}"/>. The reply is
 /// handled with the same sender as the command that issued the send, so a later <c>Reply</c> reaches the
-/// original asker.
+/// original asker.</para>
+/// <para>From a workflow's <c>Work</c>: it is the effect of the work that <c>ctx.Send</c> builds, and the reply
+/// becomes one of the workflow's facts.</para>
 /// </remarks>
 public sealed record SendEffect(Type CommandType, EntityId Target, object Command)
 {
