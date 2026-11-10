@@ -1,13 +1,12 @@
 using Akka.Actor;
-using Akka.Actor.Setup;
 using Akka.Cluster.Sharding;
+using Akka.Durable.TestKit;
 using Akka.Durable.Tests.Fixtures.WorkflowProbe;
 using Akka.Hosting;
 using Akka.Persistence.Sql.Hosting;
 using Akka.Reminders;
-using Akka.Reminders.Serialization;
-using Akka.Serialization;
 using LinqToDB;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -17,15 +16,45 @@ namespace Akka.Durable.Tests.Hosting;
 /// <summary>
 /// Probe for the workflow layer. A workflow would be hosted as an entity whose state, command and event
 /// types belong to the library and carry the author's types inside them. These specs write such wrappers
-/// to a real journal (Akka.Persistence.Sql on SQLite) and recover them in a new ActorSystem.
+/// to a real journal (Akka.Persistence.Sql on SQLite), stop the entity, and let a new incarnation recover
+/// from the stored bytes.
 /// </summary>
-public sealed class WorkflowWrapperJournalSpecs : IDisposable
+public abstract class WorkflowWrapperJournalSpecs(ITestOutputHelper output)
+    : Akka.Hosting.TestKit.TestKit(output: output)
 {
     private readonly string _databasePath = Path.Combine(Path.GetTempPath(), $"akka-durable-wf-{Guid.NewGuid():N}.db");
 
     private static readonly CheckoutInput Input = new("order-7", 4200);
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    protected abstract EntityDefinition<WorkflowState, WorkflowCommand, WorkflowEvent> Definition { get; }
+
+    protected abstract long ExpectedSnapshots { get; }
+
+    protected override void ConfigureServices(HostBuilderContext context, IServiceCollection services)
+    {
+        base.ConfigureServices(context, services);
+        services.AddDurableEntities();
+    }
+
+    protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
+        builder
+            .WithSqlPersistence(
+                connectionString: $"Data Source={_databasePath}",
+                providerName: ProviderName.SQLiteMS)
+            // The author registers only the serializer for their own types.
+            .WithCustomSerializer(CheckoutSerializer.CreateSerializerDetails)
+            // The library would register this one itself.
+            .WithCustomSerializer(WorkflowWrapperSerializer.CreateSerializerDetails)
+            .WithDurableEntity(Definition);
+
+    protected override async Task AfterAllAsync()
+    {
+        await base.AfterAllAsync();
+        SqliteConnection.ClearAllPools();
+        if (File.Exists(_databasePath)) File.Delete(_databasePath);
+    }
 
     private static CancellationToken AskTimeout()
     {
@@ -34,63 +63,48 @@ public sealed class WorkflowWrapperJournalSpecs : IDisposable
         return cts.Token;
     }
 
-    private async Task<IHost> StartHost(EntityDefinition<WorkflowState, WorkflowCommand, WorkflowEvent> definition)
-    {
-        var host = new HostBuilder()
-            .ConfigureServices(services =>
-            {
-                services.AddDurableEntities();
-                services.AddAkka("workflow-wrapper-round-trip", builder => builder
-                    .WithSqlPersistence(
-                        connectionString: $"Data Source={_databasePath}",
-                        providerName: ProviderName.SQLiteMS)
-                    // The author registers only the serializer for their own types.
-                    .WithCustomSerializer(CheckoutSerializer.CreateSerializerDetails)
-                    // The library would register this one itself.
-                    .WithCustomSerializer(WorkflowWrapperSerializer.CreateSerializerDetails)
-                    .WithDurableEntity(definition));
-            })
-            .Build();
-
-        await host.StartAsync(Ct);
-        return host;
-    }
-
-    private static IDurableEntityRef<WorkflowCommand, WorkflowState, WorkflowEvent> CheckoutRef(IHost host) =>
-        host.Services.GetRequiredService<IDurableEntityRefs<WorkflowCommand, WorkflowState, WorkflowEvent>>()
-            .Get(new EntityId("order-7"));
-
     private long CountRows(string table)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_databasePath}");
+        using var connection = new SqliteConnection($"Data Source={_databasePath}");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = $"SELECT COUNT(*) FROM {table}";
         return (long)command.ExecuteScalar()!;
     }
 
-    private async Task WriteThenRecover(
-        EntityDefinition<WorkflowState, WorkflowCommand, WorkflowEvent> definition, long expectedSnapshots)
+    /// <summary>Stops the running entity actor, so the next message starts one that has to recover.</summary>
+    private async Task StopEntity(string entityId)
     {
-        using (var writer = await StartHost(definition))
-        {
-            var checkout = CheckoutRef(writer);
-            checkout.Tell(new StartWorkflow(Input));
-            checkout.Tell(new Deliver((CheckoutFact)new Reserved("res-1")));
-            // Moves to a state that holds the state it came from: a union inside its own case.
-            checkout.Tell(new Deliver((CheckoutFact)new WorkStuck("card service")));
-            // The read is queued behind the three commands.
-            Assert.Equal(3, (await checkout.GetStateAsync(AskTimeout())).SequenceNr);
-            await writer.StopAsync(Ct);
-        }
+        var entity = await Sys
+            .ActorSelection($"/user/{LocalEntityHost.ActorName(Checkout.TypeName)}/{entityId}")
+            .ResolveOne(TimeSpan.FromSeconds(5), Ct);
+        Watch(entity);
+        entity.Tell(EntityActor<WorkflowState, WorkflowCommand, WorkflowEvent>.StopEntity.Instance);
+        await ExpectTerminatedAsync(entity, cancellationToken: Ct);
+    }
+
+    [Fact]
+    public async Task Wrappers_carry_the_authors_unions_through_a_real_journal()
+    {
+        var checkout = Host.Services
+            .GetRequiredService<IDurableEntityRefs<WorkflowCommand, WorkflowState, WorkflowEvent>>()
+            .Get(new EntityId("order-7"));
+
+        checkout.Tell(new StartWorkflow(Input));
+        checkout.Tell(new Deliver((CheckoutFact)new Reserved("res-1")));
+        // Moves to a state that holds the state it came from: a union inside its own case.
+        checkout.Tell(new Deliver((CheckoutFact)new WorkStuck("card service")));
+        // The read is queued behind the three commands.
+        Assert.Equal(3, (await checkout.GetStateAsync(AskTimeout())).SequenceNr);
 
         Assert.Equal(3, CountRows("journal"));
-        Assert.Equal(expectedSnapshots, CountRows("snapshot"));
+        // A snapshot is saved in the background: wait for it, so that recovery has to read it.
+        await AwaitAssertAsync(() => Assert.Equal(ExpectedSnapshots, CountRows("snapshot")), cancellationToken: Ct);
 
-        // A new ActorSystem has nothing in memory: recovery reads and deserializes the stored bytes.
-        using var reader = await StartHost(definition);
-        var recovered = CheckoutRef(reader);
-        var snapshot = await recovered.GetStateAsync(AskTimeout());
+        await StopEntity("order-7");
+
+        // The new entity actor has nothing in memory: recovery reads and deserializes the stored bytes.
+        var snapshot = await checkout.GetStateAsync(AskTimeout());
 
         var running = Assert.IsType<Running>(snapshot.State.Value);
         // The author's values come back as the author's union types, not as the case types.
@@ -105,48 +119,39 @@ public sealed class WorkflowWrapperJournalSpecs : IDisposable
             running);
 
         // The recovered values go back into the author's typed Decide, and the workflow runs to its end.
-        recovered.Tell(new Deliver((CheckoutFact)new OperatorSaidRetry()));
+        checkout.Tell(new Deliver((CheckoutFact)new OperatorSaidRetry()));
         // A fact that holds another union.
-        recovered.Tell(new Deliver((CheckoutFact)new PaymentAnswered(new Approved("charge-9"))));
-        var last = await recovered.GetStateAsync(AskTimeout());
+        checkout.Tell(new Deliver((CheckoutFact)new PaymentAnswered(new Approved("charge-9"))));
+        var last = await checkout.GetStateAsync(AskTimeout());
 
         Assert.Equal(new Finished(Input, (CheckoutOutcome)new OrderPlaced("charge-9")), last.State.Value);
         Assert.Equal(5, last.SequenceNr);
-        await reader.StopAsync(Ct);
     }
+}
 
-    [Fact]
-    public Task Wrapper_events_carry_the_authors_unions_through_a_real_journal() =>
-        WriteThenRecover(Checkout.Definition, expectedSnapshots: 0);
+/// <summary>Recovery from events alone.</summary>
+public sealed class WorkflowWrapperEventJournalSpecs(ITestOutputHelper output) : WorkflowWrapperJournalSpecs(output)
+{
+    protected override EntityDefinition<WorkflowState, WorkflowCommand, WorkflowEvent> Definition => Checkout.Definition;
 
-    [Fact]
-    public Task Wrapper_snapshots_carry_the_authors_unions_through_a_real_journal() =>
-        WriteThenRecover(
-            Checkout.Definition with { Options = EntityOptions.Default with { SnapshotEvery = 2 } },
-            expectedSnapshots: 1);
+    protected override long ExpectedSnapshots => 0;
+}
 
-    public void Dispose()
-    {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        if (File.Exists(_databasePath)) File.Delete(_databasePath);
-    }
+/// <summary>Recovery from a snapshot of the wrapper state, plus the event that followed it.</summary>
+public sealed class WorkflowWrapperSnapshotJournalSpecs(ITestOutputHelper output) : WorkflowWrapperJournalSpecs(output)
+{
+    protected override EntityDefinition<WorkflowState, WorkflowCommand, WorkflowEvent> Definition =>
+        Checkout.Definition with { Options = EntityOptions.Default with { SnapshotEvery = 2 } };
+
+    protected override long ExpectedSnapshots => 1;
 }
 
 /// <summary>
 /// The other serialization boundaries a workflow's wrappers cross: the state read, reminders and sharding.
+/// The serializers are the ones the test host registers, the way an application would.
 /// </summary>
-public sealed class WorkflowWrapperSerializationSpecs : IAsyncLifetime
+public sealed class WorkflowWrapperSerializationSpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
 {
-    private readonly ActorSystem _system = ActorSystem.Create("workflow-wrapper-serialization",
-        BootstrapSetup.Create().And(SerializationSetup.Create(system =>
-        [
-            CheckoutSerializer.CreateSerializerDetails(system),
-            WorkflowWrapperSerializer.CreateSerializerDetails(system),
-            DurableEntitySerializer.CreateSerializerDetails(system),
-            SerializerDetails.Create("reminder-serializer", new ReminderSerializer(system),
-                [typeof(IReminderWireMessage)]),
-        ])));
-
     private static readonly CheckoutInput Input = new("order-7", 4200);
 
     private static readonly WorkflowState DeepState = new Running(
@@ -155,13 +160,15 @@ public sealed class WorkflowWrapperSerializationSpecs : IAsyncLifetime
         [0, 1, 2],
         (CheckoutFact)new PaymentAnswered(new Refused("no funds")));
 
-    public ValueTask InitializeAsync() => ValueTask.CompletedTask;
-
-    public async ValueTask DisposeAsync() => await _system.Terminate();
+    protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>
+        builder
+            .WithCustomSerializer(CheckoutSerializer.CreateSerializerDetails)
+            .WithCustomSerializer(WorkflowWrapperSerializer.CreateSerializerDetails)
+            .WithDurableEntity(Checkout.Definition);
 
     private object RoundTrip(object message)
     {
-        var serialization = _system.Serialization;
+        var serialization = Sys.Serialization;
         var serializer = serialization.FindSerializerFor(message);
         var bytes = serializer.ToBinary(message);
         var manifest = Akka.Serialization.Serialization.ManifestFor(serializer, message);
