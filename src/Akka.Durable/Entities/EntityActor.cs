@@ -447,8 +447,15 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     // Cancelling a reminder that doesn't exist is not an error.
                     if (cancelled.ResponseCode is not (ReminderCancelResponseCode.Success
                         or ReminderCancelResponseCode.NotFound))
-                        throw new InvalidOperationException(
-                            $"Failed to cancel reminder [{cancel.Key}]: {cancelled.ResponseCode} {cancelled.Message}");
+                    {
+                        if (!cancel.BestEffort)
+                            throw new InvalidOperationException(
+                                $"Failed to cancel reminder [{cancel.Key}]: {cancelled.ResponseCode} {cancelled.Message}");
+
+                        _log.Warning("Failed to cancel reminder [{0}] for entity [{1}/{2}]: {3} {4}. Continuing.",
+                            cancel.Key, EntityType.Value, _entityId.Value, cancelled.ResponseCode, cancelled.Message);
+                    }
+
                     break;
 
                 case UnstashAllEffect:
