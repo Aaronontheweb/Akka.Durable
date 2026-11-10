@@ -45,7 +45,15 @@ public sealed record WorkflowRunning(object State, DateTimeOffset Since)
     /// The name of the state's type. For a union, the name of the case it holds. Use it for logs and simple
     /// displays. To read the state's data, match on <see cref="State"/>.
     /// </summary>
-    public string StateName => (State is IUnion { Value: { } value } ? value : State).GetType().Name;
+    public string StateName => Unwrap(State).GetType().Name;
+
+    /// <summary>The record a state holds. A union gives the case it holds, also when that case is a union itself.</summary>
+    internal static object Unwrap(object state)
+    {
+        while (state is IUnion { Value: { } value })
+            state = value;
+        return state;
+    }
 }
 
 public sealed record WorkflowFinished<TOutcome>(TOutcome Outcome, DateTimeOffset At);
@@ -182,7 +190,7 @@ internal sealed class WorkflowRef<TInput, TFact, TOutcome>(WorkflowId id, IActor
         return snapshot.State switch
         {
             WfNotStarted => new WorkflowNotStarted(),
-            WfRunning running => new WorkflowRunning(StateOf(running.State), running.EnteredAt),
+            WfRunning running => new WorkflowRunning(WorkflowRunning.Unwrap(running.State), running.EnteredAt),
             WfFinished finished => new WorkflowFinished<TOutcome>((TOutcome)finished.Outcome, finished.At),
         };
     }
@@ -208,9 +216,6 @@ internal sealed class WorkflowRef<TInput, TFact, TOutcome>(WorkflowId id, IActor
         }
     }
 
-    /// <summary>The state as a reader sees it. For a union, the case it holds, so a reader can match on its type.</summary>
-    private static object StateOf(object state) =>
-        state is IUnion { Value: { } value } ? value : state;
 }
 
 public static class DurableWorkflowHostingExtensions
