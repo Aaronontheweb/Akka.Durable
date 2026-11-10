@@ -86,7 +86,7 @@ public abstract class WorkflowJournalSpecs(ITestOutputHelper output) : CheckoutW
 
         // A state that holds the state it came from, which holds an outcome: equal to the last value, to the tick.
         Assert.Equal(before, await HostedState("o1"));
-        var status = Assert.IsType<WorkflowRunning>((await CheckoutRef("o1").Status(AskCancellation())).Value);
+        var status = Assert.IsType<WorkflowRunning<CheckoutState>>((await CheckoutRef("o1").GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(nameof(NeedsAttention), status.StateName);
     }
 }
@@ -106,7 +106,7 @@ public sealed class WorkflowSnapshotJournalSpecs(ITestOutputHelper output) : Wor
 }
 
 /// <summary>
-/// The other serialization boundaries a workflow crosses between nodes: the start, its reply, and the status read.
+/// The other serialization boundaries a workflow crosses between nodes: the start, its reply, and the state read.
 /// The serializers are the ones the test host registers, the way an application would.
 /// </summary>
 public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : CheckoutWorkflowKit(output)
@@ -143,7 +143,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
     }
 
     [Fact]
-    public void Status_read_reply_carries_the_state()
+    public void State_read_reply_carries_the_state()
     {
         // Framework reply -> workflow state -> author's state: three serializers, one inside the next.
         var reply = (EntityStateReply)RoundTrip(new EntityStateReply(DeepState, 12));

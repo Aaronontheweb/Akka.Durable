@@ -10,7 +10,7 @@ Working today:
 - Per-command typed entity refs and state reads.
 - `Execute` with handlers whose outcome is a command; `Send` and `Accepts` between entities; best-effort `Run`.
 - C# compiler contract tests and F# DU command/reply tests.
-- Workflows: `WorkflowDefinition` with `WithDurableWorkflow`, work that is issued once, give-up facts, commands sent to entities from `Work`, timers, several things in one state, facts from outside (`Notify`, `Cancel`, `Accepts`), and refs with `Start`, `Status` and `WaitForOutcome`. See [Workflows](workflows.md).
+- Workflows: `WorkflowDefinition` with `WithDurableWorkflow`, work that is issued once, give-up facts, commands sent to entities from `Work`, timers, several things in one state, facts from outside (`Notify`, `Cancel`, `Accepts`), and refs with `Start`, `GetStateAsync` and `WaitForOutcome`. See [Workflows](workflows.md).
 - Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
 
 Not done yet:

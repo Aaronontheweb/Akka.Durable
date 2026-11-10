@@ -35,13 +35,14 @@ public sealed class TypedContractSpecs
                 }
             }
             """;
-        var syntax = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview));
-        return CSharpCompilation.Create("TypedContractProbe", [syntax], References,
-                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary))
-            .GetDiagnostics()
-            .Where(d => d.Severity == DiagnosticSeverity.Error)
-            .ToImmutableArray();
+        return Diagnostics(source).Where(d => d.Severity == DiagnosticSeverity.Error).ToImmutableArray();
     }
+
+    private static ImmutableArray<Diagnostic> Diagnostics(string source) =>
+        CSharpCompilation.Create("TypedContractProbe",
+                [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview))], References,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary))
+            .GetDiagnostics();
 
     [Fact]
     public void Command_contract_infers_Ask_and_bound_reply_types()
@@ -86,4 +87,36 @@ public sealed class TypedContractSpecs
     [Theory]
     [MemberData(nameof(InvalidCalls))]
     public void Invalid_calls_fail_compilation(string body) => Assert.NotEmpty(Compile(body));
+
+    public static TheoryData<string, bool> StatusReaders => new()
+    {
+        { "Reserving => 0, Charging => 1, Undoing => 2, NeedsAttention => 3,", false },
+        { "Reserving => 0, Charging => 1, Undoing => 2,", true },
+    };
+
+    /// <summary>
+    /// A status reader with no catch-all arm: the compiler checks it against every case of the state union, and
+    /// reports CS8509 (an error under TreatWarningsAsErrors) when a case has no arm.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(StatusReaders))]
+    public void A_status_reader_without_a_catch_all_arm_is_checked_against_every_state(string arms, bool reported)
+    {
+        var diagnostics = Diagnostics($$"""
+            using Akka.Durable;
+            using Akka.Durable.Tests.Fixtures.Checkouts;
+            public static class Reader
+            {
+                public static int Read(WorkflowStatus<CheckoutState, CheckoutOutcome> status) => status switch
+                {
+                    WorkflowNotStarted => -1,
+                    WorkflowRunning<CheckoutState> running => running.State switch { {{arms}} },
+                    WorkflowFinished<CheckoutOutcome> => -2,
+                };
+            }
+            """);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+        Assert.Equal(reported, diagnostics.Any(d => d.Id == "CS8509"));
+    }
 }

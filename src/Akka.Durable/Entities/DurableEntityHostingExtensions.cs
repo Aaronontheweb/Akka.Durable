@@ -49,7 +49,7 @@ public static class DurableEntityHostingExtensions
     {
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
         services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
-        services.TryAddSingleton(typeof(IWorkflowRefs<,,>), typeof(WorkflowRefs<,,>));
+        services.TryAddSingleton(typeof(IWorkflowRefs<,,,>), typeof(WorkflowRefs<,,,>));
         return services;
     }
 

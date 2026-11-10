@@ -38,7 +38,7 @@ public abstract class BumpWorkflowKit(ITestOutputHelper output) : DurableEntityT
     // The railway's service. The railway calls it once for each Adjust it receives.
     protected Calculator Calculator => Host.Services.GetRequiredService<Calculator>();
     protected int Calls => Host.Services.GetRequiredService<EffectRecorder>().Entries.Count(e => e.StartsWith("calculate:"));
-    protected IWorkflowRef<BumpInput, BumpFact, Ended> W1 => WorkflowRef<BumpInput, BumpFact, Ended>("w1");
+    protected IWorkflowRef<BumpInput, Sending, BumpFact, Ended> W1 => WorkflowRef<BumpInput, Sending, BumpFact, Ended>("w1");
 
     /// <summary>Starts w1 with a railway service that answers only on <see cref="Release"/>, and waits until it is called.</summary>
     protected async Task StartGated(Plan plan)
@@ -82,7 +82,7 @@ public abstract class BumpWorkflowKit(ITestOutputHelper output) : DurableEntityT
         actor.Tell(PoisonPill.Instance);
         await ExpectTerminatedAsync(actor, cancellationToken: TestCancellation);
         // A message sent before the host sees the stop is lost, so ask with a short limit until a new actor answers.
-        await AwaitAssertAsync(() => W1.Status(AskCancellation(TimeSpan.FromMilliseconds(500))),
+        await AwaitAssertAsync(() => W1.GetStateAsync(AskCancellation(TimeSpan.FromMilliseconds(500))),
             TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
     }
 }

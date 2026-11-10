@@ -1,6 +1,7 @@
 using Akka.Cluster.Hosting;
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Durable.Tests.Fixtures.Echoes;
+using Akka.Durable.Tests.Fixtures.Nests;
 using Akka.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -9,8 +10,8 @@ using Xunit;
 namespace Akka.Durable.Tests.Hosting;
 
 /// <summary>
-/// What <c>WithDurableWorkflow</c> refuses: a second workflow type for the same input, fact and outcome types,
-/// and a workflow whose own types have no serializer.
+/// What <c>WithDurableWorkflow</c> refuses: a second workflow type for the same input, state, fact and outcome
+/// types, and a workflow whose own types have no serializer.
 /// </summary>
 public class WorkflowHostingRulesSpecs
 {
@@ -22,7 +23,7 @@ public class WorkflowHostingRulesSpecs
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void Two_workflow_types_cannot_share_their_input_fact_and_outcome_types(bool sharded)
+    public void Two_workflow_types_cannot_share_their_input_state_fact_and_outcome_types(bool sharded)
     {
         var builder = Builder().WithDurableWorkflow(Checkout.Definition, sharded ? new ShardedHosting() : null);
 
@@ -32,8 +33,21 @@ public class WorkflowHostingRulesSpecs
         Assert.Contains("[checkouts]", ex.Message);
         Assert.Contains("[checkouts-two]", ex.Message);
         Assert.Contains(typeof(PlaceOrder).FullName!, ex.Message);
+        Assert.Contains(typeof(CheckoutState).FullName!, ex.Message);
         Assert.Contains(typeof(CheckoutFact).FullName!, ex.Message);
         Assert.Contains(typeof(CheckoutOutcome).FullName!, ex.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Workflow_types_that_differ_only_in_their_state_type_register_together(bool sharded)
+    {
+        var builder = Builder();
+
+        Assert.Same(builder, builder
+            .WithDurableWorkflow(Nest.Definition, sharded ? new ShardedHosting() : null)
+            .WithDurableWorkflow(Nest.Alone, sharded ? new ShardedHosting() : null));
     }
 
     [Fact]

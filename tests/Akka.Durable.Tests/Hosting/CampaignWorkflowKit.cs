@@ -53,11 +53,11 @@ public abstract class CampaignWorkflowKit(ITestOutputHelper output) : DurableEnt
 
     protected CampaignServices Services => Host.Services.GetRequiredService<CampaignServices>();
 
-    protected IWorkflowRef<Invoice, CampaignFact, CampaignOutcome> CampaignRef(string id) =>
-        WorkflowRef<Invoice, CampaignFact, CampaignOutcome>(id);
+    protected IWorkflowRef<Invoice, CampaignState, CampaignFact, CampaignOutcome> CampaignRef(string id) =>
+        WorkflowRef<Invoice, CampaignState, CampaignFact, CampaignOutcome>(id);
 
     private IActorRef Region =>
-        Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignFact, CampaignOutcome>>>().ActorRef;
+        Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignState, CampaignFact, CampaignOutcome>>>().ActorRef;
 
     /// <summary>The state of the entity that hosts a campaign: the author's state and what the library tracks.</summary>
     private protected async Task<StateSnapshot<WfState>> HostedState(string id) =>

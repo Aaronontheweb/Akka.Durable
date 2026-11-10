@@ -15,8 +15,8 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
     protected override WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> Definition =>
         Checkout.WithOperatorTool;
 
-    private IWorkflowRef<PlaceOrder, CheckoutFact, CheckoutOutcome> CheckoutWithFacts(string id) =>
-        WorkflowRef<PlaceOrder, CheckoutFact, CheckoutOutcome>(id);
+    private IWorkflowRef<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> CheckoutWithFacts(string id) =>
+        WorkflowRef<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(id);
 
     /// <summary>Runs a checkout until its charge fails and it waits for a person, with nothing in flight.</summary>
     private async Task<WfRunning> WaitingForAPerson(string id)
@@ -60,7 +60,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         reserved.SetResult(new Reserved("res-f2"));
 
         Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
-        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
+        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderCancelled("customer asked"), finished.Outcome.Value);
 
         // The reservation moved the checkout to Charging, but the cancel was decided before the charge was issued.
@@ -159,7 +159,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
     public async Task A_message_the_workflow_accepts_is_decided_as_the_fact_it_maps_to()
     {
         await WaitingForAPerson("f8");
-        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutFact, CheckoutOutcome>>>().ActorRef;
+        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>>>().ActorRef;
 
         // An operator tool sends its own message type to the workflow's address.
         region.Tell(new ShardingEnvelope("f8", new OperatorDecision(Retry: false)), TestActor);

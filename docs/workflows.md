@@ -338,12 +338,14 @@ builder.Services.AddAkka("shop", (akka, sp) =>
 
 Without `ShardedHosting`, the workflow type runs in a local host actor in this process. With it, the workflow type runs in a shard region. `ShardedHosting` has the same settings as for entities.
 
-One actor system hosts at most one workflow type for each set of input, fact and outcome types. `WithDurableWorkflow` rejects a second one.
+One actor system hosts at most one workflow type for each set of input, state, fact and outcome types. `WithDurableWorkflow` rejects a second one.
 
-To call a workflow, inject `IWorkflowRefs<TInput, TFact, TOutcome>`. Its refs can start a workflow, read its status, wait for its outcome, cancel it, and `Notify` it with a fact.
+To call a workflow, inject `IWorkflowRefs<TInput, TState, TFact, TOutcome>`. The type arguments are those of the `WorkflowDefinition`, in the same order. Its refs can start a workflow, read it, wait for its outcome, cancel it, and `Notify` it with a fact.
+
+The four types must match a hosted workflow type. If they do not, for example because `TState` is not the definition's state type, `Get` throws `InvalidOperationException`, and the message names the four types.
 
 ```csharp
-public sealed class CheckoutService(IWorkflowRefs<PlaceOrder, CheckoutFact, CheckoutOutcome> checkouts)
+public sealed class CheckoutService(IWorkflowRefs<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> checkouts)
 {
     public async Task<CheckoutOutcome> PlaceAsync(string order, int total, CancellationToken ct)
     {
@@ -370,25 +372,47 @@ Getting a ref is cheap. It does not start or activate the workflow.
 | `AlreadyRunning` | A workflow with this id is running. Nothing changed. |
 | `AlreadyFinished<TOutcome>` | A workflow with this id has finished. The reply carries its outcome. |
 
-`Status` reads the condition the workflow is in. It answers at once and never waits for the workflow. It returns one of:
+`GetStateAsync` reads the workflow the way an entity is read. It returns a `StateSnapshot<WorkflowStatus<TState, TOutcome>>`. Its `State` is the condition the workflow is in, one of:
 
 - `WorkflowNotStarted`.
-- `WorkflowRunning`, with `State` (the state the workflow is in) and `Since` (when the workflow entered it).
+- `WorkflowRunning<TState>`, with `State` (the state the workflow is in) and `Since` (when the workflow entered it).
 - `WorkflowFinished<TOutcome>`, with `Outcome` and `At`. The outcome type says how the workflow ended.
 
-`State` is the state value, so you can read its data. When the state type is a C# union, `State` is the case the union holds, such as the `Charging` record. Match on its type:
+The read is queued behind commands the workflow has already received. It is answered after their facts are journaled. It does not wait for the workflow's work, so it can return while work is in flight.
+
+`SequenceNr` is the sequence number of the journal of the entity that hosts the workflow. It grows with each event the workflow journals: the start, each decided fact and each held fact. Compare it with an earlier read to see whether anything changed. It is not a count of state changes: a fact that keeps the state also adds one.
+
+`WorkflowRunning<TState>.State` has your state type, as you typed it in the definition. When the state type is a C# union, `State` is the union value, not the case it holds. So a `switch` expression over it is checked by the compiler, as the fact table is. Write no catch-all arm. Then the compiler reports a state that you add later, until the reader handles it:
 
 ```csharp
-var status = await checkout.Status(ct);
-if (status.Value is WorkflowRunning { State: Charging charging } running)
-    Console.WriteLine($"Charging since {running.Since}, reservation {charging.Reservation}");
+public sealed class CheckoutStatus(IWorkflowRefs<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> checkouts)
+{
+    public async Task<string?> DescribeAsync(string order, CancellationToken ct)
+    {
+        var snapshot = await checkouts.Get(new WorkflowId(order)).GetStateAsync(ct);
+        if (snapshot.State.Value is WorkflowRunning<CheckoutState> running)
+        {
+            return running.State switch
+            {
+                Reserving => $"Reserving stock since {running.Since}.",
+                Charging charging => $"Charging the card, reservation {charging.Reservation}.",
+                Undoing undoing => $"Undoing the order, then {undoing.Then.Value}.",
+                NeedsAttention attention => $"Waiting for a person: {attention.Why}.",
+            };
+        }
+
+        return null; // not started, or finished
+    }
+}
 ```
 
-When the state type is not a union, `State` is the state object as it is. `StateName` is the name of the state's type, or for a union the name of the case it holds. Use it for logs and simple displays.
+If you remove the `NeedsAttention` arm, the compiler reports CS8509: the switch expression does not handle all possible values. CS8509 is a warning, so treat warnings as errors to make it fail the build. A `switch` statement is not checked in this way, so use a `switch` expression.
 
-`WaitForOutcome(pollEvery)` reads the status every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
+`StateName` is the name of the record the state holds. For a union, it is the name of the case it holds, also when that case is a union itself. Use it for logs and simple displays, not to read the state's data.
 
-`DurableEntityTestKit` has a `WorkflowRef` helper that returns the same ref in a test.
+`WaitForOutcome(pollEvery)` reads the workflow every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
+
+`DurableEntityTestKit` has a `WorkflowRef<TInput, TState, TFact, TOutcome>(id)` helper that returns the same ref in a test.
 
 ## Serialization
 

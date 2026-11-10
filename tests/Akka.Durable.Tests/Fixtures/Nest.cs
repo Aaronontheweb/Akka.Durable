@@ -5,7 +5,8 @@ using Akka.Serialization.V2;
 namespace Akka.Durable.Tests.Fixtures.Nests;
 
 // A workflow whose state is a union with a union inside it: Outer holds Inner, and Inner holds Low or High.
-// Its one piece of work never answers, so a test can read the status of a workflow that is held in its state.
+// Its one piece of work never answers, so a test can read the state of a workflow that is held in its state.
+// A second workflow with the same input, fact and outcome but another state type: a union with one case.
 
 public interface INestProtocol;
 
@@ -27,6 +28,9 @@ public sealed record Settled : INestProtocol;
 [AkkaSerializable(Manifest = "nest-outer-v1")]
 public readonly union Outer(Inner, Settled) : INestProtocol;
 
+[AkkaSerializable(Manifest = "nest-lone-v1")]
+public readonly union Lone(Settled) : INestProtocol;
+
 [AkkaSerializable(Manifest = "nest-released-v1", AllowEmpty = true)]
 public sealed record Released : INestProtocol;
 
@@ -47,8 +51,20 @@ public sealed partial class NestSerializer : AkkaSerializer
 public static class Nest
 {
     public static readonly WorkflowDefinition<Go, Outer, NestFact, Over> Definition =
-        new(new WorkflowTypeName("nests"),
-            Start: go => new Outer(new Inner(new Low(go.Level))),
+        Holding<Outer>("nests", go => new Inner(new Low(go.Level)));
+
+    public static readonly WorkflowDefinition<Go, Lone, NestFact, Over> Alone =
+        Holding<Lone>("nests-alone", _ => new Settled());
+
+    /// <summary>Options under which a workflow type reads the journal of <paramref name="writer"/>, as a later deployment would.</summary>
+    public static EntityOptions ReadsJournalOf(WorkflowTypeName writer) =>
+        EntityOptions.Default.WithPersistenceId((id, _) =>
+            EntityOptions.DefaultPersistenceIdFactory(id, new EntityTypeName(writer.Value)));
+
+    /// <summary>A workflow that starts in the state <paramref name="start"/> gives it and is held there.</summary>
+    public static WorkflowDefinition<Go, TState, NestFact, Over> Holding<TState>(
+        string typeName, Func<Go, TState> start) where TState : notnull =>
+        new(new WorkflowTypeName(typeName), start,
             Work: (_, ctx) => ctx.Execute(new Hold()),
             Decide: (_, _, ctx) => ctx.Finish(new Over()),
             Cancel: _ => new Released(),

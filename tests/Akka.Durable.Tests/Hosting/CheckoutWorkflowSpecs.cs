@@ -1,5 +1,6 @@
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Durable.Tests.Fixtures.Echoes;
+using Akka.Durable.Tests.Fixtures.Nests;
 using Akka.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -18,11 +19,20 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddCheckoutHandlers().AddScoped<IEffectHandler<Repeat, EchoFact>, RepeatHandler>();
 
+    /// <summary>
+    /// A later deployment of the echo workflow whose outcome type changed from <see cref="Heard"/> to
+    /// <see cref="Echoed"/>: it reads the journal the echo workflow wrote, under the same persistence ids.
+    /// </summary>
+    private static readonly WorkflowDefinition<Shout, Listening, EchoFact, Echoed> OutcomeChanged =
+        new(new WorkflowTypeName("outcome-changed"), _ => new Listening(), (_, ctx) => ctx.Execute(new Repeat(ctx.Input.Text)),
+            (_, _, ctx) => ctx.Stay(), _ => new EchoLost(), _ => new EchoLost(), Nest.ReadsJournalOf(Echo.Definition.TypeName));
+
     // A second workflow type in the same actor system.
     protected override void ConfigureMore(AkkaConfigurationBuilder builder) =>
         builder
             .WithCustomSerializer(EchoSerializer.CreateSerializerDetails)
-            .WithDurableWorkflow(Echo.Definition, Sharding());
+            .WithDurableWorkflow(Echo.Definition, Sharding())
+            .WithDurableWorkflow(OutcomeChanged, Sharding());
 
     [Fact]
     public async Task A_workflow_runs_its_work_in_order_and_ends_with_its_outcome()
@@ -35,7 +45,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OrderPlaced("charge-o1"), outcome.Value);
         Assert.Equal([new ReserveStock("o1"), new ChargeCard("o1", 4200)], Services.Issued);
 
-        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
+        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderPlaced("charge-o1"), finished.Outcome.Value);
     }
 
@@ -44,7 +54,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     {
         var checkout = CheckoutRef("never");
 
-        Assert.IsType<WorkflowNotStarted>((await checkout.Status(AskCancellation())).Value);
+        Assert.IsType<WorkflowNotStarted>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         await Assert.ThrowsAsync<InvalidOperationException>(() => checkout.WaitForOutcome(Poll, AskCancellation()));
     }
 
@@ -59,7 +69,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.IsType<Started>((await checkout.Start(order, AskCancellation())).Value);
         Assert.IsType<AlreadyRunning>((await checkout.Start(order, AskCancellation())).Value);
 
-        var running = Assert.IsType<WorkflowRunning>((await checkout.Status(AskCancellation())).Value);
+        var running = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(nameof(Reserving), running.StateName);
 
         reserved.SetResult(new Reserved("res-o2"));
@@ -83,7 +93,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OrderFailed("no funds"), outcome.Value);
         Assert.Equal([new ReserveStock("o3"), new ChargeCard("o3", 100), new UndoOrder("o3")], Services.Issued);
 
-        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
+        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderFailed("no funds"), finished.Outcome.Value);
     }
 
@@ -116,7 +126,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OpenSupportTicket("o5", "ChargeCard Failed"), Services.Issued[^1]);
         Assert.Single(Services.Issued.OfType<ChargeCard>());
 
-        var status = Assert.IsType<WorkflowRunning>((await checkout.Status(AskCancellation())).Value);
+        var status = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(nameof(NeedsAttention), status.StateName);
     }
 
@@ -216,7 +226,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     [Fact]
     public async Task Two_workflow_types_run_in_one_actor_system()
     {
-        var echo = WorkflowRef<Shout, EchoFact, Heard>("e1");
+        var echo = WorkflowRef<Shout, Listening, EchoFact, Heard>("e1");
         var checkout = CheckoutRef("e1");
 
         await echo.Start(new Shout("hello"), AskCancellation());
@@ -224,6 +234,21 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
 
         Assert.Equal(new Heard("hello"), await echo.WaitForOutcome(Poll, AskCancellation()));
         Assert.Equal(new OrderPlaced("charge-e1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+    }
+
+    [Fact]
+    public async Task A_journal_with_another_outcome_type_fails_the_state_read_and_names_both_types()
+    {
+        var writer = WorkflowRef<Shout, Listening, EchoFact, Heard>("m4");
+        await writer.Start(new Shout("hi"), AskCancellation());
+        await AwaitAssertAsync(async () => Assert.IsType<WorkflowFinished<Heard>>((await writer.GetStateAsync(AskCancellation())).State.Value),
+            cancellationToken: TestCancellation);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            WorkflowRef<Shout, Listening, EchoFact, Echoed>("m4").GetStateAsync(AskCancellation()));
+
+        Assert.Contains(typeof(Heard).FullName!, ex.Message);
+        Assert.Contains(typeof(Echoed).FullName!, ex.Message);
     }
 }
 
