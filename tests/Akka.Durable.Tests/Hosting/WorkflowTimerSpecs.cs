@@ -76,37 +76,97 @@ public abstract class WorkflowTimerSpecs(ITestOutputHelper output) : CampaignWor
         Assert.Equal([new SendReminder("t3", 1), new NotifyCollections("t3")], Services.Issued);
     }
 
+    /// <summary>Runs a campaign to Escalating with collections' answer held open, until its grace period has passed.</summary>
+    private async Task<StateSnapshot<WfState>> EscalatingPastItsGrace(string id, TaskCompletionSource<CampaignFact> notified)
+    {
+        Services.Notify = (_, ct) => notified.Task.WaitAsync(ct);
+        await CampaignRef(id).Start(new Invoice(id, DateTimeOffset.UtcNow, Long, Short, Reminders: 1), AskCancellation());
+
+        var escalating = await AwaitRunning(id, running => Assert.Equal(new Escalating(1), StateOf(running)), TimerFires);
+        await AwaitAssertAsync(() => Assert.True(DateTimeOffset.UtcNow > escalating.EnteredAt + Short),
+            TimerFires, cancellationToken: TestCancellation);
+
+        // The grace period is due, but collections has not answered. A wake now journals nothing.
+        var before = await HostedState(id);
+        Wake(id);
+        Wake(id, DateTimeOffset.UtcNow);
+        Assert.Equal(before, await HostedState(id));
+        Assert.Empty(Assert.IsType<WfRunning>(before.State.Value).Held);
+        return before;
+    }
+
     [Fact]
-    public async Task A_timer_due_while_work_is_in_flight_is_held_once_and_decided_after_the_works_fact()
+    public async Task A_timer_due_while_work_is_in_flight_is_decided_with_the_works_fact_when_the_workflow_stays()
     {
         var notified = Pending();
-        Services.Notify = (_, ct) => notified.Task.WaitAsync(ct);
-        var campaign = CampaignRef("t4");
-
-        await campaign.Start(new Invoice("t4", DateTimeOffset.UtcNow, Long, Short, Reminders: 1), AskCancellation());
-
-        // The grace period ends while collections has not answered: the timer's fact is held, and remembers its timer.
-        var running = await AwaitRunning("t4", running =>
-        {
-            Assert.Equal(new Escalating(1), StateOf(running));
-            var held = Assert.Single(running.Held);
-            Assert.Equal<object>((CampaignFact)new GraceOver(), held.Fact);
-            Assert.Equal(running.Entry, held.AnswersEntry);
-            Assert.Equal(1, held.AnswersPosition);
-        }, TimerFires);
-        var before = await HostedState("t4");
-
-        // More wakes find the timer held. They journal nothing.
-        Wake("t4");
-        Wake("t4");
-        Assert.Equal(before, await HostedState("t4"));
-        Assert.Empty(running.Settled);
+        var before = await EscalatingPastItsGrace("t4", notified);
 
         notified.SetResult(new CollectionsNotified());
 
-        // Collections' fact keeps the state; then the held grace period ends the campaign. Both in one write.
-        Assert.Equal(new SentToCollections(), (await campaign.WaitForOutcome(Poll, AskCancellation())).Value);
+        // Collections' fact keeps the state, so the workflow is at rest there and the grace period is decided:
+        // two facts in one write.
+        Assert.Equal(new SentToCollections(), (await CampaignRef("t4").WaitForOutcome(Poll, AskCancellation())).Value);
         Assert.Equal(before.SequenceNr + 2, (await HostedState("t4")).SequenceNr);
+        var journal = await JournalOf("t4");
+        Assert.Equal<object>((CampaignFact)new CollectionsNotified(), Assert.IsType<WfFactRecorded>(journal[^2]).Fact);
+        var grace = Assert.IsType<WfFactRecorded>(journal[^1]);
+        Assert.Equal<object>((CampaignFact)new GraceOver(), grace.Fact);
+        Assert.Equal(1, grace.Answered);
+        Assert.False(grace.FromHeld);
+    }
+
+    [Fact]
+    public async Task A_timer_due_while_work_is_in_flight_never_fires_when_the_works_fact_moves_the_workflow_on()
+    {
+        var notified = Pending();
+        var before = await EscalatingPastItsGrace("t7", notified);
+
+        notified.SetResult(new CollectionsDeclined());
+
+        // Collections declines: the campaign goes back to reminders. The grace period belonged to Escalating.
+        var paused = await AwaitRunning("t7", running => Assert.Equal(new Pausing(1), StateOf(running)));
+        Assert.Equal(before.SequenceNr + 1, (await HostedState("t7")).SequenceNr);
+        Assert.Empty(paused.Settled);
+
+        // A wake that comes now finds no grace period in Pausing.
+        Wake("t7", DateTimeOffset.UtcNow);
+        Assert.Equal(before.SequenceNr + 1, (await HostedState("t7")).SequenceNr);
+    }
+
+    [Fact]
+    public async Task Work_that_polls_within_a_time_limit_stops_when_the_limit_passes_during_a_poll()
+    {
+        var checking = Pending();
+        Services.Check = (_, ct) => checking.Task.WaitAsync(ct);
+        var campaign = CampaignRef("t8");
+        await campaign.Start(new Invoice("t8", DateTimeOffset.UtcNow + Long, Long, Short, Reminders: 2), AskCancellation());
+
+        // The customer says they paid. The check for the payment stays open past the time limit.
+        Assert.IsType<Delivered>((await campaign.Notify(new PaymentClaimed(), AskCancellation())).Value);
+        var verifying = await AwaitRunning("t8", running =>
+        {
+            Assert.Equal(new Verifying(0), StateOf(running));
+            Assert.Single(Services.Issued);
+        });
+        await AwaitAssertAsync(() => Assert.True(DateTimeOffset.UtcNow > verifying.EnteredAt + Short),
+            TimerFires, cancellationToken: TestCancellation);
+        var before = await HostedState("t8");
+
+        // Not yet paid: the table asks again. The new entry's check is not issued yet, so the workflow is at rest,
+        // and the time limit, which counts from the claim, is decided first.
+        checking.SetResult(new NotYetPaid());
+
+        await AwaitRunning("t8", running => Assert.Equal(new Pausing(0), StateOf(running)));
+        Assert.Equal([new CheckPayment("t8")], Services.Issued);
+
+        Assert.Equal(before.SequenceNr + 2, (await HostedState("t8")).SequenceNr);
+        var journal = await JournalOf("t8");
+        var notYet = Assert.IsType<WfFactRecorded>(journal[^2]);
+        Assert.Equal<object>((CampaignFact)new NotYetPaid(), notYet.Fact);
+        Assert.IsType<WfRepeated>(notYet.Step.Value);
+        var overdue = Assert.IsType<WfFactRecorded>(journal[^1]);
+        Assert.Equal<object>((CampaignFact)new CheckOverdue(), overdue.Fact);
+        Assert.Equal<object>(new WfMoved((CampaignState)new Pausing(0)), overdue.Step.Value);
     }
 
     [Fact]

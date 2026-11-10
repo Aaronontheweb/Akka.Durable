@@ -230,7 +230,7 @@ public static WorkList<CampaignFact> Work(CampaignState state, WorkContext<Invoi
 - `ctx.All` gives a state several things at once: here a piece of work and a time limit for it.
 - When the workflow leaves a state, that state's timers are gone. There is nothing to cancel.
 
-Work and a wait are different. An `Execute` is work: it expects an answer within the attempt limit, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer that is due while work is in flight is held, like a fact from outside.
+Work and a wait are different. An `Execute` is work: it expects an answer within the attempt limit, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
 
 ### The reminder
 

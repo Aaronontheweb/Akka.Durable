@@ -148,7 +148,9 @@ public sealed record WorkflowDefinition<TInput, TState, TFact, TOutcome>(
 /// <para>Work and a wait are different. Work is a call to a service. It holds facts from outside while it has
 /// no answer, and it gives up after <see cref="WorkflowOptions.AttemptLimit"/>.</para>
 /// <para>A wait holds nothing: a fact from outside is decided at once. It can last months and it never gives
-/// up. When it is due, its fact is decided, unless the workflow has left the state by then.</para>
+/// up. A timer is decided when it is due and the workflow is at rest. One that comes due while work is in flight
+/// is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once
+/// the workflow leaves the state, the timer never fires.</para>
 /// </remarks>
 public abstract record Work<TFact>
 {

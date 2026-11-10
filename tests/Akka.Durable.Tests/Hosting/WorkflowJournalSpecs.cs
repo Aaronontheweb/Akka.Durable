@@ -232,7 +232,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
     }
 
     [Fact]
-    public void State_round_trips_with_the_time_its_work_was_issued_and_a_held_timer_fact()
+    public void State_round_trips_with_the_time_its_work_was_issued()
     {
         WfState state = new WfRunning(
             Order,
@@ -240,22 +240,13 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
             Entry: 3,
             EnteredAt: At,
             Settled: [0],
-            Held: [new WfHeldFact((CheckoutFact)new CancelRequested("late"), At.AddSeconds(2), AnswersEntry: 3, AnswersPosition: 1)],
+            Held: [new WfHeldFact((CheckoutFact)new CancelRequested("late"), At.AddSeconds(2))],
             IssuedAt: At.AddMinutes(5));
 
         var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);
 
         Assert.Equal(state.Value, received);
         Assert.Equal(At.AddMinutes(5), received.IssuedAt);
-        Assert.Equal(new WfHeldFact((CheckoutFact)new CancelRequested("late"), At.AddSeconds(2), 3, 1), received.Held[0]);
-    }
-
-    [Fact]
-    public void A_held_timer_fact_round_trips_with_the_timer_it_answers()
-    {
-        WfEvent held = new WfHeld((CheckoutFact)new CancelRequested("late"), At, AnswersEntry: 2, AnswersPosition: 1);
-
-        Assert.Equal(held, RoundTrip(held));
     }
 
     [Fact]

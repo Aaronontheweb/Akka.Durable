@@ -17,7 +17,10 @@ public interface ICampaignProtocol;
 /// <param name="Id">The invoice.</param>
 /// <param name="DueAt">When the invoice is due: the first reminder goes out then.</param>
 /// <param name="Pause">How long to wait between reminders.</param>
-/// <param name="Grace">How long collections gives the customer before it takes over.</param>
+/// <param name="Grace">
+/// How long collections gives the customer before it takes over, and how long a payment the customer says they
+/// made has to show up.
+/// </param>
 /// <param name="Reminders">How many reminders to send before collections.</param>
 [AkkaSerializable(Manifest = "campaign-invoice-v1")]
 public sealed record Invoice(
@@ -44,8 +47,15 @@ public sealed record Pausing([property: AkkaField(0)] int Sent) : ICampaignProto
 [AkkaSerializable(Manifest = "campaign-escalating-v1")]
 public sealed record Escalating([property: AkkaField(0)] int Sent) : ICampaignProtocol;
 
+/// <summary>
+/// The customer says they paid. Checks for the payment until it shows up or <see cref="Invoice.Grace"/> has passed:
+/// work with a time limit that polls.
+/// </summary>
+[AkkaSerializable(Manifest = "campaign-verifying-v1")]
+public sealed record Verifying([property: AkkaField(0)] int Sent) : ICampaignProtocol;
+
 [AkkaSerializable(Manifest = "campaign-state-v1")]
-public readonly union CampaignState(Waiting, Reminding, Pausing, Escalating) : ICampaignProtocol;
+public readonly union CampaignState(Waiting, Reminding, Pausing, Escalating, Verifying) : ICampaignProtocol;
 
 // Facts
 [AkkaSerializable(Manifest = "campaign-due-date-reached-v1", AllowEmpty = true)]
@@ -77,6 +87,18 @@ public sealed record Paid : ICampaignProtocol;
 [AkkaSerializable(Manifest = "campaign-stop-requested-v1")]
 public sealed record StopRequested([property: AkkaField(0)] string Reason) : ICampaignProtocol;
 
+/// <summary>The customer says they paid.</summary>
+[AkkaSerializable(Manifest = "campaign-payment-claimed-v1", AllowEmpty = true)]
+public sealed record PaymentClaimed : ICampaignProtocol;
+
+/// <summary>A check found no payment yet.</summary>
+[AkkaSerializable(Manifest = "campaign-not-yet-paid-v1", AllowEmpty = true)]
+public sealed record NotYetPaid : ICampaignProtocol;
+
+/// <summary>The payment the customer claimed did not show up in time.</summary>
+[AkkaSerializable(Manifest = "campaign-check-overdue-v1", AllowEmpty = true)]
+public sealed record CheckOverdue : ICampaignProtocol;
+
 /// <summary>A piece of work got no answer.</summary>
 [AkkaSerializable(Manifest = "campaign-work-failed-v1")]
 public sealed record WorkFailed(
@@ -86,7 +108,7 @@ public sealed record WorkFailed(
 [AkkaSerializable(Manifest = "campaign-fact-v1")]
 public readonly union CampaignFact(
     DueDateReached, SendNow, ReminderSent, PauseOver, CollectionsNotified, CollectionsDeclined, GraceOver,
-    Paid, StopRequested, WorkFailed) : ICampaignProtocol;
+    Paid, StopRequested, PaymentClaimed, NotYetPaid, CheckOverdue, WorkFailed) : ICampaignProtocol;
 
 // Outcomes
 [AkkaSerializable(Manifest = "campaign-paid-in-full-v1", AllowEmpty = true)]
@@ -104,6 +126,7 @@ public readonly union CampaignOutcome(PaidInFull, SentToCollections, CampaignSto
 // Effects. Plain records: they never leave the process.
 public sealed record SendReminder(string Invoice, int Number);
 public sealed record NotifyCollections(string Invoice);
+public sealed record CheckPayment(string Invoice);
 
 [AkkaSerializer<ICampaignProtocol>("campaign-test", 22603)]
 public sealed partial class CampaignSerializer : AkkaSerializer
@@ -132,6 +155,9 @@ public static class Campaign
             Escalating => ctx.All(
                 ctx.Execute(new NotifyCollections(ctx.Input.Id)),
                 ctx.Timer(ctx.Input.Grace, new GraceOver())),
+            Verifying => ctx.All(
+                ctx.Execute(new CheckPayment(ctx.Input.Id)),
+                ctx.Timer(ctx.Input.Grace, new CheckOverdue())),
         };
 
     /// <summary>The fact table. It has no catch-all arm: every pair of state and fact is written out.</summary>
@@ -154,9 +180,17 @@ public static class Campaign
             (Escalating escalating, CollectionsDeclined) => ctx.Next(new Pausing(escalating.Sent)),
             (Escalating, GraceOver) => ctx.Finish(new SentToCollections()),
 
+            // A claimed payment is checked until it shows up. Again keeps the time the state was entered, so the
+            // time limit counts from the claim, not from the latest check.
+            (Waiting, PaymentClaimed) => ctx.Next(new Verifying(0)),
+            (Pausing pausing, PaymentClaimed) => ctx.Next(new Verifying(pausing.Sent)),
+            (Verifying, NotYetPaid or WorkFailed) => ctx.Again(),
+            (Verifying verifying, CheckOverdue) => ctx.Next(new Pausing(verifying.Sent)),
+            (Verifying, PaymentClaimed) => ctx.Stay(),
+
             // A payment or a stop ends the campaign in any state.
-            (Waiting or Reminding or Pausing or Escalating, Paid) => ctx.Finish(new PaidInFull()),
-            (Waiting or Reminding or Pausing or Escalating, StopRequested stop) =>
+            (Waiting or Reminding or Pausing or Escalating or Verifying, Paid) => ctx.Finish(new PaidInFull()),
+            (Waiting or Reminding or Pausing or Escalating or Verifying, StopRequested stop) =>
                 ctx.Finish(new CampaignStopped(stop.Reason)),
 
             // Pairs that should not happen, written out so that a new state or fact does not compile until it is placed.
@@ -167,6 +201,10 @@ public static class Campaign
             (Pausing, DueDateReached or ReminderSent or CollectionsNotified or CollectionsDeclined or GraceOver or WorkFailed) =>
                 ctx.Unexpected(),
             (Escalating, DueDateReached or SendNow or ReminderSent or PauseOver) => ctx.Unexpected(),
+            (Reminding or Escalating, PaymentClaimed) => ctx.Unexpected(),
+            (Waiting or Reminding or Pausing or Escalating, NotYetPaid or CheckOverdue) => ctx.Unexpected(),
+            (Verifying, DueDateReached or SendNow or ReminderSent or PauseOver or CollectionsNotified or CollectionsDeclined
+                or GraceOver) => ctx.Unexpected(),
         };
 
     public static OutcomeKind Kind(CampaignOutcome outcome) =>
@@ -195,6 +233,9 @@ public sealed class CampaignServices
     public Func<NotifyCollections, CancellationToken, Task<CampaignFact>> Notify { get; set; } =
         (_, _) => Task.FromResult<CampaignFact>(new CollectionsNotified());
 
+    public Func<CheckPayment, CancellationToken, Task<CampaignFact>> Check { get; set; } =
+        (_, _) => Task.FromResult<CampaignFact>(new NotYetPaid());
+
     internal Task<CampaignFact> Run<TEffect>(
         TEffect effect, Func<TEffect, CancellationToken, Task<CampaignFact>> answer, CancellationToken ct)
         where TEffect : notnull
@@ -216,10 +257,17 @@ public sealed class NotifyCollectionsHandler(CampaignServices services) : IEffec
         services.Run(effect, services.Notify, cancellationToken);
 }
 
+public sealed class CheckPaymentHandler(CampaignServices services) : IEffectHandler<CheckPayment, CampaignFact>
+{
+    public Task<CampaignFact> HandleAsync(CheckPayment effect, CancellationToken cancellationToken) =>
+        services.Run(effect, services.Check, cancellationToken);
+}
+
 public static class CampaignHandlers
 {
     public static IServiceCollection AddCampaignHandlers(this IServiceCollection services) => services
         .AddSingleton<CampaignServices>()
         .AddScoped<IEffectHandler<SendReminder, CampaignFact>, SendReminderHandler>()
-        .AddScoped<IEffectHandler<NotifyCollections, CampaignFact>, NotifyCollectionsHandler>();
+        .AddScoped<IEffectHandler<NotifyCollections, CampaignFact>, NotifyCollectionsHandler>()
+        .AddScoped<IEffectHandler<CheckPayment, CampaignFact>, CheckPaymentHandler>();
 }
