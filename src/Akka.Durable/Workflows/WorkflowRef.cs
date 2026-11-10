@@ -19,6 +19,16 @@ public sealed class WorkflowRegion<TInput, TOutcome>
     private WorkflowRegion() { }
 }
 
+/// <summary>
+/// <see cref="ActorRegistry"/> key for the same shard region or local host as
+/// <see cref="WorkflowRegion{TInput,TOutcome}"/>, used by refs that also know the fact type.
+/// </summary>
+// ReSharper disable once ClassCannotBeInstantiated
+public sealed class WorkflowRegion<TInput, TFact, TOutcome>
+{
+    private WorkflowRegion() { }
+}
+
 // The answers to Start.
 public sealed record Started;
 public sealed record AlreadyRunning;
@@ -38,6 +48,21 @@ public sealed record WorkflowFinished<TOutcome>(TOutcome Outcome, OutcomeKind Ki
 
 /// <summary>The condition a workflow is in: not started, running, or finished with its outcome.</summary>
 public readonly union WorkflowStatus<TOutcome>(WorkflowNotStarted, WorkflowRunning, WorkflowFinished<TOutcome>);
+
+// The answers to a fact from outside.
+
+/// <summary>The fact was journaled and decided.</summary>
+public sealed record Delivered;
+
+/// <summary>The fact was journaled while work was in flight. It is decided when that work settles.</summary>
+public sealed record Held;
+
+/// <summary>
+/// The answer to <see cref="IWorkflowRef{TInput,TFact,TOutcome}.Notify"/> and
+/// <see cref="IWorkflowRef{TInput,TOutcome}.Cancel"/>. A workflow that is not started, or has finished,
+/// refuses the fact and journals nothing.
+/// </summary>
+public readonly union DeliveryResult<TOutcome>(Delivered, Held, WorkflowNotStarted, AlreadyFinished<TOutcome>);
 
 /// <summary>
 /// Logical reference to one workflow: its workflow type and <see cref="WorkflowId"/>.
@@ -63,6 +88,23 @@ public interface IWorkflowRef<in TInput, TOutcome>
     /// </summary>
     /// <exception cref="InvalidOperationException">The workflow has not been started.</exception>
     Task<TOutcome> WaitForOutcome(TimeSpan pollEvery, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Asks the workflow to stop. The definition's <c>Cancel</c> function turns the request into a fact, and
+    /// the table decides what it means in the current state.
+    /// </summary>
+    /// <param name="reason">Why the workflow should stop.</param>
+    Task<DeliveryResult<TOutcome>> Cancel(string reason, CancellationToken cancellationToken = default);
+}
+
+/// <summary>A workflow reference that can also send the workflow one of its facts.</summary>
+public interface IWorkflowRef<in TInput, in TFact, TOutcome> : IWorkflowRef<TInput, TOutcome>
+{
+    /// <summary>
+    /// Sends the workflow a fact. It is journaled before this returns. While work is in flight it is held,
+    /// and decided when that work settles.
+    /// </summary>
+    Task<DeliveryResult<TOutcome>> Notify(TFact fact, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -74,6 +116,14 @@ public interface IWorkflowRefs<in TInput, TOutcome>
     IWorkflowRef<TInput, TOutcome> Get(WorkflowId id);
 }
 
+/// <summary>
+/// Factory for workflow references that can send facts, found by the workflow's input, fact and outcome types.
+/// </summary>
+public interface IWorkflowRefs<in TInput, in TFact, TOutcome>
+{
+    IWorkflowRef<TInput, TFact, TOutcome> Get(WorkflowId id);
+}
+
 internal sealed class WorkflowRefs<TInput, TOutcome>(IRequiredActor<WorkflowRegion<TInput, TOutcome>> region)
     : IWorkflowRefs<TInput, TOutcome>
     where TInput : notnull
@@ -82,19 +132,57 @@ internal sealed class WorkflowRefs<TInput, TOutcome>(IRequiredActor<WorkflowRegi
     public IWorkflowRef<TInput, TOutcome> Get(WorkflowId id) => new WorkflowRef<TInput, TOutcome>(id, region.ActorRef);
 }
 
-internal sealed class WorkflowRef<TInput, TOutcome>(WorkflowId id, IActorRef region) : IWorkflowRef<TInput, TOutcome>
+internal sealed class WorkflowRefs<TInput, TFact, TOutcome>(IRequiredActor<WorkflowRegion<TInput, TFact, TOutcome>> region)
+    : IWorkflowRefs<TInput, TFact, TOutcome>
+    where TInput : notnull
+    where TFact : notnull
+    where TOutcome : notnull
+{
+    public IWorkflowRef<TInput, TFact, TOutcome> Get(WorkflowId id) =>
+        new WorkflowRef<TInput, TFact, TOutcome>(id, region.ActorRef);
+}
+
+internal sealed class WorkflowRef<TInput, TFact, TOutcome>(WorkflowId id, IActorRef region)
+    : WorkflowRef<TInput, TOutcome>(id, region), IWorkflowRef<TInput, TFact, TOutcome>
+    where TInput : notnull
+    where TFact : notnull
+    where TOutcome : notnull
+{
+    public async Task<DeliveryResult<TOutcome>> Notify(TFact fact, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        return ResultOf(await Entity.Ask(new WfDeliver(fact, WantsReply: true), cancellationToken));
+    }
+}
+
+internal class WorkflowRef<TInput, TOutcome>(WorkflowId id, IActorRef region) : IWorkflowRef<TInput, TOutcome>
     where TInput : notnull
     where TOutcome : notnull
 {
-    private readonly EntityRef<WfCommand, WfState, WfEvent> _entity = new(new EntityId(id.Value), region);
+    private protected EntityRef<WfCommand, WfState, WfEvent> Entity { get; } = new(new EntityId(id.Value), region);
 
     public WorkflowId Id => id;
+
+    public async Task<DeliveryResult<TOutcome>> Cancel(string reason, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reason);
+        return ResultOf(await Entity.Ask(new WfCancel(reason, By: null), cancellationToken));
+    }
+
+    private protected static DeliveryResult<TOutcome> ResultOf(WfDeliveryReply reply) =>
+        reply switch
+        {
+            WfDelivered => new Delivered(),
+            WfHeldReply => new Held(),
+            WfNotStartedReply => new WorkflowNotStarted(),
+            WfClosedReply closed => new AlreadyFinished<TOutcome>((TOutcome)closed.Outcome),
+        };
 
     public async Task<StartResult<TOutcome>> Start(TInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        var reply = await _entity.Ask(new WfStart(input), cancellationToken);
+        var reply = await Entity.Ask(new WfStart(input), cancellationToken);
         return reply switch
         {
             WfStartAccepted => new Started(),
@@ -105,7 +193,7 @@ internal sealed class WorkflowRef<TInput, TOutcome>(WorkflowId id, IActorRef reg
 
     public async Task<WorkflowStatus<TOutcome>> Status(CancellationToken cancellationToken = default)
     {
-        var snapshot = await _entity.GetStateAsync(cancellationToken);
+        var snapshot = await Entity.GetStateAsync(cancellationToken);
         return snapshot.State switch
         {
             WfNotStarted => new WorkflowNotStarted(),
@@ -170,6 +258,8 @@ public static class DurableWorkflowHostingExtensions
         builder.WithActors((system, _) => DurableEntityHostingExtensions.EnsureSerializable(
             system, "Durable workflow", entity.TypeName, typeof(TInput), typeof(TState), typeof(TFact), typeof(TOutcome)));
 
-        return builder.HostEntity<WfState, WfCommand, WfEvent, WorkflowRegion<TInput, TOutcome>>(entity, sharding);
+        // Refs that can send facts find the same actor under a key that also names the fact type.
+        return builder.HostEntity<WfState, WfCommand, WfEvent, WorkflowRegion<TInput, TOutcome>>(entity, sharding,
+            (registry, region) => registry.Register<WorkflowRegion<TInput, TFact, TOutcome>>(region));
     }
 }

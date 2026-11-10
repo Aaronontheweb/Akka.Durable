@@ -65,6 +65,7 @@ public class WorkflowHostingRulesSpecs
         Work: (_, ctx) => ctx.Execute(new PlainWork()),
         Decide: (_, _, ctx) => ctx.Finish(new PlainOutcome()),
         Kind: _ => OutcomeKind.Succeeded,
+        Cancel: _ => new PlainFact(),
         GaveUp: _ => new PlainFact());
 
     [Fact]

@@ -25,21 +25,38 @@ internal sealed record WfNotStarted : IDurableEntityProtocol;
 /// </param>
 /// <param name="EnteredAt">When the workflow entered <paramref name="State"/>.</param>
 /// <param name="Settled">Positions in the state's work list that have been answered during this entry.</param>
+/// <param name="Held">
+/// Facts that arrived while work was in flight, in arrival order. They are decided when the work settles.
+/// </param>
 [AkkaSerializable(Manifest = "durable-wf-running-v1")]
 internal sealed record WfRunning(
     [property: AkkaField(0)] object Input,
     [property: AkkaField(1)] object State,
     [property: AkkaField(2)] int Entry,
     [property: AkkaField(3)] DateTimeOffset EnteredAt,
-    [property: AkkaField(4)] ImmutableArray<int> Settled) : IDurableEntityProtocol
+    [property: AkkaField(4)] ImmutableArray<int> Settled,
+    [property: AkkaField(5)] ImmutableArray<WfHeldFact> Held) : IDurableEntityProtocol
 {
+    /// <summary>The held facts. A state written before this field existed has none.</summary>
+    public ImmutableArray<WfHeldFact> HeldFacts => Held.IsDefault ? [] : Held;
+
     // ImmutableArray compares by reference; compare its contents so records with equal data are equal.
     public bool Equals(WfRunning? other) =>
         other is not null && Equals(Input, other.Input) && Equals(State, other.State) && Entry == other.Entry
-        && EnteredAt == other.EnteredAt && Settled.SequenceEqual(other.Settled);
+        && EnteredAt == other.EnteredAt && Settled.SequenceEqual(other.Settled)
+        && HeldFacts.SequenceEqual(other.HeldFacts);
 
-    public override int GetHashCode() => HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length);
+    public override int GetHashCode() =>
+        HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length, HeldFacts.Length);
 }
+
+/// <summary>A fact that arrived while work was in flight.</summary>
+/// <param name="Fact">The author's fact.</param>
+/// <param name="At">When it arrived.</param>
+[AkkaSerializable(Manifest = "durable-wf-held-fact-v1")]
+internal sealed record WfHeldFact(
+    [property: AkkaField(0)] object Fact,
+    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-finished-v1")]
 internal sealed record WfFinished(
@@ -83,15 +100,25 @@ internal readonly union WfStep(WfMoved, WfEnded, WfKept, WfRepeated, WfUnexpecte
 /// <param name="Answered">The position, in the work list of the entry it arrived in, of the work this fact answered.</param>
 /// <param name="At">When the fact was decided.</param>
 /// <param name="Step">What the table decided.</param>
+/// <param name="FromHeld">True when the fact was taken from the front of the held list.</param>
 [AkkaSerializable(Manifest = "durable-wf-fact-v1")]
 internal sealed record WfFactRecorded(
     [property: AkkaField(0)] object Fact,
     [property: AkkaField(1)] int? Answered,
     [property: AkkaField(2)] DateTimeOffset At,
-    [property: AkkaField(3)] WfStep Step) : IDurableEntityProtocol;
+    [property: AkkaField(3)] WfStep Step,
+    [property: AkkaField(4)] bool FromHeld) : IDurableEntityProtocol;
+
+/// <summary>A fact arrived while work was in flight. It is held, not decided.</summary>
+/// <param name="Fact">The author's fact.</param>
+/// <param name="At">When it arrived.</param>
+[AkkaSerializable(Manifest = "durable-wf-held-v1")]
+internal sealed record WfHeld(
+    [property: AkkaField(0)] object Fact,
+    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-event-v1")]
-internal readonly union WfEvent(WfStarted, WfFactRecorded) : IDurableEntityProtocol;
+internal readonly union WfEvent(WfStarted, WfFactRecorded, WfHeld) : IDurableEntityProtocol;
 
 // ---- Commands and replies ----
 
@@ -109,8 +136,32 @@ internal sealed record WfAnswer(
     [property: AkkaField(1)] int Index,
     [property: AkkaField(2)] object Fact) : IDurableEntityProtocol;
 
+/// <summary>A fact from outside the workflow.</summary>
+/// <param name="Fact">The author's fact.</param>
+/// <param name="WantsReply">
+/// False for a message that an actor sent to the workflow's address: that actor does not expect a reply.
+/// </param>
+[AkkaSerializable(Manifest = "durable-wf-deliver-v1")]
+internal sealed record WfDeliver(
+    [property: AkkaField(0)] object Fact,
+    [property: AkkaField(1)] bool WantsReply)
+    : IDurableEntityProtocol, IReplies<WfCommand, WfDeliveryReply>
+{
+    public WfCommand ToCommand() => new(this);
+}
+
+/// <summary>The request to stop the workflow. The definition's <c>Cancel</c> function turns it into a fact.</summary>
+[AkkaSerializable(Manifest = "durable-wf-cancel-v1")]
+internal sealed record WfCancel(
+    [property: AkkaField(0)] string Reason,
+    [property: AkkaField(1)] string? By)
+    : IDurableEntityProtocol, IReplies<WfCommand, WfDeliveryReply>
+{
+    public WfCommand ToCommand() => new(this);
+}
+
 [AkkaSerializable(Manifest = "durable-wf-command-v1")]
-internal readonly union WfCommand(WfStart, WfAnswer) : IDurableEntityProtocol;
+internal readonly union WfCommand(WfStart, WfAnswer, WfDeliver, WfCancel) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-start-accepted-v1", AllowEmpty = true)]
 internal sealed record WfStartAccepted : IDurableEntityProtocol;
@@ -123,6 +174,27 @@ internal sealed record WfStartRefusedFinished([property: AkkaField(0)] object Ou
 
 [AkkaSerializable(Manifest = "durable-wf-start-reply-v1")]
 internal readonly union WfStartReply(WfStartAccepted, WfStartRefusedRunning, WfStartRefusedFinished) : IDurableEntityProtocol;
+
+// The answers to a fact from outside.
+
+/// <summary>The fact was journaled and decided.</summary>
+[AkkaSerializable(Manifest = "durable-wf-delivered-v1", AllowEmpty = true)]
+internal sealed record WfDelivered : IDurableEntityProtocol;
+
+/// <summary>The fact was journaled. It is decided when the work in flight settles.</summary>
+[AkkaSerializable(Manifest = "durable-wf-held-reply-v1", AllowEmpty = true)]
+internal sealed record WfHeldReply : IDurableEntityProtocol;
+
+[AkkaSerializable(Manifest = "durable-wf-not-started-reply-v1", AllowEmpty = true)]
+internal sealed record WfNotStartedReply : IDurableEntityProtocol;
+
+/// <summary>The workflow has finished and is closed.</summary>
+[AkkaSerializable(Manifest = "durable-wf-closed-reply-v1")]
+internal sealed record WfClosedReply([property: AkkaField(0)] object Outcome) : IDurableEntityProtocol;
+
+[AkkaSerializable(Manifest = "durable-wf-delivery-reply-v1")]
+internal readonly union WfDeliveryReply(WfDelivered, WfHeldReply, WfNotStartedReply, WfClosedReply)
+    : IDurableEntityProtocol;
 
 /// <summary>Stands in for the effect of work that was interrupted by a restart. Nothing runs for it.</summary>
 internal sealed record InterruptedWork(object Work);
@@ -139,10 +211,19 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
 {
     private static readonly WfStartReply Accepted = new WfStartAccepted();
     private static readonly WfStartReply RefusedRunning = new WfStartRefusedRunning();
+    private static readonly WfDeliveryReply Delivered = new WfDelivered();
+    private static readonly WfDeliveryReply HeldReply = new WfHeldReply();
+    private static readonly WfDeliveryReply NotStarted = new WfNotStartedReply();
 
     public EntityDefinition<WfState, WfCommand, WfEvent> Compile()
     {
         var options = definition.Options ?? WorkflowOptions.Default;
+
+        // A message sent to the workflow's address by an actor is a fact. That actor expects no reply.
+        var accepted = ImmutableDictionary<Type, Func<object, WfCommand>>.Empty
+            .SetItem(typeof(TFact), message => new WfDeliver(message, WantsReply: false));
+        foreach (var (type, wrap) in definition.Accepted)
+            accepted = accepted.SetItem(type, message => new WfDeliver(wrap(message), WantsReply: false));
 
         return new EntityDefinition<WfState, WfCommand, WfEvent>(
             new EntityTypeName(definition.TypeName.Value),
@@ -152,6 +233,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             options.Hosting with { EffectTimeout = options.AttemptLimit })
         {
             Resume = Resume,
+            Accepted = accepted,
         };
     }
 
@@ -164,10 +246,24 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             (WfFinished finished, WfStart start) =>
                 ctx.None().Reply(start, (WfStartReply)new WfStartRefusedFinished(finished.Outcome)),
 
-            (WfRunning running, WfAnswer answer) => Record(running, answer, ctx),
+            (WfRunning running, WfAnswer answer) => Answer(running, answer, ctx),
 
             // An answer for a workflow that has ended. A finished workflow is closed.
             (WfNotStarted or WfFinished, WfAnswer) => ctx.Ignore(),
+
+            (WfRunning running, WfDeliver deliver) => deliver.Fact is TFact
+                ? Deliver(running, deliver.Fact, deliver, deliver.WantsReply, ctx)
+                : ctx.Unhandled(),
+            (WfRunning running, WfCancel cancel) =>
+                Deliver(running, definition.Cancel(new CancelRequest(cancel.Reason, cancel.By)), cancel, wantsReply: true, ctx),
+
+            // A workflow that is not started, or has finished, refuses facts. Nothing is journaled.
+            (WfNotStarted, WfDeliver deliver) => ReplyIf(ctx.None(), deliver, deliver.WantsReply, NotStarted),
+            (WfNotStarted, WfCancel cancel) => ReplyIf(ctx.None(), cancel, wantsReply: true, NotStarted),
+            (WfFinished finished, WfDeliver deliver) =>
+                ReplyIf(ctx.None(), deliver, deliver.WantsReply, new WfClosedReply(finished.Outcome)),
+            (WfFinished finished, WfCancel cancel) =>
+                ReplyIf(ctx.None(), cancel, wantsReply: true, new WfClosedReply(finished.Outcome)),
         };
 
     private Handled<WfCommand, WfEvent> Begin(WfStart start, DecisionContext<WfState, WfCommand, WfEvent> ctx)
@@ -180,56 +276,138 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             ctx, input, first, entry: 1, enteredAt: ctx.UtcNow);
     }
 
-    /// <summary>Decides one fact and journals it with what it led to.</summary>
-    private Decision<WfCommand, WfEvent> Record(
+    /// <summary>The answer to a piece of the workflow's own work, or the notice that it got none.</summary>
+    private Decision<WfCommand, WfEvent> Answer(
         WfRunning running, WfAnswer answer, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
-        // Work is issued once for each entry, so a second answer to the same work is not expected.
-        var current = answer.Entry == running.Entry;
-        if (current && running.Settled.Contains(answer.Index)) return ctx.Ignore();
+        if (answer.Entry == running.Entry)
+        {
+            // Work is issued once for each entry, so a second answer to the same work is not expected.
+            if (running.Settled.Contains(answer.Index)) return ctx.Ignore();
+            return Advance(running, answer.Fact, answer.Index, ctx, ctx.None());
+        }
 
+        // A late answer, to work of an earlier entry. It settles nothing, so it is treated like a fact from outside.
+        return InFlight(running, ctx)
+            ? ctx.Persist(new WfHeld(answer.Fact, ctx.UtcNow))
+            : Advance(running, answer.Fact, answered: null, ctx, ctx.None());
+    }
+
+    /// <summary>A fact from outside: held while work is in flight, otherwise decided at once.</summary>
+    private Handled<WfCommand, WfEvent> Deliver(
+        WfRunning running,
+        object fact,
+        IReplies<WfCommand, WfDeliveryReply> request,
+        bool wantsReply,
+        DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
+        InFlight(running, ctx)
+            ? ReplyIf(ctx.Persist(new WfHeld(fact, ctx.UtcNow)), request, wantsReply, HeldReply)
+            : Advance(running, fact, answered: null, ctx, ReplyIf(ctx.None(), request, wantsReply, Delivered));
+
+    private static Handled<WfCommand, WfEvent> ReplyIf(
+        Handled<WfCommand, WfEvent> handled,
+        IReplies<WfCommand, WfDeliveryReply> request,
+        bool wantsReply,
+        WfDeliveryReply reply) =>
+        wantsReply ? handled.Reply(request, reply) : handled;
+
+    /// <summary>
+    /// True when a piece of the current entry's work has no answer yet. The state a workflow is in always has
+    /// its work issued: a state and its work come from one decision.
+    /// </summary>
+    private bool InFlight(WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
+        WorkOf((TState)running.State, ctx, (TInput)running.Input, running.EnteredAt).Length > running.Settled.Length;
+
+    /// <summary>
+    /// Decides a fact, then each held fact in arrival order while no work is in flight, and journals them all
+    /// in one write. The work of the state the workflow ends in is issued last, once.
+    /// </summary>
+    /// <param name="answered">The position of the work the first fact answers, when it answers current work.</param>
+    private Handled<WfCommand, WfEvent> Advance(
+        WfRunning running,
+        object firstFact,
+        int? answered,
+        DecisionContext<WfState, WfCommand, WfEvent> ctx,
+        Handled<WfCommand, WfEvent> handled)
+    {
         var input = (TInput)running.Input;
         var state = (TState)running.State;
-        var fact = (TFact)answer.Fact;
+        var entry = running.Entry;
+        var enteredAt = running.EnteredAt;
+        var settled = running.Settled;
+        var held = running.HeldFacts;
+        var issued = true;
+        var finished = false;
+        var events = new List<WfEvent>();
+        var unexpected = new List<(TFact Fact, TState State)>();
 
-        var transition = definition.Decide(
-            state, fact, new DecideContext<TInput, TState, TOutcome>(IdOf(ctx), input, ctx.UtcNow, running.EnteredAt));
-
-        // A fact that answers work from an earlier entry is still decided, but settles nothing current.
-        WfEvent Fact(WfStep step) => new WfFactRecorded(answer.Fact, current ? answer.Index : null, ctx.UtcNow, step);
-
-        switch (transition)
+        void Step(object value, int? position, bool fromHeld)
         {
-            case NextTransition<TState> next:
-                return Issue(ctx.Persist(Fact(new WfMoved(next.State))),
-                    ctx, input, next.State, running.Entry + 1, ctx.UtcNow);
+            var fact = (TFact)value;
+            var transition = definition.Decide(
+                state, fact, new DecideContext<TInput, TState, TOutcome>(IdOf(ctx), input, ctx.UtcNow, enteredAt));
 
-            case AgainTransition:
-                return Issue(ctx.Persist(Fact(new WfRepeated())),
-                    ctx, input, state, running.Entry + 1, running.EnteredAt);
+            void Record(WfStep step) => events.Add(new WfFactRecorded(value, position, ctx.UtcNow, step, fromHeld));
 
-            case FinishTransition<TOutcome> finish:
-                return ctx.Persist(Fact(new WfEnded(finish.Outcome, definition.Kind(finish.Outcome))));
+            switch (transition)
+            {
+                case NextTransition<TState> next:
+                    Record(new WfMoved(next.State));
+                    (state, entry, enteredAt, settled, issued) = (next.State, entry + 1, ctx.UtcNow, [], false);
+                    break;
 
-            case StayTransition:
-                return ctx.Persist(Fact(new WfKept()));
+                case AgainTransition:
+                    Record(new WfRepeated());
+                    (entry, settled, issued) = (entry + 1, [], false);
+                    break;
 
-            case UnexpectedTransition:
-                var (type, id) = (definition.TypeName.Value, ctx.EntityId.Value);
-                return ctx.Persist(Fact(new WfUnexpected()))
-                    .Run<ILoggerFactory>((loggers, _) =>
-                    {
-                        loggers.CreateLogger("Akka.Durable.Workflow").LogWarning(
-                            "Workflow [{WorkflowType}/{WorkflowId}] received the fact {Fact} in the state {State}, " +
-                            "which its table marks as unexpected. The state is unchanged.", type, id, fact, state);
-                        return Task.CompletedTask;
-                    });
+                case FinishTransition<TOutcome> finish:
+                    Record(new WfEnded(finish.Outcome, definition.Kind(finish.Outcome)));
+                    finished = true;
+                    break;
 
-            default:
-                throw new InvalidOperationException(
-                    $"{definition.TypeName.Value}.Decide returned an uninitialized Transition for the fact {fact} " +
-                    $"in the state {state}.");
+                case StayTransition:
+                    Record(new WfKept());
+                    if (position is { } kept) settled = settled.Add(kept);
+                    break;
+
+                case UnexpectedTransition:
+                    Record(new WfUnexpected());
+                    if (position is { } index) settled = settled.Add(index);
+                    unexpected.Add((fact, state));
+                    break;
+
+                default:
+                    throw new InvalidOperationException(
+                        $"{definition.TypeName.Value}.Decide returned an uninitialized Transition for the fact {fact} " +
+                        $"in the state {state}.");
+            }
         }
+
+        bool WorkInFlight() => issued && WorkOf(state, ctx, input, enteredAt).Length > settled.Length;
+
+        Step(firstFact, answered, fromHeld: false);
+        while (!finished && !held.IsEmpty && !WorkInFlight())
+        {
+            var next = held[0];
+            held = held.RemoveAt(0);
+            Step(next.Fact, position: null, fromHeld: true);
+        }
+
+        handled = handled.Persist([.. events]);
+
+        var (type, id) = (definition.TypeName.Value, ctx.EntityId.Value);
+        foreach (var (fact, inState) in unexpected)
+            handled = handled.Run<ILoggerFactory>((loggers, _) =>
+            {
+                loggers.CreateLogger("Akka.Durable.Workflow").LogWarning(
+                    "Workflow [{WorkflowType}/{WorkflowId}] received the fact {Fact} in the state {State}, " +
+                    "which its table marks as unexpected. The state is unchanged.", type, id, fact, inState);
+                return Task.CompletedTask;
+            });
+
+        // A state that was entered here has not had its work issued yet. Only the last one gets it.
+        return finished || issued ? handled : Issue(handled, ctx, input, state, entry, enteredAt);
     }
 
     /// <summary>
@@ -316,7 +494,12 @@ internal static class WorkflowEvolve
     public static WfState Evolve(WfState state, WfEvent @event) =>
         (state, @event) switch
         {
-            (WfNotStarted, WfStarted started) => new WfRunning(started.Input, started.First, 1, started.At, []),
+            (WfNotStarted, WfStarted started) => new WfRunning(started.Input, started.First, 1, started.At, [], []),
+            (WfRunning running, WfHeld held) =>
+                running with { Held = running.HeldFacts.Add(new WfHeldFact(held.Fact, held.At)) },
+            // A fact taken from the held list leaves it, then its step applies as for any fact.
+            (WfRunning running, WfFactRecorded { FromHeld: true } recorded) =>
+                Apply(running with { Held = running.HeldFacts.RemoveAt(0) }, recorded),
             (WfRunning running, WfFactRecorded recorded) => Apply(running, recorded),
             _ => throw new InvalidOperationException(
                 $"The journal holds the workflow event {@event.Value} for a workflow in the state {state.Value}. " +
