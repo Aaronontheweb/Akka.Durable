@@ -94,8 +94,13 @@ public interface IWorkflowRef<in TInput, TOutcome>
     /// Asks the workflow to stop. The definition's <c>Cancel</c> function turns the request into a fact, and
     /// the table decides what it means in the current state.
     /// </summary>
-    /// <param name="reason">Why the workflow should stop.</param>
-    Task<DeliveryResult<TOutcome>> Cancel(string reason, CancellationToken cancellationToken = default);
+    /// <param name="reason">Why the workflow should stop. Required, and not empty.</param>
+    /// <param name="by">
+    /// Who or what asked for the cancel. Required, and not empty. Use an id, such as a user id or a service name,
+    /// not a person's name or e-mail address, because the value goes into the journal and the log.
+    /// </param>
+    /// <exception cref="ArgumentException"><paramref name="reason"/> or <paramref name="by"/> is null or empty.</exception>
+    Task<DeliveryResult<TOutcome>> Cancel(string reason, string by, CancellationToken cancellationToken = default);
 }
 
 /// <summary>A workflow reference that can also send the workflow one of its facts.</summary>
@@ -164,10 +169,11 @@ internal class WorkflowRef<TInput, TOutcome>(WorkflowId id, IActorRef region) : 
 
     public WorkflowId Id => id;
 
-    public async Task<DeliveryResult<TOutcome>> Cancel(string reason, CancellationToken cancellationToken = default)
+    public async Task<DeliveryResult<TOutcome>> Cancel(string reason, string by, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(reason);
-        return ResultOf(await Entity.Ask(new WfCancel(reason, By: null), cancellationToken));
+        ArgumentException.ThrowIfNullOrEmpty(reason);
+        ArgumentException.ThrowIfNullOrEmpty(by);
+        return ResultOf(await Entity.Ask(new WfCancel(reason, by), cancellationToken));
     }
 
     private protected static DeliveryResult<TOutcome> ResultOf(WfDeliveryReply reply) =>

@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Durable.TestKit;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace Akka.Durable.Tests;
@@ -139,7 +141,7 @@ public class WorkflowEngineSpecs
         var outcome = Scenario()
             .Given([
                 .. InCharging(),
-                Held(new CancelRequested("changed my mind")),
+                Held(new CancelRequested("changed my mind", "user-17")),
                 Held(new OperatorSaidRetry()),
             ])
             .When(Answer(entry: 2, index: 0, new Charged("c1")))
@@ -159,13 +161,13 @@ public class WorkflowEngineSpecs
     public void A_state_the_workflow_passes_through_does_not_get_its_work_issued()
     {
         var outcome = Scenario()
-            .Given(Started(), Held(new CancelRequested("changed my mind")))
+            .Given(Started(), Held(new CancelRequested("changed my mind", "user-17")))
             .When(Answer(entry: 1, index: 0, new Reserved("r1")))
             .ThenPersisted(
                 // The reservation moves the workflow to Charging, whose work is never issued ...
                 Recorded(new Reserved("r1"), answered: 0, MovedTo(new Charging("r1"))),
                 // ... because the held cancel is decided next and moves it on to Undoing.
-                Recorded(new CancelRequested("changed my mind"), answered: null,
+                Recorded(new CancelRequested("changed my mind", "user-17"), answered: null,
                     MovedTo(new Undoing(new OrderCancelled("changed my mind"))), fromHeld: true))
             .ThenState(state =>
             {
@@ -196,6 +198,30 @@ public class WorkflowEngineSpecs
             });
 
         Assert.Equal<object>([new UndoOrder("o1")], IssuedWork(outcome).Select(e => e.Effect));
+    }
+
+    // ---- Cancel ----
+
+    public static TheoryData<bool> WorkInFlight => [true, false];
+
+    [Theory]
+    [MemberData(nameof(WorkInFlight))]
+    public async Task A_cancel_carries_who_asked_and_is_logged_whether_it_is_held_or_decided(bool workInFlight)
+    {
+        var cancel = new CancelRequested("changed my mind", "user-17");
+        var outcome = Scenario()
+            .Given(workInFlight ? [Started()] : WaitingForAPerson())
+            .When(new WfCancel("changed my mind", By: "user-17"))
+            .ThenPersisted(workInFlight ? Held(cancel) : Recorded(cancel, answered: null, Kept()));
+
+        var loggers = new RecordingLoggers();
+        using var services = new ServiceCollection().AddSingleton<ILoggerFactory>(loggers).BuildServiceProvider();
+        var log = Assert.Single(outcome.Effects.Select(e => e.Value).OfType<RunEffect>());
+        await log.ExecuteAsync(services, TestContext.Current.CancellationToken);
+
+        var (level, message) = Assert.Single(loggers.Lines);
+        Assert.Equal(LogLevel.Information, level);
+        Assert.Equal("Workflow [checkouts/test-entity] was asked to cancel by user-17. Reason: changed my mind", message);
     }
 
     // ---- Recovery ----
@@ -290,6 +316,30 @@ public class WorkflowEngineSpecs
         Assert.IsType<WfFinished>(finished.Value);
         Assert.Throws<InvalidOperationException>(() => Entity.Evolve(finished, Held(new Reserved("r1"))));
     }
+}
+
+/// <summary>An <see cref="ILoggerFactory"/> whose loggers record every line.</summary>
+internal sealed class RecordingLoggers : ILoggerFactory, ILogger
+{
+    public List<(LogLevel Level, string Message)> Lines { get; } = [];
+
+    public ILogger CreateLogger(string categoryName) => this;
+
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Lines.Add((logLevel, formatter(state, exception)));
 }
 
 /// <summary>A workflow whose first state has two pieces of work, for what a checkout state cannot show.</summary>

@@ -58,7 +58,7 @@ public sealed record Undone;
 public sealed record UndoRefused;
 public sealed record WorkStuck(string What, GaveUpReason Reason);
 public sealed record TicketOpened;
-public sealed record CancelRequested(string Reason);
+public sealed record CancelRequested(string Reason, string By);
 public sealed record OperatorSaidRetry;
 public sealed record OperatorSaidAbandon;
 
@@ -166,7 +166,7 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
         Work,
         Decide,
         Kind,
-        Cancel: request => new CancelRequested(request.Reason),
+        Cancel: request => new CancelRequested(request.Reason, request.By),
         GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
 ```
 
@@ -255,7 +255,7 @@ While the store is down, a workflow that hit this restarts at once, again and ag
 A fact does not have to be the answer to work. Code outside the workflow can send one:
 
 - `Notify(fact)` sends one of the workflow's facts. It is on the ref that knows the fact type.
-- `Cancel(reason)` asks the workflow to stop. Your `Cancel` function turns the request into a fact, and the table decides what it means in the current state. A cancel is not an outcome until the table finishes the workflow.
+- `Cancel(reason, by)` asks the workflow to stop. Both are required. `by` says who or what asked. Use an id, such as a user id or a service name, not a person's name or e-mail address, because the value goes into the journal and the log. Your `Cancel` function turns the request into a fact, and the table decides what it means in the current state. A cancel is not an outcome until the table finishes the workflow. A running workflow logs each cancel at information level, with the reason and who asked.
 - `Accepts<TMessage>(wrap)` on the definition says how a message of another type becomes a fact. An existing actor can then send its own message type to the workflow's address. It gets no reply. A message of a type that the definition does not declare is refused, and a warning is logged.
 
 ```csharp

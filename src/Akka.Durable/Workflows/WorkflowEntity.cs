@@ -144,10 +144,15 @@ internal sealed record WfDeliver(
 }
 
 /// <summary>The request to stop the workflow. The definition's <c>Cancel</c> function turns it into a fact.</summary>
+/// <param name="Reason">Why the workflow should stop.</param>
+/// <param name="By">
+/// Who or what asked for the cancel. Use an id, such as a user id or a service name, not a person's name or
+/// e-mail address, because the value goes into the journal and the log.
+/// </param>
 [AkkaSerializable(Manifest = "durable-wf-cancel-v1")]
 internal sealed record WfCancel(
     [property: AkkaField(0)] string Reason,
-    [property: AkkaField(1)] string? By)
+    [property: AkkaField(1)] string By)
     : IDurableEntityProtocol, IReplies<WfCommand, WfDeliveryReply>
 {
     public WfCommand ToCommand() => new(this);
@@ -289,9 +294,10 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             (WfRunning running, WfDeliver deliver) => deliver.Fact is TFact
                 ? Deliver(running, deliver.Fact, deliver, deliver.WantsReply, reached, ctx)
                 : ctx.Unhandled(),
-            (WfRunning running, WfCancel cancel) =>
+            (WfRunning running, WfCancel cancel) => LogCancel(
                 Deliver(running, definition.Cancel(new CancelRequest(cancel.Reason, cancel.By)), cancel, wantsReply: true,
                     reached, ctx),
+                cancel, ctx),
 
             // A workflow that is not started, or has finished, refuses facts. Nothing is journaled.
             (WfNotStarted, WfDeliver deliver) => ReplyIf(ctx.None(), deliver, deliver.WantsReply, NotStarted),
@@ -359,6 +365,20 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             return NextWake(running, reached, ctx) is null ? ctx.Ignore() : ctx.None();
 
         return Advance(running, [], reached, ctx, ctx.None());
+    }
+
+    /// <summary>Logs a cancel that reached a running workflow, whether it was decided at once or held.</summary>
+    private Handled<WfCommand, WfEvent> LogCancel(
+        Handled<WfCommand, WfEvent> handled, WfCancel cancel, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var (type, id) = (definition.TypeName.Value, ctx.EntityId.Value);
+        return handled.Run<ILoggerFactory>((loggers, _) =>
+        {
+            loggers.CreateLogger("Akka.Durable.Workflow").LogInformation(
+                "Workflow [{WorkflowType}/{WorkflowId}] was asked to cancel by {By}. Reason: {Reason}",
+                type, id, cancel.By, cancel.Reason);
+            return Task.CompletedTask;
+        });
     }
 
     private static Handled<WfCommand, WfEvent> ReplyIf(

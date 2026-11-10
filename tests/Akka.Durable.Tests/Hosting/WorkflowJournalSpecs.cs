@@ -196,22 +196,22 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
             Settled: [],
             Held:
             [
-                (CheckoutFact)new CancelRequested("first"),
+                (CheckoutFact)new CancelRequested("first", "user-17"),
                 (CheckoutFact)new OperatorSaidRetry(),
             ]);
 
         var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);
 
         Assert.Equal(state.Value, received);
-        Assert.Equal<object>((CheckoutFact)new CancelRequested("first"), received.Held[0]);
+        Assert.Equal<object>((CheckoutFact)new CancelRequested("first", "user-17"), received.Held[0]);
     }
 
     [Fact]
     public void A_held_fact_and_a_fact_taken_from_the_held_list_round_trip()
     {
-        WfEvent held = new WfHeld((CheckoutFact)new CancelRequested("customer asked"));
+        WfEvent held = new WfHeld((CheckoutFact)new CancelRequested("customer asked", "user-17"));
         WfEvent recorded = new WfFactRecorded(
-            (CheckoutFact)new CancelRequested("customer asked"),
+            (CheckoutFact)new CancelRequested("customer asked", "user-17"),
             Answered: null,
             At: At,
             Step: new WfMoved((CheckoutState)new Undoing(new OrderCancelled("customer asked"))),
@@ -240,7 +240,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
             Entry: 3,
             EnteredAt: At,
             Settled: [0],
-            Held: [(CheckoutFact)new CancelRequested("late")],
+            Held: [(CheckoutFact)new CancelRequested("late", "user-17")],
             IssuedAt: At.AddMinutes(5));
 
         var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);

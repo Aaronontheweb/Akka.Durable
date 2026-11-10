@@ -53,8 +53,11 @@ public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error 
 
 /// <summary>The request to stop a workflow. The definition's <c>Cancel</c> function turns it into a fact.</summary>
 /// <param name="Reason">Why the workflow should stop.</param>
-/// <param name="By">Who asked, when that is known.</param>
-public sealed record CancelRequest(string Reason, string? By = null);
+/// <param name="By">
+/// Who or what asked for the cancel. Use an id, such as a user id or a service name, not a person's name or
+/// e-mail address, because the value goes into the journal and the log.
+/// </param>
+public sealed record CancelRequest(string Reason, string By);
 
 public sealed record WorkflowOptions
 {
