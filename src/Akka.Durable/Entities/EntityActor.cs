@@ -42,6 +42,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // first decision that leaves nothing in flight.
     private bool _stopRequested;
 
+    // Starts of workflows this incarnation has issued and not had answered, by the key of the reminder that keeps
+    // them. While one is in flight, that reminder does not issue the start again.
+    private readonly Dictionary<string, int> _startsInFlight = [];
+
     public EntityActor(
         EntityId entityId,
         EntityDefinition<TState, TCommand, TEvent> definition,
@@ -202,9 +206,38 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// Decides on a command. <paramref name="origin"/> is who <c>Reply</c> answers: the command's sender, or,
     /// for a command produced by an effect, the sender of the command that issued that effect.
     /// </summary>
-    private void HandleCommand(TCommand command, IActorRef origin, ReminderEnvelope? reminder)
+    /// <param name="command">The command.</param>
+    /// <param name="origin">Who <c>Reply</c> answers.</param>
+    /// <param name="reminder">The reminder delivery that carried the command, acknowledged once it is decided.</param>
+    /// <param name="first">
+    /// An effect of the library's own that runs before the decision's effects, whatever the decision is.
+    /// </param>
+    private void HandleCommand(TCommand command, IActorRef origin, ReminderEnvelope? reminder, EntityEffect? first = null)
     {
-        switch (_definition.Decide(State, command, NewContext()))
+        var decision = _definition.Decide(State, command, NewContext());
+        if (first is { } prefix)
+        {
+            if (decision is Handled<TCommand, TEvent> withFirst)
+            {
+                Commit(withFirst with
+                {
+                    Effects = withFirst.Effects.IsDefault ? [prefix] : withFirst.Effects.Insert(0, prefix),
+                }, origin, reminder);
+                return;
+            }
+
+            // The decision runs nothing, but the library's effect must still run. A stash keeps the current message,
+            // so it happens here, before the commit.
+            if (decision is Stashed) Stash.Stash();
+            else if (decision is NotHandled) Unhandled(command);
+            else if (decision is not Ignored)
+                throw new InvalidOperationException(
+                    $"{EntityType.Value}.Decide returned an uninitialized Decision for command {command}.");
+            Commit(Decisions.None<TCommand, TEvent>().Add(prefix), origin, reminder);
+            return;
+        }
+
+        switch (decision)
         {
             case Handled<TCommand, TEvent> handled:
                 Commit(handled, origin, reminder);
@@ -246,6 +279,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void HandleReminder(ReminderEnvelope envelope)
     {
+        if (envelope.Message is PendingStart pending)
+        {
+            ReissueStart(pending, envelope);
+            return;
+        }
+
         // Handled.Schedule only accepts TCommand, so the payload was a TCommand when it was scheduled.
         // The check still guards against a payload that changed type in reminder storage.
         if (envelope.Message is TCommand command)
@@ -290,11 +329,32 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // An outcome sent just before a restart can reach the next incarnation, which never counted it.
         _executesInFlight = Math.Max(0, _executesInFlight - 1);
 
+        // A start that the workflow answered, or whose give-up the entity decides on, needs its reminder no more.
+        EntityEffect? first = null;
+        if (completed.Effect is StartWorkflow start && completed.Failure is not UndeclaredWorkflowException)
+        {
+            var key = PendingStart.KeyOf(start.Workflow, start.Id);
+            var stillInFlight = Settle(key);
+            if (!stillInFlight && (completed.Failure is null || completed.Failed is not null))
+                first = new CancelTimerEffect(key);
+        }
+
         var outcome = completed.Outcome;
         if (completed.Failure is { } failure)
         {
             if (completed.Failed is null)
             {
+                if (completed.Effect is StartWorkflow unanswered && failure is not UndeclaredWorkflowException)
+                {
+                    // The reminder that keeps the start is still stored, and issues it again.
+                    _log.Error(failure, "Start of workflow [{0}/{1}] by entity [{2}/{3}] got no answer. It is issued " +
+                                        "again within {4}.",
+                        unanswered.Workflow.Value, unanswered.Id.Value, EntityType.Value, _entityId.Value,
+                        StartRetryInterval);
+                    StopIfRequested();
+                    return;
+                }
+
                 // The state already records that the effect was issued. Resume re-derives it on the next
                 // incarnation and a retry arm in Decide can re-issue it sooner. A handler that has to report a
                 // failure to the entity returns it as an outcome instead of throwing.
@@ -311,7 +371,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         switch (outcome)
         {
             case TCommand command:
-                HandleCommand(command, completed.Origin, reminder: null);
+                HandleCommand(command, completed.Origin, reminder: null, first);
+                break;
+
+            case null when first is { } cancel:
+                Commit(Decisions.None<TCommand, TEvent>().Add(cancel), completed.Origin, reminder: null);
                 break;
 
             case null:
@@ -330,6 +394,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     {
         if (failure is MissingEffectHandlerException missing)
             LogMissingHandler(missing);
+        else if (failure is UndeclaredWorkflowException && effect is IWorkflowCall call)
+            // The call's contents may hold personal data, so only the workflow type and id are named.
+            _log.Error("Entity [{0}/{1}] called workflow [{2}/{3}], but its definition does not name workflow type " +
+                       "[{2}] with Uses. The call was not sent. Add .Uses(...) with that workflow's definition to the " +
+                       "entity definition.",
+                EntityType.Value, _entityId.Value, call.Workflow.Value, call.Id.Value);
         else
             _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. {3}",
                 effect, EntityType.Value, _entityId.Value, consequence);
@@ -398,6 +468,22 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
                 case TellEffect tell:
                     tell.Recipient.Tell(tell.Message, Self);
+                    break;
+
+                case ExecuteEffect { Effect: IWorkflowCall call } execute when !_definition.Declares(call):
+                    // Not a reason to restart: the call fails, and the entity gets its give-up if it asked for one.
+                    _executesInFlight++;
+                    Self.Tell(new EffectCompleted(execute.Effect, null,
+                        new UndeclaredWorkflowException(EntityType, call.Workflow), origin, execute.Failed), Self);
+                    break;
+
+                case ExecuteEffect { Effect: StartWorkflow start } execute:
+                    // The reminder is stored before the start is sent, so a start lost with the process is issued
+                    // again. If the reminder cannot be stored, the start is not sent.
+                    var key = PendingStart.KeyOf(start.Workflow, start.Id);
+                    await StorePendingStartAsync(key, new PendingStart(start.Workflow.Value, start.Id.Value, start.Input));
+                    _startsInFlight[key] = _startsInFlight.GetValueOrDefault(key) + 1;
+                    await StartExecuteAsync(execute, origin);
                     break;
 
                 case ExecuteEffect execute:
@@ -551,6 +637,65 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     log.Warning(t.Exception, "Send of {0} to [{1}] got no reply", send.Command, send.Target.Value);
             }, TaskScheduler.Default);
     }
+
+    #region Pending starts
+
+    /// <summary>
+    /// How long the reminder of a pending start waits before it issues the start again: the time limit of one
+    /// attempt. An attempt in flight has its answer or its time-out by then.
+    /// </summary>
+    private TimeSpan StartRetryInterval => _options.EffectTimeout;
+
+    private async Task StorePendingStartAsync(string key, PendingStart pending) =>
+        EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
+            new ReminderKey(key), _timeProvider.Now + StartRetryInterval, pending, ct: _lifetime.Token));
+
+    /// <summary>Counts an answer to a start. True when another start with the same key is still in flight.</summary>
+    private bool Settle(string key)
+    {
+        if (!_startsInFlight.TryGetValue(key, out var count)) return false;
+        if (count > 1)
+        {
+            _startsInFlight[key] = count - 1;
+            return true;
+        }
+
+        _startsInFlight.Remove(key);
+        return false;
+    }
+
+    /// <summary>
+    /// The reminder of a start that has not been answered fired. It issues the start again, unless this incarnation
+    /// still waits for an answer: then it only waits another interval. The delivery is acknowledged once the reminder
+    /// for the next attempt is stored.
+    /// </summary>
+    private void ReissueStart(PendingStart pending, ReminderEnvelope envelope)
+    {
+        var none = Decisions.None<TCommand, TEvent>();
+        var key = PendingStart.KeyOf(new WorkflowTypeName(pending.Workflow), new WorkflowId(pending.Id));
+
+        if (_startsInFlight.ContainsKey(key))
+        {
+            Commit(none.Add(new ScheduleEffect(key, StartRetryInterval, pending)), Context.System.DeadLetters, envelope);
+            return;
+        }
+
+        if (!_definition.Used.TryGetValue(new WorkflowTypeName(pending.Workflow), out var use)
+            || use.Restart(new WorkflowId(pending.Id), pending.Input) is not { } start)
+        {
+            // The definition changed since the start was stored. A repeat cannot succeed, so the reminder is removed.
+            _log.Error("Entity [{0}/{1}] has a pending start of workflow [{2}/{3}], but its definition does not use " +
+                       "workflow type [{2}] with that input type. The start is dropped.",
+                EntityType.Value, _entityId.Value, pending.Workflow, pending.Id);
+            Commit(none.Add(new CancelTimerEffect(key)), Context.System.DeadLetters, envelope);
+            return;
+        }
+
+        _log.Info("Issuing the start of workflow [{0}/{1}] again: it has not been answered.", pending.Workflow, pending.Id);
+        Commit(none.Add(start), Context.System.DeadLetters, envelope);
+    }
+
+    #endregion
 
     private readonly record struct EffectOutcome(object? Result, Exception? Failure);
 
