@@ -149,5 +149,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Hosting](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/hosting.md) | Local and sharded hosting, passivation and shard count. |
 | [Sending commands](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/sending-commands.md) | Entity refs, `Ask` and `Tell`, and entity IDs inside messages. |
 | [Reading state](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md) | State-aware refs, and what a state read sees. |
+| [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, the fact table, and workflow refs. |
+| [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
 | [Status and direction](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/status.md) | What works today and what is not done yet. |
