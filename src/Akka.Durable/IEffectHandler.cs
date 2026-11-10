@@ -5,8 +5,8 @@ namespace Akka.Durable;
 /// </summary>
 /// <typeparam name="TEffect">The effect record the decider issues. Plain data, owned by the domain.</typeparam>
 /// <typeparam name="TOutcome">
-/// The entity's command type, when <c>Decide</c> should decide what the result means (a decline, a success,
-/// a retry), or the entity's event type, when the result is a fact to persist in every state.
+/// The entity's command type. <c>Decide</c> decides what the result means: a decline, a success, a retry.
+/// For a workflow, the workflow's fact type.
 /// </typeparam>
 /// <remarks>
 /// <para>Handlers are the only impure code in an entity. Register them with the service collection, for example

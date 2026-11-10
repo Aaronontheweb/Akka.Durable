@@ -25,11 +25,9 @@ The [invoice in the README](../README.md#define-its-behavior) does this for reci
 
 `VerificationStarted` and the `Verifying` state are the memory, `VerifyRecipient` is the effect, and `RecipientVerified` and `RecipientRejected` are the outcomes. Between the two halves sits the handler, the only code that touches the directory.
 
-## Command outcomes and event outcomes
+## The handler returns a command
 
-The second type argument of the handler's registration says what kind of outcome it produces. Exactly one handler is registered per effect type.
-
-**A command: the entity decides.** The result goes through `Decide` like any other command. Use this when the result can be declined, retried, or ignored. `VerifyRecipientHandler` is one:
+The second type argument of the handler's registration is the entity's command type. The result goes through `Decide` like any other command, so `Decide` can decline it, retry, or ignore it. Exactly one handler is registered per effect type. `VerifyRecipientHandler` is one:
 
 ```csharp
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
@@ -46,32 +44,7 @@ public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
 services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
 ```
 
-**An event: the entity records.** The result is a fact about the world, and it is persisted as it is. Suppose a sequence service assigns each issued invoice its number, kept in an optional `Number` on `Issued` and `Paid`:
-
-```csharp
-public sealed record AssignNumber;                           // the effect
-
-public sealed class AssignNumberHandler(IInvoiceNumbers numbers)
-    : IEffectHandler<AssignNumber, InvoiceEvent>             // the outcome is an event
-{
-    public async Task<InvoiceEvent> HandleAsync(AssignNumber effect, CancellationToken ct) =>
-        new NumberAssigned(await numbers.NextAsync(ct));
-}
-
-services.AddScoped<IEffectHandler<AssignNumber, InvoiceEvent>, AssignNumberHandler>();
-
-// Decide issues the effect. There is no second arm: nothing is decided when the number arrives.
-(Verifying v, RecipientVerified) =>
-    ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
-        .Execute(new AssignNumber())
-        .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
-
-// Evolve takes the event in every state it can arrive in. The payment can get there first.
-(Issued s, NumberAssigned e) => s with { Number = e.Number },
-(Paid s, NumberAssigned e) => s with { Number = e.Number },
-```
-
-An event outcome skips `Decide`, so there is no arm in which to ignore it. Use one only when every state it can arrive in can accept the fact. Otherwise return a command and decide.
+To record a fact from the outside world, have the handler return a command that carries it. `Decide` persists the event, in the states that can accept it, and ignores it in the others.
 
 ## The entity is not blocked
 
@@ -147,7 +120,7 @@ The timeout is set per entity type:
 Invoice.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(5) } }
 ```
 
-A missing handler registration is a configuration error, and so is registering both a command handler and an event handler for one effect type. Either one restarts the entity instead of being logged.
+A missing handler registration is a configuration error. It restarts the entity instead of being logged.
 
 Nothing about the effect is journaled. What survives a crash is the state, and [`Resume`](resuming-after-a-restart.md) turns that state back into the pending effect.
 

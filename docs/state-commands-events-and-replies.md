@@ -120,7 +120,7 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 
 - **Events first, then effects.** Effects run only after the events are committed, in the order they're declared.
 - **Typed replies.** `Reply(command, reply)` takes the command that declared the reply type, so a wrong reply is a compile error. The command fixes the type and is not sent anywhere: it can be the command being handled, or one kept in state from earlier.
-- **`Execute` for work whose result matters.** The decider issues a plain effect record; its `IEffectHandler` runs it; the result comes back as one of the entity's commands or events. See [Effects with outcomes](effects-with-outcomes.md).
+- **`Execute` for work whose result matters.** The decider issues a plain effect record; its `IEffectHandler` runs it; the result comes back as one of the entity's commands. See [Effects with outcomes](effects-with-outcomes.md).
 - **`Run` for work whose result doesn't.** A notification, a cache invalidation. It takes a lambda against one service, runs in a fresh DI scope and is awaited in place, so later effects and later commands wait for it. A failure or timeout is logged and the decision continues; nothing records that it ran. See [Run or Execute](run-or-execute.md).
 - **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
 - **`Send` talks to another entity.** Its reply arrives as one of this entity's commands. See [Talking to other entities](talking-to-other-entities.md).

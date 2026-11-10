@@ -137,15 +137,14 @@ public sealed record Handled<TCommand, TEvent>(
 
     /// <summary>
     /// Runs <paramref name="effect"/> through its registered <see cref="IEffectHandler{TEffect,TOutcome}"/>.
-    /// The handler's result returns to the entity as a command (decided by <c>Decide</c>) or an event
-    /// (persisted as it is), depending on which handler is registered for <typeparamref name="TEffect"/>.
+    /// The handler's result returns to the entity as a command, and <c>Decide</c> decides what it means.
     /// </summary>
     public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull
     {
         ArgumentNullException.ThrowIfNull(effect);
         return Add(new ExecuteEffect(effect)
         {
-            Resolve = services => EffectHandlers.Resolve<TEffect, TCommand, TEvent>(services, effect),
+            Resolve = services => EffectHandlers.Resolve<TEffect, TCommand>(services, effect),
         });
     }
 
@@ -235,26 +234,17 @@ public static class Decisions
 internal static class EffectHandlers
 {
     /// <summary>
-    /// Finds the one handler registered for <typeparamref name="TEffect"/> and returns a call to it. Which of
-    /// the entity's two outcome types the handler produces is fixed by its registration, not by the result.
+    /// Finds the one handler registered for <typeparamref name="TEffect"/> and returns a call to it. The
+    /// handler returns one of the entity's commands, which <c>Decide</c> then decides on.
     /// </summary>
-    internal static Func<CancellationToken, Task<object?>> Resolve<TEffect, TCommand, TEvent>(
+    internal static Func<CancellationToken, Task<object?>> Resolve<TEffect, TCommand>(
         IServiceProvider services, TEffect effect) where TEffect : notnull
     {
-        var decided = services.GetService<IEffectHandler<TEffect, TCommand>>();
-        var journaled = services.GetService<IEffectHandler<TEffect, TEvent>>();
-
-        return (decided, journaled) switch
-        {
-            (not null, not null) => throw new InvalidOperationException(
-                $"Effect {typeof(TEffect)} has both an IEffectHandler<{typeof(TEffect).Name}, {typeof(TCommand).Name}> and an " +
-                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TEvent).Name}> registered. Register one of them."),
-            (not null, null) => async ct => await decided.HandleAsync(effect, ct),
-            (null, not null) => async ct => await journaled.HandleAsync(effect, ct),
-            _ => throw new InvalidOperationException(
+        var handler = services.GetService<IEffectHandler<TEffect, TCommand>>()
+            ?? throw new InvalidOperationException(
                 $"No effect handler is registered for {typeof(TEffect)}. Register an " +
-                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TCommand).Name}> when Decide should decide on the result, or an " +
-                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TEvent).Name}> when the result is a fact to persist as it is."),
-        };
+                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TCommand).Name}>.");
+
+        return async ct => await handler.HandleAsync(effect, ct);
     }
 }

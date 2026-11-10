@@ -160,10 +160,10 @@ public class CounterDeciderSpecs
     public void Execute_and_Send_effects_compare_by_their_data()
     {
         var handled = Decisions.None<CounterCommand, CounterEvent>()
-            .Execute(new Lookup(3))
+            .Execute(new Compute(new IncrementViaService(3, Wait: false)))
             .Send<CounterCommand>(new EntityId("other"), new Increment(1));
 
-        Assert.Equal(new ExecuteEffect(new Lookup(3)), handled.Effects[0].Value);
+        Assert.Equal(new ExecuteEffect(new Compute(new IncrementViaService(3, Wait: false))), handled.Effects[0].Value);
         Assert.Equal(new SendEffect(typeof(CounterCommand), new EntityId("other"), (CounterCommand)new Increment(1)), handled.Effects[1].Value);
     }
 }

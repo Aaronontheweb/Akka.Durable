@@ -8,7 +8,7 @@ Working today:
 - Reminders.
 - Local and sharded hosting.
 - Per-command typed entity refs and state reads.
-- `Execute` with handlers whose outcome is a command or an event; `Send` and `Accepts` between entities; best-effort `Run`.
+- `Execute` with handlers whose outcome is a command; `Send` and `Accepts` between entities; best-effort `Run`.
 - C# compiler contract tests and F# DU command/reply tests.
 - Workflows: `WorkflowDefinition` with `WithDurableWorkflow`, work that is issued once, give-up facts, timers, several things in one state, facts from outside (`Notify`, `Cancel`, `Accepts`), and refs with `Start`, `Status` and `WaitForOutcome`. See [Workflows](workflows.md).
 - Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
