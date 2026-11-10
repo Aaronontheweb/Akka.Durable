@@ -2,7 +2,7 @@
 
 Part of the [Akka.Durable guide](../README.md#guide).
 
-`Send` addresses another durable entity by its command protocol and ID. The target's reply, if any, comes back to the sender as a foreign type, and `Accepts` on the definition says how it becomes one of the sender's commands. Together they are what a workflow needs to drive other entities.
+`Send` addresses another durable entity by its command protocol and ID. The target's reply, if any, comes back to the sender as a foreign type, and `Accepts` on the definition says how it becomes one of the sender's commands. Together they let one entity drive another. A workflow takes messages of other types as facts with `Accepts` too, but it has no `Send` yet. See [Workflows](workflows.md).
 
 ```csharp
 public sealed record InvoiceReplied(IssueReply Reply);      // a CheckoutCommand case
