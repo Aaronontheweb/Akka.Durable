@@ -236,9 +236,9 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
 
     public EntityDefinition<WfState, WfCommand, WfEvent> Compile()
     {
-        // A message sent to the workflow's address by an actor is a fact. That actor expects no reply.
-        var accepted = ImmutableDictionary<Type, Func<object, WfCommand>>.Empty
-            .SetItem(typeof(TFact), message => new WfDeliver(message, WantsReply: false));
+        // A message of a type the definition accepts, sent to the workflow's address by an actor, becomes a fact.
+        // That actor expects no reply. A message of any other type is refused.
+        var accepted = ImmutableDictionary<Type, Func<object, WfCommand>>.Empty;
         foreach (var (type, wrap) in definition.Accepted)
             accepted = accepted.SetItem(type, message => new WfDeliver(wrap(message), WantsReply: false));
 

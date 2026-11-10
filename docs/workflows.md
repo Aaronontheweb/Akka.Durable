@@ -256,7 +256,7 @@ A fact does not have to be the answer to work. Code outside the workflow can sen
 
 - `Notify(fact)` sends one of the workflow's facts. It is on the ref that knows the fact type.
 - `Cancel(reason)` asks the workflow to stop. Your `Cancel` function turns the request into a fact, and the table decides what it means in the current state. A cancel is not an outcome until the table finishes the workflow.
-- `Accepts<TMessage>(wrap)` on the definition says how a message of another type becomes a fact. An existing actor can then send its own message type to the workflow's address. It gets no reply. A message of the fact type itself is also accepted.
+- `Accepts<TMessage>(wrap)` on the definition says how a message of another type becomes a fact. An existing actor can then send its own message type to the workflow's address. It gets no reply. A message of a type that the definition does not declare is refused, and a warning is logged.
 
 ```csharp
 public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> WithOperatorTool =
