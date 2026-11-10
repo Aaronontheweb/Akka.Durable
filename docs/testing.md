@@ -40,6 +40,30 @@ DeciderScenario.For(Invoice.Definition)
     .ThenExecuted(new VerifyRecipient("billing@example.com"));
 ```
 
+Calls to a workflow are effects too. `ThenStarted`, `ThenNotified` and `ThenCancelled` compare them by value, after `When` and after `Resumed()`. They name the workflow by its definition, like the decision does. `ThenStarted` matches a start with or without `then`:
+
+```csharp
+DeciderScenario.For(Invoice.Definition)
+    .Given(new VerificationStarted(command))
+    .When(new RecipientVerified())
+    .ThenStarted(ReminderCampaign.Definition, new WorkflowId("reminders-test-entity"),
+        new CampaignInput("test-entity", new DateTimeOffset(2026, 1, 31, 0, 0, 0, TimeSpan.Zero)));
+
+DeciderScenario.For(Invoice.Definition)
+    .Given(new VerificationStarted(command), new InvoiceIssued(250m, "billing@example.com", DateTimeOffset.UnixEpoch))
+    .When(new RecordPayment(250m))
+    .ThenNotified(ReminderCampaign.Definition, new WorkflowId("reminders-test-entity"), new InvoicePaid());
+
+DeciderScenario.For(Invoice.Definition)
+    .Given(new VerificationStarted(command), new InvoiceIssued(250m, "billing@example.com", DateTimeOffset.UnixEpoch))
+    .When(new WriteOff("customer closed"))
+    .ThenCancelled(ReminderCampaign.Definition, new WorkflowId("reminders-test-entity"), "customer closed", "invoices");
+```
+
+`When` and `Resumed()` fail the test when a decision calls a workflow type that the definition does not name with `Uses`. At run time that call would be refused with an error log.
+
+The answer of a call is an ordinary command, so you test what it means with `When`, like any other command.
+
 For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite. `DurableEntityTestKit` can also run with `akka.actor.serialize-messages = on`: override `VerifyMessageSerialization` to return `true`, and every message, including union events, is serialized and read back as if it crossed the network.
 
 ```csharp

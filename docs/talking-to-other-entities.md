@@ -29,4 +29,4 @@ There is no timeout on a send. The entity's own reminder is its deadline, as abo
 
 ---
 
-Next: [Serialization](serialization.md)
+Next: [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md)

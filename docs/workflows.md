@@ -416,6 +416,15 @@ If you remove the `NeedsAttention` arm, the compiler reports CS8509: the switch 
 
 `DurableEntityTestKit` has a `WorkflowRef<TInput, TState, TFact, TOutcome>(id)` helper that returns the same ref in a test.
 
+### From an entity
+
+An entity does not inject refs. It starts, notifies and cancels a workflow from a decision, with `Start`, `Notify` and `Cancel`, and declares the workflow type on its definition with `Uses`. The library completes a start, also after a restart. See [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
+
+```csharp
+ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
+    .Start(ReminderCampaign.Definition, CampaignOf(ctx.EntityId), new CampaignInput(ctx.EntityId.Value, ctx.UtcNow.AddDays(30)))
+```
+
 ## Serialization
 
 Register a serializer for your own four types: input, state, fact and outcome. You do not register one for anything else. The library's own messages already have a serializer, and they carry your values inside them.
@@ -430,7 +439,8 @@ These are not in Akka.Durable today:
 
 - Retry policies. To repeat work, the table uses `Again`, or moves to a state with the same work.
 - `Again` with a delay. `Again` issues the work at once. A table that answers a timer's own fact with `Again` loops, because the timer is still due.
-- Child workflows.
+- A workflow that starts another workflow. An entity can start one: see [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
+- The outcome of a workflow delivered to the entity that started it. The workflow does not record who started it.
 - A scenario test kit for workflows, like `DeciderScenario` for entities. Test a workflow through the hosted `DurableEntityTestKit`. You can test `Decide` and `Work` as plain functions too.
 
 ---
