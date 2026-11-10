@@ -67,7 +67,7 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
     private (TState State, DecisionContext<TState, TCommand, TEvent> Context) Recover()
     {
         var state = _history.Aggregate(definition.InitialState(_entityId), definition.Evolve);
-        return (state, new DecisionContext<TState, TCommand, TEvent>(_entityId, definition.TypeName, _now, state));
+        return (state, new DecisionContext<TState, TCommand, TEvent>(_entityId, definition.TypeName, _now));
     }
 }
 

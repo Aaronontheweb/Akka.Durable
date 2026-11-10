@@ -1,4 +1,5 @@
 using Akka.Actor;
+using Akka.Cluster.Sharding;
 using Akka.Durable.TestKit;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Hosting;
@@ -33,6 +34,35 @@ public sealed class TallyWorkflowSpecs(ITestOutputHelper output) : DurableEntity
         DurableEntityRef<TallyCommand, TallyState, TallyEvent>(id);
 
     private IEntityRef<CounterCommand> CounterRef(string id) => EntityRef<CounterCommand>(id);
+
+    private sealed record NotAccepted;
+
+    private const string RefusalWarning = "which its definition does not accept";
+
+    [Fact]
+    public async Task A_message_the_definition_does_not_accept_is_refused_with_a_warning_naming_it()
+    {
+        var region = Host.Services.GetRequiredService<IRequiredActor<EntityRegion<TallyCommand>>>().ActorRef;
+
+        await EventFilter.Warning(contains: $"[tally/t6] received a message of type {nameof(NotAccepted)}, {RefusalWarning}")
+            .ExpectOneAsync(async () =>
+            {
+                region.Tell(new ShardingEnvelope("t6", new NotAccepted()), TestActor);
+                await TallyRef("t6").GetStateAsync(AskCancellation());
+            }, TestCancellation);
+    }
+
+    [Fact]
+    public async Task A_message_the_definition_accepts_logs_no_refusal()
+    {
+        var region = Host.Services.GetRequiredService<IRequiredActor<EntityRegion<TallyCommand>>>().ActorRef;
+
+        await EventFilter.Warning(contains: RefusalWarning).ExpectAsync(0, async () =>
+        {
+            region.Tell(new ShardingEnvelope("t7", new Accepted()), TestActor);
+            await TallyRef("t7").GetStateAsync(AskCancellation());
+        }, TestCancellation);
+    }
 
     [Fact]
     public async Task Workflow_drives_the_counter_and_replies_to_its_own_asker()

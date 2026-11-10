@@ -6,7 +6,7 @@ Inject `IEntityRefs<InvoiceCommand>` as shown in the [README](../README.md#injec
 
 Use the same ID for later commands to the same invoice, and a different ID for another invoice. Calling `Get` again does not reset its state. `Ask` waits for a reply; `Tell` sends without waiting for one. [State-aware references](reading-state.md) support both messaging and state reads.
 
-`Ask` infers its return type from `IReplies<TCommand, TReply>`. Tell-only commands have no interface and cannot be asked. `IEntityRef<TCommand>` does not implement `ICanTell`, so Akka.NET's unchecked Ask extension methods cannot bypass the contract. Tell effects accept another typed entity ref and convert its command case before boxing it.
+`Ask` infers its return type from `IReplies<TCommand, TReply>`. Tell-only commands have no interface and cannot be asked. `IEntityRef<TCommand>` does not implement `ICanTell`, so Akka.NET's unchecked Ask extension methods cannot bypass the contract.
 
 `ToCommand()` supplies a direct constructor call for a C# union; F# records can construct their native DU in that method instead. There is no runtime conversion table or per-command registration. F# deciders call `Handled.ToDecision()` explicitly when returning a decision.
 

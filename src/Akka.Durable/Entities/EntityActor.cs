@@ -78,7 +78,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         _reminderClient ??= Context.ReminderClient().CreateClient(EntityType.Value, _entityId.Value);
 
     private DecisionContext<TState, TCommand, TEvent> NewContext() =>
-        new(_entityId, EntityType, _timeProvider.Now, State);
+        new(_entityId, EntityType, _timeProvider.Now);
 
     #region Recovery
 
@@ -275,6 +275,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             return;
         }
 
+        // The sender gets no reply. Akka.NET reports an unhandled message at info level at most, and only
+        // the first few of them, so say here what was refused and how to accept it.
+        var type = message.GetType().Name;
+        _log.Warning(
+            "[{0}/{1}] received a message of type {2}, which its definition does not accept. " +
+            "Declare the type with Accepts<{2}>, or send one of its commands.",
+            EntityType.Value, _entityId.Value, type);
         Unhandled(message);
     }
 

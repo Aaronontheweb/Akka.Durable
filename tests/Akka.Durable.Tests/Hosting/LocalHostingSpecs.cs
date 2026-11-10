@@ -158,18 +158,6 @@ public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(ou
             cancellationToken: TestCancellation);
     }
 
-    [Fact]
-    public async Task Typed_Tell_effect_converts_the_case_before_boxing()
-    {
-        var ctx = new DecisionContext<CounterState, CounterCommand, CounterEvent>(
-            new EntityId("sender"), Counter.TypeName, DateTimeOffset.UnixEpoch, new CounterState(0, false));
-        var effect = Assert.IsType<TellEffect>(ctx.None().Tell(CounterRef("a"), new Increment(1)).Effects.Single().Value);
-
-        Assert.IsType<CounterCommand>(effect.Message);
-        effect.Recipient.Tell(effect.Message, TestActor);
-        await ExpectMsgAsync<Accepted>(cancellationToken: TestCancellation);
-    }
-
     #region State reads
 
     [Fact]
