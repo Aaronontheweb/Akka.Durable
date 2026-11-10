@@ -216,7 +216,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     [Fact]
     public async Task Two_workflow_types_run_in_one_actor_system()
     {
-        var echo = WorkflowRef<Shout, Heard>("e1");
+        var echo = WorkflowRef<Shout, EchoFact, Heard>("e1");
         var checkout = CheckoutRef("e1");
 
         await echo.Start(new Shout("hello"), AskCancellation());

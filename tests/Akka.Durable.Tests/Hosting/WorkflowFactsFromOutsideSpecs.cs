@@ -159,7 +159,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
     public async Task A_message_the_workflow_accepts_is_decided_as_the_fact_it_maps_to()
     {
         await WaitingForAPerson("f8");
-        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutOutcome>>>().ActorRef;
+        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutFact, CheckoutOutcome>>>().ActorRef;
 
         // An operator tool sends its own message type to the workflow's address.
         region.Tell(new ShardingEnvelope("f8", new OperatorDecision(Retry: false)), TestActor);

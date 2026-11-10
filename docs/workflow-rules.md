@@ -27,7 +27,7 @@ The library does not choose for you, and it does not issue the work again on its
 
 **Choose the workflow id from something durable.** Use a domain key, such as the order number. Add an attempt number when the same work can run more than once. A retried `Start` then reaches the same workflow. An id is used once: a finished workflow is closed and cannot start again.
 
-**Give each workflow type its own input type.** Refs find the workflow type by its input type and its outcome type. `WithDurableWorkflow` rejects a second workflow type with the same pair.
+**Give each workflow type its own input type.** Refs find the workflow type by its input, fact and outcome types. `WithDurableWorkflow` rejects a second workflow type with the same three.
 
 **Change persisted types by extension only.** The journal holds your input, states, facts and outcomes, and it keeps them for as long as the workflow runs. Add fields and cases. Never change or reuse a manifest or a field index. The full rules are in [Serialization](serialization.md).
 

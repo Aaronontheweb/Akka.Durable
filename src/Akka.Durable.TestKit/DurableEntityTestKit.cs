@@ -103,12 +103,8 @@ public abstract class DurableEntityTestKit(
     protected IDurableEntityRef<TCommand, TState, TEvent> DurableEntityRef<TCommand, TState, TEvent>(string entityId) =>
         DurableEntityRefs<TCommand, TState, TEvent>().Get(new EntityId(entityId));
 
-    /// <summary>A logical reference to one workflow, as application code would get it from <see cref="IWorkflowRefs{TInput,TOutcome}"/>.</summary>
-    protected IWorkflowRef<TInput, TOutcome> WorkflowRef<TInput, TOutcome>(string workflowId) =>
-        Host.Services.GetRequiredService<IWorkflowRefs<TInput, TOutcome>>().Get(new WorkflowId(workflowId));
-
     /// <summary>
-    /// A logical reference to one workflow that can also send it facts, as application code would get it from
+    /// A logical reference to one workflow, as application code would get it from
     /// <see cref="IWorkflowRefs{TInput,TFact,TOutcome}"/>.
     /// </summary>
     protected IWorkflowRef<TInput, TFact, TOutcome> WorkflowRef<TInput, TFact, TOutcome>(string workflowId) =>

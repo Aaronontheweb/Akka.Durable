@@ -244,7 +244,7 @@ While the store is down, a workflow that hit this restarts at once, again and ag
 
 A fact does not have to be the answer to work. Code outside the workflow can send one:
 
-- `Notify(fact)` sends one of the workflow's facts. It is on the ref that knows the fact type.
+- `Notify(fact)` sends one of the workflow's facts.
 - `Cancel(reason, by)` asks the workflow to stop. Both are required. `by` says who or what asked. Use an id, such as a user id or a service name, not a person's name or e-mail address, because the value goes into the journal and the log. Your `Cancel` function turns the request into a fact, and the table decides what it means in the current state. A cancel is not an outcome until the table finishes the workflow. A running workflow logs each cancel at information level, with the reason and who asked.
 - `Accepts<TMessage>(wrap)` on the definition says how a message of another type becomes a fact. An existing actor can then send its own message type to the workflow's address. It gets no reply. A message of a type that the definition does not declare is refused, and a warning is logged.
 
@@ -301,12 +301,9 @@ builder.Services.AddAkka("shop", (akka, sp) =>
 
 Without `ShardedHosting`, the workflow type runs in a local host actor in this process. With it, the workflow type runs in a shard region. `ShardedHosting` has the same settings as for entities.
 
-One actor system hosts at most one workflow type for each pair of input and outcome type. `WithDurableWorkflow` rejects a second one.
+One actor system hosts at most one workflow type for each set of input, fact and outcome types. `WithDurableWorkflow` rejects a second one.
 
-To call a workflow, inject a ref factory. There are two:
-
-- `IWorkflowRefs<TInput, TOutcome>` gives refs that can start a workflow, read its status, wait for its outcome and cancel it.
-- `IWorkflowRefs<TInput, TFact, TOutcome>` gives the same refs, which can also `Notify` the workflow with a fact.
+To call a workflow, inject `IWorkflowRefs<TInput, TFact, TOutcome>`. Its refs can start a workflow, read its status, wait for its outcome, cancel it, and `Notify` it with a fact.
 
 ```csharp
 public sealed class CheckoutService(IWorkflowRefs<PlaceOrder, CheckoutFact, CheckoutOutcome> checkouts)
@@ -344,7 +341,7 @@ Getting a ref is cheap. It does not start or activate the workflow.
 
 `WaitForOutcome(pollEvery)` reads the status every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
 
-`DurableEntityTestKit` has `WorkflowRef` helpers that return the same refs in a test.
+`DurableEntityTestKit` has a `WorkflowRef` helper that returns the same ref in a test.
 
 ## Serialization
 

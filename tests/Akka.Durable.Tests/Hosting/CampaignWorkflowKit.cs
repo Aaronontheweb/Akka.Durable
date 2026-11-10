@@ -57,7 +57,7 @@ public abstract class CampaignWorkflowKit(ITestOutputHelper output) : DurableEnt
         WorkflowRef<Invoice, CampaignFact, CampaignOutcome>(id);
 
     private IActorRef Region =>
-        Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignOutcome>>>().ActorRef;
+        Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignFact, CampaignOutcome>>>().ActorRef;
 
     /// <summary>The state of the entity that hosts a campaign: the author's state and what the library tracks.</summary>
     private protected async Task<StateSnapshot<WfState>> HostedState(string id) =>
