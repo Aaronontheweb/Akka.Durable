@@ -168,6 +168,132 @@ public sealed record Handled<TCommand, TEvent>(
         });
     }
 
+    /// <summary>
+    /// Starts the workflow <paramref name="id"/> of the workflow type <paramref name="workflow"/> with
+    /// <paramref name="input"/>, after this decision's events are journaled. The library completes the start.
+    /// </summary>
+    /// <remarks>
+    /// <para>The entity's definition must name the workflow type with <c>Uses</c>.</para>
+    /// <para>Until the workflow answers, a durable reminder keeps the start. If the start gets no answer, because
+    /// the call failed, timed out or the process stopped, the reminder issues it again after
+    /// <see cref="EntityOptions.EffectTimeout"/>, also after a restart. The repeats stop when the workflow answers
+    /// <see cref="Started"/>, <see cref="AlreadyRunning"/> or <see cref="AlreadyFinished{TOutcome}"/>. A start is
+    /// addressed by id, so a repeat is safe. The answer is not delivered to the entity: use the overload with
+    /// <c>then</c> for that.</para>
+    /// </remarks>
+    public Handled<TCommand, TEvent> Start<TInput, TState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TInput input)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        ArgumentNullException.ThrowIfNull(input);
+        return Add(WorkflowCalls.Start<TInput, TState, TFact, TOutcome>(workflow.TypeName, id, input, then: null, gaveUp: null));
+    }
+
+    /// <summary>
+    /// Starts the workflow <paramref name="id"/> like the overload without <c>then</c>, and delivers the answer as one
+    /// of this entity's commands.
+    /// </summary>
+    /// <param name="workflow">The workflow type's definition. The entity's definition must name it with <c>Uses</c>.</param>
+    /// <param name="id">The workflow's id. Derive it from this entity's id.</param>
+    /// <param name="input">The record the workflow starts with.</param>
+    /// <param name="then">Turns the workflow's answer into one of this entity's commands.</param>
+    /// <param name="gaveUp">
+    /// Turns a start that got no answer, because it failed or ran past <see cref="EntityOptions.EffectTimeout"/>, into
+    /// one of this entity's commands. The library then stops repeating the start: the entity decides, and it may start
+    /// again.
+    /// </param>
+    /// <remarks>
+    /// After a restart the library still issues a start that was not answered, but the functions belong to the
+    /// incarnation that issued it, so the answer is not delivered. An entity that needs the answer after a restart
+    /// keeps "waiting for the start" in its state and issues this start again from <c>Resume</c>.
+    /// </remarks>
+    public Handled<TCommand, TEvent> Start<TInput, TState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TInput input,
+        Func<StartResult<TOutcome>, TCommand> then, Func<WorkGaveUp, TCommand> gaveUp)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(then);
+        ArgumentNullException.ThrowIfNull(gaveUp);
+        return Add(WorkflowCalls.Start<TInput, TState, TFact, TOutcome>(
+            workflow.TypeName, id, input, answer => then(answer), failure => gaveUp(failure)));
+    }
+
+    /// <summary>
+    /// Sends <paramref name="fact"/> to the workflow <paramref name="id"/>, after this decision's events are journaled.
+    /// The answer, or the give-up, becomes one of this entity's commands.
+    /// </summary>
+    /// <param name="workflow">The workflow type's definition. The entity's definition must name it with <c>Uses</c>.</param>
+    /// <param name="id">The workflow's id.</param>
+    /// <param name="fact">The fact. The compiler checks it is of the workflow's fact type.</param>
+    /// <param name="then">
+    /// Turns the answer into one of this entity's commands: <see cref="Delivered"/>, <see cref="Held"/>,
+    /// <see cref="WorkflowNotStarted"/> or <see cref="AlreadyFinished{TOutcome}"/>.
+    /// </param>
+    /// <param name="gaveUp">
+    /// Turns a call that got no answer, because it failed or ran past <see cref="EntityOptions.EffectTimeout"/>, into one
+    /// of this entity's commands. The fact may have been journaled.
+    /// </param>
+    /// <remarks>
+    /// The fact is sent once. The library does not repeat it, also not after a restart: a repeated fact would be
+    /// journaled twice. To send it again, the entity decides so.
+    /// </remarks>
+    public Handled<TCommand, TEvent> Notify<TInput, TState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TFact fact,
+        Func<DeliveryResult<TOutcome>, TCommand> then, Func<WorkGaveUp, TCommand> gaveUp)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        ArgumentNullException.ThrowIfNull(fact);
+        ArgumentNullException.ThrowIfNull(then);
+        ArgumentNullException.ThrowIfNull(gaveUp);
+        return Add(WorkflowCalls.Notify<TInput, TState, TFact, TOutcome>(
+            workflow.TypeName, id, fact, answer => then(answer), failure => gaveUp(failure)));
+    }
+
+    /// <summary>
+    /// Asks the workflow <paramref name="id"/> to stop, after this decision's events are journaled. The answer, or the
+    /// give-up, becomes one of this entity's commands.
+    /// </summary>
+    /// <param name="workflow">The workflow type's definition. The entity's definition must name it with <c>Uses</c>.</param>
+    /// <param name="id">The workflow's id.</param>
+    /// <param name="reason">Why the workflow should stop. Required, and not empty.</param>
+    /// <param name="by">
+    /// Who or what asked. Required, and not empty. Use an id, not a person's name or e-mail address: the value goes
+    /// into the journal and the log.
+    /// </param>
+    /// <param name="then">Turns the answer into one of this entity's commands.</param>
+    /// <param name="gaveUp">Turns a call that got no answer into one of this entity's commands.</param>
+    /// <remarks>Sent once, like <c>Notify</c>. The workflow's table decides what the cancel means.</remarks>
+    /// <exception cref="ArgumentException"><paramref name="reason"/> or <paramref name="by"/> is null or empty.</exception>
+    public Handled<TCommand, TEvent> Cancel<TInput, TState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, string reason, string by,
+        Func<DeliveryResult<TOutcome>, TCommand> then, Func<WorkGaveUp, TCommand> gaveUp)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        ArgumentException.ThrowIfNullOrEmpty(reason);
+        ArgumentException.ThrowIfNullOrEmpty(by);
+        ArgumentNullException.ThrowIfNull(then);
+        ArgumentNullException.ThrowIfNull(gaveUp);
+        return Add(WorkflowCalls.Cancel<TInput, TState, TFact, TOutcome>(
+            workflow.TypeName, id, reason, by, answer => then(answer), failure => gaveUp(failure)));
+    }
+
     public Handled<TCommand, TEvent> Tell<TMessage>(
         ICanTell recipient,
         TMessage message)

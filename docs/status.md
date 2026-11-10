@@ -9,6 +9,7 @@ Working today:
 - Local and sharded hosting.
 - Per-command typed entity refs and state reads.
 - `Execute` with handlers whose outcome is a command; `Send` and `Accepts` between entities; best-effort `Run`.
+- An entity that starts, notifies and cancels a workflow from a decision: `Uses`, checked when the host starts; `Start`, which the library completes, also after a restart; `Notify` and `Cancel`, whose answers are commands. See [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
 - C# compiler contract tests and F# DU command/reply tests.
 - Workflows: `WorkflowDefinition` with `WithDurableWorkflow`, work that is issued once, give-up facts, commands sent to entities from `Work`, timers, several things in one state, facts from outside (`Notify`, `Cancel`, `Accepts`), and refs with `Start`, `GetStateAsync` and `WaitForOutcome`. See [Workflows](workflows.md).
 - Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
@@ -18,7 +19,8 @@ Not done yet:
 - **Snapshot retention tests.** Snapshots are written and recovered, but pruning old snapshots and deleting covered events aren't covered by tests yet.
 - **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
 - **Entity contracts and proxies.** `Send` resolves the target by command type in the same actor system; addressing an entity type hosted only on other nodes, without its definition, is tracked in [#30](https://github.com/Aaronontheweb/Akka.Durable/issues/30).
-- **Workflow features.** Retry policies, `Again` with a delay, child workflows, and a scenario test kit for workflows.
+- **Workflow features.** Retry policies, `Again` with a delay, and a scenario test kit for workflows.
+- **Workflows started by a starter, phase 2** ([#63](https://github.com/Aaronontheweb/Akka.Durable/issues/63)). A workflow does not record which entity started it, its outcome is not delivered to that entity, and a workflow cannot start another workflow.
 - **Source generation.**
 - **Agents.** Much later, once the foundations exist.
 

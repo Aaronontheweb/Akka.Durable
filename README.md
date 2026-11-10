@@ -145,6 +145,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Run or Execute](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/run-or-execute.md) | Which of the two to use for service work. |
 | [Resuming after a restart](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/resuming-after-a-restart.md) | `Resume`, for effects that were pending when the process stopped. |
 | [Talking to other entities](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/talking-to-other-entities.md) | `Send` and `Accepts`, for one entity that drives another. |
+| [Starting a workflow from an entity](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/starting-a-workflow-from-an-entity.md) | `Uses`, and `Start`, `Notify` and `Cancel` from a decision. |
 | [Serialization](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/serialization.md) | What is serialized, and how to change stored types safely. |
 | [Hosting](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/hosting.md) | Local and sharded hosting, passivation and shard count. |
 | [Sending commands](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/sending-commands.md) | Entity refs, `Ask` and `Tell`, and entity IDs inside messages. |

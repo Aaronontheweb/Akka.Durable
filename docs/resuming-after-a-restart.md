@@ -20,6 +20,8 @@ Two rules make it safe, and the runtime enforces the first: `Resume` may not ret
 
 Replies issued by resumed work go to dead letters: the asker belongs to the previous incarnation. Its retry gets the answer from an arm that handles the repeated request, such as `(Issued, IssueInvoice c) => ctx.None().Reply(c, new InvoiceAccepted(ctx.EntityId))`. A repeated command should return the same reply it returned the first time; callers will retry.
 
+A workflow start needs no `Resume`. `Start` keeps a durable reminder until the workflow answers, and the next incarnation sends a start that was not answered again on its own. This is the one call the library repeats, because a start is addressed by id and a repeat starts nothing new. `Notify` and `Cancel` are not repeated: an entity that must send a fact again after a restart keeps that in its state and sends it from `Resume`. The `then` and `gaveUp` functions of a call belong to the incarnation that issued it; to receive the answer of a start after a restart, issue the same `Start` from `Resume`. See [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
+
 Entities whose effects never wait for an outcome do not need `Resume`. Timers re-arm themselves through Akka.Reminders, and `Run` work is best effort by definition. To retry a reminder-driven effect without restarting the entity, re-arm the same key from the outcome: the old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact.
 
 ---

@@ -73,6 +73,34 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
         return this with { Accepted = Accepted.SetItem(typeof(TMessage), message => wrap((TMessage)message)) };
     }
 
+    internal ImmutableDictionary<WorkflowTypeName, WorkflowUse> Used { get; init; } =
+        ImmutableDictionary<WorkflowTypeName, WorkflowUse>.Empty;
+
+    /// <summary>
+    /// Declares a workflow type this entity may start, notify or cancel from a decision.
+    /// </summary>
+    /// <remarks>
+    /// <para>When the host starts, every workflow type an entity uses must be hosted in the same actor system with
+    /// <c>WithDurableWorkflow</c>. If one is not, the host fails to start with an error that names both types. The
+    /// order of the registrations does not matter.</para>
+    /// <para>A decision that calls a workflow type not declared here does not reach it: the entity logs an error and
+    /// gives the call up as <see cref="GaveUpReason.Failed"/>. <c>DeciderScenario</c> fails the test.</para>
+    /// <para>The declaration is also how the entity issues a pending start again after a restart.</para>
+    /// </remarks>
+    public EntityDefinition<TState, TCommand, TEvent> Uses<TInput, TWorkflowState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow)
+        where TInput : notnull
+        where TWorkflowState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        return this with { Used = Used.SetItem(workflow.TypeName, WorkflowUse.Of(workflow)) };
+    }
+
+    /// <summary>True when the definition declares the workflow type <paramref name="call"/> addresses.</summary>
+    internal bool Declares(IWorkflowCall call) => Used.TryGetValue(call.Workflow, out var use) && use.Matches(call);
+
     internal bool TryAccept(object message, [MaybeNullWhen(false)] out TCommand command)
     {
         if (Accepted.TryGetValue(message.GetType(), out var exact))

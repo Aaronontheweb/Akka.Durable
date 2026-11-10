@@ -5,6 +5,7 @@ using Akka.DependencyInjection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using Akka.Hosting;
+using Akka.Reminders;
 using Akka.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -63,6 +64,17 @@ public static class DurableEntityHostingExtensions
         ShardedHosting? sharding = null)
     {
         EnsureOwnCommandType(builder, definition.TypeName, typeof(TCommand));
+
+        if (!definition.Used.IsEmpty)
+        {
+            // Runs when the actor system starts, after every registration on this builder, so the workflow types may
+            // be registered before or after the entity type.
+            var uses = definition.Used.Values.ToArray();
+            builder.WithActors((_, _) => EnsureWorkflowsHosted(builder, definition.TypeName, uses));
+
+            // A pending start is kept in a reminder. Without this, Native AOT cannot build its envelope.
+            ReminderMessageTypes.Register<PendingStart>();
+        }
 
         return builder.HostEntity<TState, TCommand, TEvent, EntityRegion<TCommand>>(definition, sharding,
             (registry, region) => registry.Register<EntityRegion<TCommand, TState, TEvent>>(region));
@@ -177,6 +189,30 @@ public static class DurableEntityHostingExtensions
             ? $"Durable entity [{typeName.Value}] is registered twice. Call WithDurableEntity once for each entity type."
             : $"Durable entities [{owner.Value}] and [{typeName.Value}] both use the command type {commandType.FullName}. " +
               "Each entity type needs its own command type, because entity refs and Send find the entity type by it.");
+    }
+
+    /// <summary>
+    /// Every workflow type an entity <c>Uses</c> must be hosted with <c>WithDurableWorkflow</c> on the same builder.
+    /// Otherwise the first start or notify would fail at run time, far from the cause.
+    /// </summary>
+    private static void EnsureWorkflowsHosted(
+        AkkaConfigurationBuilder builder, EntityTypeName entity, IEnumerable<WorkflowUse> uses)
+    {
+        var owners = RegionKeyOwners.GetOrCreateValue(builder);
+        foreach (var use in uses)
+        {
+            if (!owners.TryGetValue(use.RegionKey, out var hosted))
+                throw new InvalidOperationException(
+                    $"Durable entity [{entity.Value}] uses workflow type [{use.Workflow.Value}], but that workflow type " +
+                    $"is not hosted in this actor system. Host it with WithDurableWorkflow(...), passing the definition " +
+                    $"of [{use.Workflow.Value}], or remove the Uses declaration.");
+
+            if (hosted.Value != use.Workflow.Value)
+                throw new InvalidOperationException(
+                    $"Durable entity [{entity.Value}] uses workflow type [{use.Workflow.Value}], but the workflow type " +
+                    $"hosted with the same input, state, fact and outcome types is [{hosted.Value}]. Pass the same " +
+                    "definition to Uses and to WithDurableWorkflow(...).");
+        }
     }
 
     private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, object> FrameworkSerializerAdded = [];

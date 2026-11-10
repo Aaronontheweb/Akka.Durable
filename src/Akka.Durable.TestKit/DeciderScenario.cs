@@ -45,15 +45,21 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
         return this;
     }
 
+    /// <summary>
+    /// Decides <paramref name="command"/> against the recovered state. Fails the test when the decision calls a
+    /// workflow type that the definition does not name with <c>Uses</c>.
+    /// </summary>
     public DeciderOutcome<TState, TCommand, TEvent> When(TCommand command)
     {
         var (state, context) = Recover();
-        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, definition.Decide(state, command, context));
+        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state,
+            EnsureDeclared(definition.Decide(state, command, context)));
     }
 
     /// <summary>
     /// Recovers the entity from the given history and runs its <c>Resume</c>: the effects still pending for
-    /// that state. A definition without <c>Resume</c> has none.
+    /// that state. A definition without <c>Resume</c> has none. Fails the test when <c>Resume</c> calls a workflow
+    /// type that the definition does not name with <c>Uses</c>.
     /// </summary>
     public DeciderOutcome<TState, TCommand, TEvent> Resumed()
     {
@@ -61,7 +67,24 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
         Decision<TCommand, TEvent> pending = definition.Resume is { } resume
             ? resume(state, context)
             : Decisions.None<TCommand, TEvent>();
-        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, pending);
+        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, EnsureDeclared(pending));
+    }
+
+    /// <summary>A call to an undeclared workflow fails at run time, so the scenario fails here.</summary>
+    private Decision<TCommand, TEvent> EnsureDeclared(Decision<TCommand, TEvent> decision)
+    {
+        if (decision is not Handled<TCommand, TEvent> { Effects: { IsDefault: false } effects }) return decision;
+
+        foreach (var effect in effects)
+        {
+            if (effect.Value is ExecuteEffect { Effect: IWorkflowCall call } && !definition.Declares(call))
+                throw new Xunit.Sdk.XunitException(
+                    $"The decision calls workflow type [{call.Workflow.Value}] (workflow [{call.Id.Value}]), but " +
+                    $"entity type [{definition.TypeName.Value}] does not declare it. Add .Uses(...) with the " +
+                    $"definition of [{call.Workflow.Value}] to the entity definition.");
+        }
+
+        return decision;
     }
 
     private (TState State, DecisionContext<TState, TCommand, TEvent> Context) Recover()
@@ -121,6 +144,54 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
         ArgumentNullException.ThrowIfNull(command);
         Assert.Contains(Effects, e => e.Value is SendEffect s
             && s.CommandType == typeof(TOther) && s.Target.Equals(target) && Equals(s.Command, command));
+        return this;
+    }
+
+    /// <summary>
+    /// Asserts that the decision starts the workflow <paramref name="id"/> of the type <paramref name="workflow"/> with
+    /// <paramref name="input"/>, with or without <c>then</c>. Nothing is started.
+    /// </summary>
+    public DeciderOutcome<TState, TCommand, TEvent> ThenStarted<TInput, TWorkflowState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow, WorkflowId id, TInput input)
+        where TInput : notnull
+        where TWorkflowState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        return ThenCalled(new StartWorkflow(workflow.TypeName, id, input));
+    }
+
+    /// <summary>Asserts that the decision sends <paramref name="fact"/> to the workflow <paramref name="id"/>.</summary>
+    public DeciderOutcome<TState, TCommand, TEvent> ThenNotified<TInput, TWorkflowState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow, WorkflowId id, TFact fact)
+        where TInput : notnull
+        where TWorkflowState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        return ThenCalled(new NotifyWorkflow(workflow.TypeName, id, fact));
+    }
+
+    /// <summary>Asserts that the decision asks the workflow <paramref name="id"/> to stop, with this reason and caller.</summary>
+    public DeciderOutcome<TState, TCommand, TEvent> ThenCancelled<TInput, TWorkflowState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow, WorkflowId id, string reason, string by)
+        where TInput : notnull
+        where TWorkflowState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        return ThenCalled(new CancelWorkflow(workflow.TypeName, id, reason, by));
+    }
+
+    private DeciderOutcome<TState, TCommand, TEvent> ThenCalled(object expected)
+    {
+        var calls = Effects.Select(e => e.Value).OfType<ExecuteEffect>().Select(x => x.Effect).OfType<IWorkflowCall>().ToList();
+        Assert.True(calls.Any(call => Equals(call, expected)),
+            $"Expected the decision to issue {expected}, but it issued " +
+            (calls.Count == 0 ? "no workflow calls." : string.Join(", ", calls) + "."));
         return this;
     }
 
