@@ -265,6 +265,8 @@ Each workflow has one durable reminder, stored through Akka.Reminders. It is due
 
 A workflow that waits only for facts from outside has no reminder. Nothing wakes it until a fact arrives.
 
+When a decision finishes the workflow, the same decision cancels its reminder, so a finished workflow leaves none behind. If the reminder store refuses the cancel, the finish still succeeds: a wake that arrives later finds a closed workflow and is ignored.
+
 The journal write comes first. Then, before any work is issued and before any reply is sent, the reminder is stored for the state the workflow is now in. Storing it again replaces the old one, so the old reminder stays in place until the journal has the new state.
 
 When a process dies after the journal write and before the reminder is stored, recovery fixes it: whatever activates the workflow next makes it store the reminder for the state it recovered.

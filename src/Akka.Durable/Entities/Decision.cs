@@ -64,7 +64,8 @@ public sealed record SendEffect(Type CommandType, EntityId Target, object Comman
 // happens after the decision's events commit and is NOT atomic with the journal write.
 public sealed record ScheduleEffect(string Key, TimeSpan Delay, object Message);
 public sealed record ScheduleRecurringEffect(string Key, TimeSpan InitialDelay, TimeSpan Interval, object Message);
-public sealed record CancelTimerEffect(string Key);
+// BestEffort: a cancel the reminder store refuses is logged and the entity carries on, instead of failing.
+public sealed record CancelTimerEffect(string Key, bool BestEffort = false);
 
 public sealed record UnstashAllEffect;
 public sealed record StopEffect;

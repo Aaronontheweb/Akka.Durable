@@ -272,7 +272,18 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             return decision;
 
         var after = handled.Events.IsDefaultOrEmpty ? state : handled.Events.Aggregate(state, WorkflowEvolve.Evolve);
-        return after is WfRunning running ? StoreWakeFirst(handled, running, reached, ctx) : handled;
+        if (after is WfRunning running) return StoreWakeFirst(handled, running, reached, ctx);
+        return state is WfRunning && after is WfFinished ? CancelWakeFirst(handled) : handled;
+    }
+
+    /// <summary>
+    /// A decision that finishes the workflow cancels its reminder, ahead of the other effects. A cancel the
+    /// reminder store refuses does not fail the finish: a wake left behind is ignored by a closed workflow.
+    /// </summary>
+    private static Handled<WfCommand, WfEvent> CancelWakeFirst(Handled<WfCommand, WfEvent> handled)
+    {
+        EntityEffect cancel = new CancelTimerEffect(WorkflowWake.Key, BestEffort: true);
+        return handled with { Effects = handled.Effects.IsDefault ? [cancel] : handled.Effects.Insert(0, cancel) };
     }
 
     private Decision<WfCommand, WfEvent> DecideCommand(
