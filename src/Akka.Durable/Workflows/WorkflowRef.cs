@@ -222,7 +222,7 @@ internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id
             WfDelivered => new Delivered(),
             WfHeldReply => new Held(),
             WfNotStartedReply => new WorkflowNotStarted(),
-            WfClosedReply closed => new AlreadyFinished<TOutcome>(OutcomeOf(closed.Outcome)),
+            WfClosedReply closed => new AlreadyFinished<TOutcome>(Stored<TOutcome>(closed.Outcome)),
         };
 
     public async Task<StartResult<TOutcome>> Start(TInput input, CancellationToken cancellationToken = default)
@@ -234,28 +234,25 @@ internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id
         {
             WfStartAccepted => new Started(),
             WfStartRefusedRunning => new AlreadyRunning(),
-            WfStartRefusedFinished finished => new AlreadyFinished<TOutcome>(OutcomeOf(finished.Outcome)),
+            WfStartRefusedFinished finished => new AlreadyFinished<TOutcome>(Stored<TOutcome>(finished.Outcome)),
         };
     }
 
-    /// <summary>The stored state, read through the one rule for journal values: another type is the named error.</summary>
-    private TState StateOf(object state) => WorkflowJournal<TInput, TState, TFact, TOutcome>.State(id, state);
-
-    /// <summary>The stored outcome, read through the same rule.</summary>
-    private TOutcome OutcomeOf(object outcome) => WorkflowJournal<TInput, TState, TFact, TOutcome>.Outcome(id, outcome);
-
-    // A status read gives the stored state or outcome typed. A journal written with another type gives the error
-    // that names the stored type and the expected type.
     public async Task<WorkflowStatus<TState, TOutcome>> Status(CancellationToken cancellationToken = default)
     {
         var snapshot = await Entity.GetStateAsync(cancellationToken);
         return snapshot.State switch
         {
             WfNotStarted => new WorkflowNotStarted(),
-            WfRunning running => new WorkflowRunning<TState>(StateOf(running.State), running.EnteredAt),
-            WfFinished finished => new WorkflowFinished<TOutcome>(OutcomeOf(finished.Outcome), finished.At),
+            WfRunning running => new WorkflowRunning<TState>(Stored<TState>(running.State), running.EnteredAt),
+            WfFinished finished => new WorkflowFinished<TOutcome>(Stored<TOutcome>(finished.Outcome), finished.At),
         };
     }
+
+    /// <summary>A stored state or outcome as the type this ref reads. Another type means another definition wrote the journal.</summary>
+    private T Stored<T>(object value) => value is T typed ? typed : throw new InvalidOperationException(
+        $"Workflow [{id.Value}] holds a value of type {value.GetType().FullName}, but its ref reads the type " +
+        $"{typeof(T).FullName}. The journal was written with another type.");
 
     public async Task<TOutcome> WaitForOutcome(TimeSpan pollEvery, CancellationToken cancellationToken = default)
     {

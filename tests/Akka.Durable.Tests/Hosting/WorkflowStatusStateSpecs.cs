@@ -24,13 +24,6 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
         }
     }
 
-    /// <summary>
-    /// A later deployment of the nest workflow whose state type was changed from <see cref="Outer"/> to
-    /// <see cref="Inner"/>: it reads the journal the nest workflow wrote, under the same persistence ids.
-    /// </summary>
-    private static readonly WorkflowDefinition<Go, Inner, NestFact, Over> Redeployed = Nest.Holding<Inner>(
-        "nests-redeployed", go => new Low(go.Level), Nest.ReadsJournalOf(Nest.Definition.TypeName));
-
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddCheckoutHandlers()
             .AddScoped<IEffectHandler<Repeat, EchoFact>, HoldEcho>()
@@ -43,8 +36,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
             .WithDurableWorkflow(Echo.Definition, Sharding())
             .WithDurableWorkflow(Nest.Definition, Sharding())
             .WithDurableWorkflow(Nest.Alone, Sharding())
-            .WithDurableWorkflow(Nest.Tagged, Sharding())
-            .WithDurableWorkflow(Redeployed, Sharding());
+            .WithDurableWorkflow(Nest.Tagged, Sharding());
 
     private async Task<WorkflowRunning<TState>> Running<TInput, TState, TFact, TOutcome>(
         IWorkflowRef<TInput, TState, TFact, TOutcome> workflow, Action<WorkflowRunning<TState>> assert)
@@ -229,18 +221,6 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
 
         foreach (var type in new[] { typeof(TInput), typeof(TState), typeof(TFact), typeof(TOutcome) })
             Assert.Contains(type.FullName!, ex.Message);
-    }
-
-    [Fact]
-    public async Task A_journal_written_with_another_state_type_fails_the_status_read_and_names_both_types()
-    {
-        await WorkflowRef<Go, Outer, NestFact, Over>("s8").Start(new Go(8), AskCancellation());
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            WorkflowRef<Go, Inner, NestFact, Over>("s8").Status(AskCancellation(TimeSpan.FromSeconds(5))));
-
-        Assert.Contains(typeof(Outer).FullName!, ex.Message);
-        Assert.Contains(typeof(Inner).FullName!, ex.Message);
     }
 }
 

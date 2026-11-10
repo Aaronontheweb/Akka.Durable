@@ -1,5 +1,6 @@
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Durable.Tests.Fixtures.Echoes;
+using Akka.Durable.Tests.Fixtures.Nests;
 using Akka.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -18,11 +19,20 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddCheckoutHandlers().AddScoped<IEffectHandler<Repeat, EchoFact>, RepeatHandler>();
 
+    /// <summary>
+    /// A later deployment of the echo workflow whose outcome type changed from <see cref="Heard"/> to
+    /// <see cref="Echoed"/>: it reads the journal the echo workflow wrote, under the same persistence ids.
+    /// </summary>
+    private static readonly WorkflowDefinition<Shout, Listening, EchoFact, Echoed> OutcomeChanged =
+        new(new WorkflowTypeName("outcome-changed"), _ => new Listening(), (_, ctx) => ctx.Execute(new Repeat(ctx.Input.Text)),
+            (_, _, ctx) => ctx.Stay(), _ => new EchoLost(), _ => new EchoLost(), Nest.ReadsJournalOf(Echo.Definition.TypeName));
+
     // A second workflow type in the same actor system.
     protected override void ConfigureMore(AkkaConfigurationBuilder builder) =>
         builder
             .WithCustomSerializer(EchoSerializer.CreateSerializerDetails)
-            .WithDurableWorkflow(Echo.Definition, Sharding());
+            .WithDurableWorkflow(Echo.Definition, Sharding())
+            .WithDurableWorkflow(OutcomeChanged, Sharding());
 
     [Fact]
     public async Task A_workflow_runs_its_work_in_order_and_ends_with_its_outcome()
@@ -224,6 +234,21 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
 
         Assert.Equal(new Heard("hello"), await echo.WaitForOutcome(Poll, AskCancellation()));
         Assert.Equal(new OrderPlaced("charge-e1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+    }
+
+    [Fact]
+    public async Task A_journal_with_another_outcome_type_fails_the_status_read_and_names_both_types()
+    {
+        var writer = WorkflowRef<Shout, Listening, EchoFact, Heard>("m4");
+        await writer.Start(new Shout("hi"), AskCancellation());
+        await AwaitAssertAsync(async () => Assert.IsType<WorkflowFinished<Heard>>((await writer.Status(AskCancellation())).Value),
+            cancellationToken: TestCancellation);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            WorkflowRef<Shout, Listening, EchoFact, Echoed>("m4").Status(AskCancellation()));
+
+        Assert.Contains(typeof(Heard).FullName!, ex.Message);
+        Assert.Contains(typeof(Echoed).FullName!, ex.Message);
     }
 }
 
