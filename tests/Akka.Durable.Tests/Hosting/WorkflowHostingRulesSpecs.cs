@@ -24,10 +24,10 @@ public class WorkflowHostingRulesSpecs
     [InlineData(true)]
     public void Two_workflow_types_cannot_share_their_input_and_outcome_types(bool sharded)
     {
-        var builder = Builder().WithDurableWorkflow(Checkout.Definition, sharded ? new ShardOptions() : null);
+        var builder = Builder().WithDurableWorkflow(Checkout.Definition, sharded ? new ShardedHosting() : null);
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => builder.WithDurableWorkflow(SecondCheckout, sharded ? new ShardOptions() : null));
+            () => builder.WithDurableWorkflow(SecondCheckout, sharded ? new ShardedHosting() : null));
 
         Assert.Contains("[checkouts]", ex.Message);
         Assert.Contains("[checkouts-two]", ex.Message);

@@ -22,7 +22,7 @@ public class ShardCountOptionsSpecs
     public void Non_positive_shard_count_is_rejected_when_sharded(int shards)
     {
         var ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => Builder().WithDurableEntity(WithShards(shards), new ShardOptions()));
+            () => Builder().WithDurableEntity(WithShards(shards), new ShardedHosting()));
 
         Assert.Contains("NumberOfShards", ex.Message);
     }

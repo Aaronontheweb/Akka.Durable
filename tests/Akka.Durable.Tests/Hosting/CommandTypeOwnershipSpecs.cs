@@ -22,10 +22,10 @@ public class CommandTypeOwnershipSpecs
     [InlineData(true)]
     public void Two_entity_types_cannot_share_a_command_type(bool sharded)
     {
-        var builder = Builder().WithDurableEntity(Counter.Definition, sharded ? new ShardOptions() : null);
+        var builder = Builder().WithDurableEntity(Counter.Definition, sharded ? new ShardedHosting() : null);
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => builder.WithDurableEntity(SecondCounter, sharded ? new ShardOptions() : null));
+            () => builder.WithDurableEntity(SecondCounter, sharded ? new ShardedHosting() : null));
 
         Assert.Contains("[counter]", ex.Message);
         Assert.Contains("[counter-two]", ex.Message);

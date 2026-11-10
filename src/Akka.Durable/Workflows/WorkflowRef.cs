@@ -143,13 +143,13 @@ internal sealed class WorkflowRef<TInput, TOutcome>(WorkflowId id, IActorRef reg
 public static class DurableWorkflowHostingExtensions
 {
     /// <summary>
-    /// Hosts a workflow type: in a shard region when <paramref name="shardOptions"/> is given, otherwise in a
+    /// Hosts a workflow type: in a shard region when <paramref name="sharding"/> is given, otherwise in a
     /// local host actor in this process. Call <c>AddDurableEntities</c> on the service collection as well.
     /// </summary>
     public static AkkaConfigurationBuilder WithDurableWorkflow<TInput, TState, TFact, TOutcome>(
         this AkkaConfigurationBuilder builder,
         WorkflowDefinition<TInput, TState, TFact, TOutcome> definition,
-        ShardOptions? shardOptions = null)
+        ShardedHosting? sharding = null)
         where TInput : notnull
         where TState : notnull
         where TFact : notnull
@@ -170,6 +170,6 @@ public static class DurableWorkflowHostingExtensions
         builder.WithActors((system, _) => DurableEntityHostingExtensions.EnsureSerializable(
             system, "Durable workflow", entity.TypeName, typeof(TInput), typeof(TState), typeof(TFact), typeof(TOutcome)));
 
-        return builder.HostEntity<WfState, WfCommand, WfEvent, WorkflowRegion<TInput, TOutcome>>(entity, shardOptions);
+        return builder.HostEntity<WfState, WfCommand, WfEvent, WorkflowRegion<TInput, TOutcome>>(entity, sharding);
     }
 }

@@ -15,7 +15,7 @@ public class ShardCountSpecs(ITestOutputHelper output) : CounterHostingSpec(outp
 {
     private const int Shards = 3;
 
-    protected override ShardOptions? Sharding => new();
+    protected override ShardedHosting? Sharding => new();
 
     protected override EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition =>
         Counter.Definition with { Options = EntityOptions.Default with { NumberOfShards = Shards } };
