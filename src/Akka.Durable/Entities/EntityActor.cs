@@ -269,17 +269,26 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void HandleEffectCompleted(EffectCompleted completed)
     {
+        var outcome = completed.Outcome;
         if (completed.Failure is { } failure)
         {
-            // The state already records that the effect was issued. Resume re-derives it on the next
-            // incarnation and a retry arm in Decide can re-issue it sooner. A handler that has to report a
-            // failure to the entity returns it as an outcome instead of throwing.
-            _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. State is unchanged.",
+            if (completed.Failed is null)
+            {
+                // The state already records that the effect was issued. Resume re-derives it on the next
+                // incarnation and a retry arm in Decide can re-issue it sooner. A handler that has to report a
+                // failure to the entity returns it as an outcome instead of throwing.
+                _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. State is unchanged.",
+                    completed.Effect, EntityType.Value, _entityId.Value);
+                return;
+            }
+
+            // The effect says what a failure means to this entity: it is an outcome like any other.
+            _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. The entity decides on the failure.",
                 completed.Effect, EntityType.Value, _entityId.Value);
-            return;
+            outcome = completed.Failed(failure);
         }
 
-        switch (completed.Outcome)
+        switch (outcome)
         {
             case TCommand command:
                 HandleCommand(command, completed.Origin, reminder: null);
@@ -296,7 +305,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
             default:
                 throw new InvalidOperationException(
-                    $"The handler for effect {completed.Effect} returned a {completed.Outcome.GetType()}, which is " +
+                    $"The handler for effect {completed.Effect} returned a {outcome.GetType()}, which is " +
                     $"neither a {typeof(TCommand)} nor a {typeof(TEvent)}.");
         }
     }
@@ -423,13 +432,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         var lifetime = _lifetime.Token;
         var log = _log;
         var effect = execute.Effect;
+        var failed = execute.Failed;
         _ = InvokeAsync(scope, (_, ct) => invoke(ct), timeout: null).ContinueWith(t =>
         {
             // This incarnation is gone; its successor re-derives pending effects in Resume.
             if (lifetime.IsCancellationRequested) return;
 
             if (t.IsCompletedSuccessfully)
-                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin), self);
+                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin, failed), self);
             else
                 log.Error(t.Exception, "The outcome of effect {0} could not be observed", effect);
         }, TaskScheduler.Default);
@@ -648,7 +658,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     }
 
     /// <summary>The result of an <c>Execute</c> handler, sent by the entity to itself.</summary>
-    private sealed record EffectCompleted(object Effect, object? Outcome, Exception? Failure, IActorRef Origin)
+    private sealed record EffectCompleted(
+        object Effect, object? Outcome, Exception? Failure, IActorRef Origin, Func<Exception, object?>? Failed)
         : INoSerializationVerificationNeeded;
 
     /// <summary>Another entity's reply to a <c>Send</c>, with the origin of the command that sent it.</summary>

@@ -49,6 +49,7 @@ public static class DurableEntityHostingExtensions
     {
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
         services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
+        services.TryAddSingleton(typeof(IWorkflowRefs<,>), typeof(WorkflowRefs<,>));
         return services;
     }
 
@@ -60,6 +61,23 @@ public static class DurableEntityHostingExtensions
         this AkkaConfigurationBuilder builder,
         EntityDefinition<TState, TCommand, TEvent> definition,
         ShardOptions? shardOptions = null)
+    {
+        EnsureOwnCommandType(builder, definition.TypeName, typeof(TCommand));
+
+        return builder.HostEntity<TState, TCommand, TEvent, EntityRegion<TCommand>>(definition, shardOptions,
+            (registry, region) => registry.Register<EntityRegion<TCommand, TState, TEvent>>(region));
+    }
+
+    /// <summary>
+    /// Hosts an entity type and registers its shard region or local host in the <see cref="ActorRegistry"/>
+    /// under <typeparamref name="TRegion"/>. Refs find the entity type by that key.
+    /// </summary>
+    /// <param name="alsoRegister">Registers the same actor under more keys.</param>
+    internal static AkkaConfigurationBuilder HostEntity<TState, TCommand, TEvent, TRegion>(
+        this AkkaConfigurationBuilder builder,
+        EntityDefinition<TState, TCommand, TEvent> definition,
+        ShardOptions? shardOptions,
+        Action<IActorRegistry, IActorRef>? alsoRegister = null)
     {
         Func<string, Props> EntityProps(ActorSystem system, IDependencyResolver resolver)
         {
@@ -73,12 +91,11 @@ public static class DurableEntityHostingExtensions
         var stopMessage = EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
         var passivateIdleAfter = options.PassivateIdleAfter;
 
-        EnsureOwnCommandType(builder, definition.TypeName, typeof(TCommand));
         AddFrameworkSerializerOnce(builder);
 
         // Fail at startup, before any entity runs, if an entity type would fall back to the
         // System.Object serializer: events, snapshots, reminders and remote commands all serialize.
-        builder.WithActors((system, _) => EnsureSerializable(system, definition.TypeName,
+        builder.WithActors((system, _) => EnsureSerializable(system, "Durable entity", definition.TypeName,
             typeof(TState), typeof(TCommand), typeof(TEvent)));
 
         if (shardOptions is not null)
@@ -95,15 +112,15 @@ public static class DurableEntityHostingExtensions
                 passivateIdleAfter > TimeSpan.Zero ? passivateIdleAfter : TimeSpan.Zero;
 
             // Entity refs and reminders send ShardingEnvelopes, which sharding routes on its own.
-            return builder
-                .WithShardRegion<EntityRegion<TCommand>>(
-                    definition.TypeName.Value,
-                    (system, _, resolver) => EntityProps(system, resolver),
-                    HashCodeMessageExtractor.Create(options.NumberOfShards, _ => null),
-                    shardOptions)
-                .WithActors(async (_, registry) =>
-                    registry.Register<EntityRegion<TCommand, TState, TEvent>>(
-                        await registry.GetAsync<EntityRegion<TCommand>>()));
+            builder.WithShardRegion<TRegion>(
+                definition.TypeName.Value,
+                (system, _, resolver) => EntityProps(system, resolver),
+                HashCodeMessageExtractor.Create(options.NumberOfShards, _ => null),
+                shardOptions);
+
+            return alsoRegister is null
+                ? builder
+                : builder.WithActors(async (_, registry) => alsoRegister(registry, await registry.GetAsync<TRegion>()));
         }
 
         return builder.WithActors((system, registry, resolver) =>
@@ -112,12 +129,22 @@ public static class DurableEntityHostingExtensions
             var host = system.ActorOf(
                 Props.Create(() => new LocalEntityHost(entityProps, stopMessage, passivateIdleAfter)),
                 LocalEntityHost.ActorName(definition.TypeName));
-            registry.Register<EntityRegion<TCommand>>(host);
-            registry.Register<EntityRegion<TCommand, TState, TEvent>>(host);
+            registry.Register<TRegion>(host);
+            alsoRegister?.Invoke(registry, host);
         });
     }
 
-    private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, Dictionary<Type, EntityTypeName>> CommandTypeOwners = [];
+    private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, Dictionary<Type, EntityTypeName>> RegionKeyOwners = [];
+
+    /// <summary>
+    /// Claims an <see cref="ActorRegistry"/> key for an entity type. Returns <c>null</c> when the key was
+    /// free, or the entity type that already holds it.
+    /// </summary>
+    internal static EntityTypeName? ClaimRegionKey(AkkaConfigurationBuilder builder, EntityTypeName typeName, Type key)
+    {
+        var owners = RegionKeyOwners.GetOrCreateValue(builder);
+        return owners.TryAdd(key, typeName) ? null : owners[key];
+    }
 
     /// <summary>
     /// Entity refs and <c>Send</c> find an entity type by its command type, so one actor system cannot host
@@ -126,10 +153,8 @@ public static class DurableEntityHostingExtensions
     /// </summary>
     private static void EnsureOwnCommandType(AkkaConfigurationBuilder builder, EntityTypeName typeName, Type commandType)
     {
-        var owners = CommandTypeOwners.GetOrCreateValue(builder);
-        if (owners.TryAdd(commandType, typeName)) return;
+        if (ClaimRegionKey(builder, typeName, commandType) is not { } owner) return;
 
-        var owner = owners[commandType];
         throw new InvalidOperationException(owner == typeName
             ? $"Durable entity [{typeName.Value}] is registered twice. Call WithDurableEntity once for each entity type."
             : $"Durable entities [{owner.Value}] and [{typeName.Value}] both use the command type {commandType.FullName}. " +
@@ -145,7 +170,7 @@ public static class DurableEntityHostingExtensions
             builder.WithCustomSerializer(DurableEntitySerializer.CreateSerializerDetails);
     }
 
-    private static void EnsureSerializable(ActorSystem system, EntityTypeName typeName, params Type[] types)
+    internal static void EnsureSerializable(ActorSystem system, string what, EntityTypeName typeName, params Type[] types)
     {
         var serialization = system.Serialization;
         var fallback = TryFindSerializer(serialization, typeof(object));
@@ -159,7 +184,7 @@ public static class DurableEntityHostingExtensions
         if (unbound.Count == 0) return;
 
         throw new InvalidOperationException(
-            $"Durable entity [{typeName.Value}] cannot start: no serializer is registered for " +
+            $"{what} [{typeName.Value}] cannot start: no serializer is registered for " +
             $"{string.Join(", ", unbound)}, so they would fall back to " +
             $"{fallback?.GetType().Name ?? "no serializer at all"}. Mark them [AkkaSerializable(Manifest = \"...\")] " +
             "(for a C# 15 union, the union itself as well as each case) under an [AkkaSerializer<TProtocol>] " +
