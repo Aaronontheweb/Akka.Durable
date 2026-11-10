@@ -67,7 +67,7 @@ public abstract class WorkflowJournalSpecs(ITestOutputHelper output) : CheckoutW
         await CheckoutRef("o1").Start(new PlaceOrder("o1", 4200), AskCancellation());
         await AwaitRunning("o1", running => Assert.IsType<Undoing>(((CheckoutState)running.State).Value));
 
-        await StopWorkflow("o1");
+        await RestartWorkflow("o1");
 
         // The new actor has nothing in memory. It reads the stored bytes, and the recovered values go back
         // into the author's typed functions: the interrupted undo gives up, and the table moves on.
@@ -84,7 +84,7 @@ public abstract class WorkflowJournalSpecs(ITestOutputHelper output) : CheckoutW
         // A snapshot is saved in the background: wait for it, so that the next recovery has to read it.
         await AwaitAssertAsync(() => Assert.Equal(ExpectedSnapshots, CountRows("snapshot")), cancellationToken: TestCancellation);
 
-        await StopWorkflow("o1");
+        await RestartWorkflow("o1");
 
         // A state that holds the state it came from, which holds an outcome: equal to the last value, to the tick.
         Assert.Equal(before, await HostedState("o1"));

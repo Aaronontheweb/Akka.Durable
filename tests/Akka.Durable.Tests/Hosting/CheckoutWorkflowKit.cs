@@ -79,7 +79,30 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
         Assert.Equal(new[] { 0 }, running.Settled);
     });
 
-    /// <summary>Stops the workflow's actor, so the next message starts one that has to recover.</summary>
+    /// <summary>
+    /// Kills the workflow's actor and waits until its host has started a new one, which has to recover.
+    /// </summary>
+    /// <remarks>
+    /// The host learns that the actor stopped a moment after this spec does. A message sent in between goes to
+    /// the dead actor and is lost. So this reads the state, with a short time limit, until the new actor answers.
+    /// </remarks>
+    protected async Task RestartWorkflow(string id)
+    {
+        await StopWorkflow(id);
+
+        await AwaitAssertAsync(async () =>
+        {
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(TestCancellation);
+            attempt.CancelAfter(TimeSpan.FromMilliseconds(500));
+            var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutOutcome>>>().ActorRef;
+            await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region).GetStateAsync(attempt.Token);
+        }, TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
+    }
+
+    /// <summary>
+    /// Kills the workflow's actor and sends it nothing. Whatever reaches the workflow next starts a new actor,
+    /// which has to recover. A message sent straight after this can be lost: see <see cref="RestartWorkflow"/>.
+    /// </summary>
     protected async Task StopWorkflow(string id)
     {
         var type = Definition.TypeName.Value;
