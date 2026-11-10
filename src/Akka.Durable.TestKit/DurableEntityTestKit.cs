@@ -50,11 +50,6 @@ public abstract class DurableEntityTestKit(
     /// Run with <c>akka.actor.serialize-messages = on</c>, so every message is serialized and deserialized as
     /// if it crossed the network. Off by default.
     /// </summary>
-    /// <remarks>
-    /// Akka.NET 1.6.0-beta6 verifies the journal's internal reply wrapper with the JSON fallback serializer, which
-    /// empties C# union events on every successful persist (akkadotnet/akka.net#8910). Enable this only for
-    /// entities whose events survive JSON, until that is fixed.
-    /// </remarks>
     protected virtual bool VerifyMessageSerialization => false;
 
     /// <summary>Register durable entities (and any other actors) for the test host.</summary>

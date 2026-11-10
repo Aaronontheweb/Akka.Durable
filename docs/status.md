@@ -12,10 +12,10 @@ Working today:
 - C# compiler contract tests and F# DU command/reply tests.
 - Workflows: `WorkflowDefinition` with `WithDurableWorkflow`, work that is issued once, give-up facts, commands sent to entities from `Work`, timers, several things in one state, facts from outside (`Notify`, `Cancel`, `Accepts`), and refs with `Start`, `GetStateAsync` and `WaitForOutcome`. See [Workflows](workflows.md).
 - Serialization of union commands, events and state. Round-tripped through the V2 serializers, and through a real journal (Akka.Persistence.Sql on SQLite) for events and snapshots.
+- Message serialization checks in the TestKit. `VerifyMessageSerialization` runs a spec with `akka.actor.serialize-messages = on`; it stays off by default. Entities and workflows whose events are C# unions persist, restart and recover with it on.
 
 Not done yet:
 - **Snapshot retention tests.** Snapshots are written and recovered, but pruning old snapshots and deleting covered events aren't covered by tests yet.
-- **Message serialization checks in the TestKit.** `VerifyMessageSerialization` stays off by default until [akkadotnet/akka.net#8910](https://github.com/akkadotnet/akka.net/issues/8910) is fixed.
 - **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
 - **Entity contracts and proxies.** `Send` resolves the target by command type in the same actor system; addressing an entity type hosted only on other nodes, without its definition, is tracked in [#30](https://github.com/Aaronontheweb/Akka.Durable/issues/30).
 - **Workflow features.** Retry policies, `Again` with a delay, child workflows, and a scenario test kit for workflows.

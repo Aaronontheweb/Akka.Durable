@@ -40,7 +40,7 @@ DeciderScenario.For(Invoice.Definition)
     .ThenExecuted(new VerifyRecipient("billing@example.com"));
 ```
 
-For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite.
+For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite. `DurableEntityTestKit` can also run with `akka.actor.serialize-messages = on`: override `VerifyMessageSerialization` to return `true`, and every message, including union events, is serialized and read back as if it crossed the network.
 
 ```csharp
 public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
