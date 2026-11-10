@@ -20,11 +20,8 @@ let ``An F# case with data reports the case name`` () =
 let ``An F# case with data is the state, and its data can be read back`` () =
     let running = WorkflowRunning(Charging "res-1", DateTimeOffset.UnixEpoch)
     match running.State with
-    | :? Phase as phase ->
-        match phase with
-        | Charging reservation -> Assert.Equal("res-1", reservation)
-        | other -> failwithf "Expected Charging, got %A" other
-    | other -> failwithf "Expected a Phase, got %A" other
+    | Charging reservation -> Assert.Equal("res-1", reservation)
+    | other -> failwithf "Expected Charging, got %A" other
 
 [<Theory>]
 [<InlineData("idle")>]

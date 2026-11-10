@@ -59,7 +59,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.IsType<Started>((await checkout.Start(order, AskCancellation())).Value);
         Assert.IsType<AlreadyRunning>((await checkout.Start(order, AskCancellation())).Value);
 
-        var running = Assert.IsType<WorkflowRunning>((await checkout.Status(AskCancellation())).Value);
+        var running = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.Status(AskCancellation())).Value);
         Assert.Equal(nameof(Reserving), running.StateName);
 
         reserved.SetResult(new Reserved("res-o2"));
@@ -116,7 +116,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OpenSupportTicket("o5", "ChargeCard Failed"), Services.Issued[^1]);
         Assert.Single(Services.Issued.OfType<ChargeCard>());
 
-        var status = Assert.IsType<WorkflowRunning>((await checkout.Status(AskCancellation())).Value);
+        var status = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.Status(AskCancellation())).Value);
         Assert.Equal(nameof(NeedsAttention), status.StateName);
     }
 
@@ -216,7 +216,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     [Fact]
     public async Task Two_workflow_types_run_in_one_actor_system()
     {
-        var echo = WorkflowRef<Shout, EchoFact, Heard>("e1");
+        var echo = WorkflowRef<Shout, Listening, EchoFact, Heard>("e1");
         var checkout = CheckoutRef("e1");
 
         await echo.Start(new Shout("hello"), AskCancellation());

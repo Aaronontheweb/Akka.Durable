@@ -33,13 +33,14 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
             .WithDurableWorkflow(Echo.Definition, Sharding())
             .WithDurableWorkflow(Nest.Definition, Sharding());
 
-    private async Task<WorkflowRunning> Running<TInput, TFact, TOutcome>(
-        IWorkflowRef<TInput, TFact, TOutcome> workflow, Action<WorkflowRunning> assert)
+    private async Task<WorkflowRunning<TState>> Running<TInput, TState, TFact, TOutcome>(
+        IWorkflowRef<TInput, TState, TFact, TOutcome> workflow, Action<WorkflowRunning<TState>> assert)
+        where TState : notnull
     {
-        WorkflowRunning? found = null;
+        WorkflowRunning<TState>? found = null;
         await AwaitAssertAsync(async () =>
         {
-            found = Assert.IsType<WorkflowRunning>((await workflow.Status(AskCancellation())).Value);
+            found = Assert.IsType<WorkflowRunning<TState>>((await workflow.Status(AskCancellation())).Value);
             assert(found);
         }, cancellationToken: TestCancellation);
         return found!;
@@ -64,7 +65,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
         Assert.True(second.Since >= first.Since);
 
         var status = (await checkout.Status(AskCancellation())).Value;
-        Assert.True(status is WorkflowRunning { State: Charging { Reservation: "res-fed" } });
+        Assert.True(status is WorkflowRunning<CheckoutState> { State: Charging { Reservation: "res-fed" } });
     }
 
     [Fact]
@@ -121,7 +122,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
     [Fact]
     public async Task A_state_that_is_a_plain_record_is_that_record()
     {
-        var echo = WorkflowRef<Shout, EchoFact, Heard>("s5");
+        var echo = WorkflowRef<Shout, Listening, EchoFact, Heard>("s5");
         await echo.Start(new Shout("hello"), AskCancellation());
 
         var running = await Running(echo, r => Assert.Equal(new Listening(), r.State));
@@ -131,11 +132,11 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
     [Fact]
     public async Task A_union_inside_a_union_reports_the_innermost_case()
     {
-        var nest = WorkflowRef<Go, NestFact, Over>("s6");
+        var nest = WorkflowRef<Go, Outer, NestFact, Over>("s6");
         await nest.Start(new Go(7), AskCancellation());
 
-        var running = await Running(nest, r => Assert.NotNull(r.State));
-        Assert.Equal(new Low(7), running.State);
+        var running = await Running(nest, r => Assert.NotNull(r.State.Value));
+        Assert.Equal<object>(new Low(7), running.State);
         Assert.Equal(nameof(Low), running.StateName);
     }
 }
@@ -168,7 +169,7 @@ public sealed class WorkflowRunningValueSpecs
             _ => new Outer(new Inner(new Low(1))),
         };
 
-        Assert.Equal(expected, new WorkflowRunning(state, Entered).StateName);
+        Assert.Equal(expected, new WorkflowRunning<object>(state, Entered).StateName);
     }
 
     [Theory]
@@ -178,8 +179,8 @@ public sealed class WorkflowRunningValueSpecs
     public void Two_values_are_equal_when_their_states_and_times_are_equal(
         string reservation, int seconds, string otherReservation, int otherSeconds, bool equal)
     {
-        var one = new WorkflowRunning(new Charging(reservation), Entered.AddSeconds(seconds));
-        var other = new WorkflowRunning(new Charging(otherReservation), Entered.AddSeconds(otherSeconds));
+        var one = new WorkflowRunning<Charging>(new Charging(reservation), Entered.AddSeconds(seconds));
+        var other = new WorkflowRunning<Charging>(new Charging(otherReservation), Entered.AddSeconds(otherSeconds));
 
         Assert.Equal(equal, one.Equals(other));
     }

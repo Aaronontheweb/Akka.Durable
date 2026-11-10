@@ -38,7 +38,7 @@ public abstract class BumpWorkflowKit(ITestOutputHelper output) : DurableEntityT
     // The railway's service. The railway calls it once for each Adjust it receives.
     protected Calculator Calculator => Host.Services.GetRequiredService<Calculator>();
     protected int Calls => Host.Services.GetRequiredService<EffectRecorder>().Entries.Count(e => e.StartsWith("calculate:"));
-    protected IWorkflowRef<BumpInput, BumpFact, Ended> W1 => WorkflowRef<BumpInput, BumpFact, Ended>("w1");
+    protected IWorkflowRef<BumpInput, Sending, BumpFact, Ended> W1 => WorkflowRef<BumpInput, Sending, BumpFact, Ended>("w1");
 
     /// <summary>Starts w1 with a railway service that answers only on <see cref="Release"/>, and waits until it is called.</summary>
     protected async Task StartGated(Plan plan)
