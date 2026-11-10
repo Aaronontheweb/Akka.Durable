@@ -137,7 +137,7 @@ public interface IWorkflowRef<in TInput, TState, in TFact, TOutcome>
     Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> GetStateAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Reads the status every <paramref name="pollEvery"/> until the workflow has finished, and returns its
+    /// Reads the workflow with <see cref="GetStateAsync"/> every <paramref name="pollEvery"/> until the workflow has finished, and returns its
     /// outcome. The waiting happens in the caller, not in the workflow. For a workflow that takes seconds.
     /// </summary>
     /// <exception cref="InvalidOperationException">The workflow has not been started.</exception>

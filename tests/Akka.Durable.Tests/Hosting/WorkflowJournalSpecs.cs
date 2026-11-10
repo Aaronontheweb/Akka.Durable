@@ -106,7 +106,7 @@ public sealed class WorkflowSnapshotJournalSpecs(ITestOutputHelper output) : Wor
 }
 
 /// <summary>
-/// The other serialization boundaries a workflow crosses between nodes: the start, its reply, and the status read.
+/// The other serialization boundaries a workflow crosses between nodes: the start, its reply, and the state read.
 /// The serializers are the ones the test host registers, the way an application would.
 /// </summary>
 public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : CheckoutWorkflowKit(output)
@@ -143,7 +143,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
     }
 
     [Fact]
-    public void Status_read_reply_carries_the_state()
+    public void State_read_reply_carries_the_state()
     {
         // Framework reply -> workflow state -> author's state: three serializers, one inside the next.
         var reply = (EntityStateReply)RoundTrip(new EntityStateReply(DeepState, 12));

@@ -5,7 +5,7 @@ using Akka.Serialization.V2;
 namespace Akka.Durable.Tests.Fixtures.Nests;
 
 // A workflow whose state is a union with a union inside it: Outer holds Inner, and Inner holds Low or High.
-// Its one piece of work never answers, so a test can read the status of a workflow that is held in its state.
+// Its one piece of work never answers, so a test can read the state of a workflow that is held in its state.
 // Workflows with the same input, fact and outcome but other state types: a union with one case that has no
 // fields, and a generic record.
 

@@ -9,7 +9,7 @@ using Xunit;
 namespace Akka.Durable.Tests.Hosting;
 
 /// <summary>
-/// What <c>Status</c> reports for a running workflow: the state it is in, typed as the definition types it, and
+/// What <c>GetStateAsync</c> reports for a running workflow: the state it is in, typed as the definition types it, and
 /// how a ref finds its workflow type by all four of its types.
 /// </summary>
 public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : CheckoutWorkflowKit(output)
@@ -74,7 +74,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
     private static string Read(Lone state) => state switch { Settled => "Settled" };
 
     [Fact]
-    public async Task Status_holds_the_state_union_with_the_data_the_facts_gave_it_after_each_move()
+    public async Task GetStateAsync_holds_the_state_union_with_the_data_the_facts_gave_it_after_each_move()
     {
         var reserved = new TaskCompletionSource<CheckoutFact>(TaskCreationOptions.RunContinuationsAsynchronously);
         Services.Reserve = (_, ct) => reserved.Task.WaitAsync(ct);
