@@ -37,7 +37,7 @@ public class WorkflowEngineSpecs
 
     private static WfStep Unexpected() => new WfUnexpected();
 
-    private static WfStep Ended(CheckoutOutcome outcome, OutcomeKind kind) => new WfEnded(outcome, kind);
+    private static WfStep Ended(CheckoutOutcome outcome) => new WfEnded(outcome);
 
     /// <summary>Reserving, then reserved: the workflow is in Charging, entry 2, with its work in flight.</summary>
     private static WfEvent[] InCharging() =>
@@ -63,7 +63,7 @@ public class WorkflowEngineSpecs
     private static WfEvent[] Finished() =>
     [
         Started(),
-        Recorded(new OutOfStock(), 0, Ended(new OrderFailed("out of stock"), OutcomeKind.Failed)),
+        Recorded(new OutOfStock(), 0, Ended(new OrderFailed("out of stock"))),
     ];
 
     private static WfCommand Answer(int entry, int index, CheckoutFact fact) => new WfAnswer(entry, index, fact);
@@ -146,12 +146,11 @@ public class WorkflowEngineSpecs
             ])
             .When(Answer(entry: 2, index: 0, new Charged("c1")))
             .ThenPersisted(Recorded(
-                new Charged("c1"), answered: 0, Ended(new OrderPlaced("c1"), OutcomeKind.Succeeded)))
+                new Charged("c1"), answered: 0, Ended(new OrderPlaced("c1"))))
             .ThenState(state =>
             {
                 var finished = Assert.IsType<WfFinished>(state.Value);
                 Assert.Equal<CheckoutOutcome>(new OrderPlaced("c1"), (CheckoutOutcome)finished.Outcome);
-                Assert.Equal(OutcomeKind.Succeeded, finished.Kind);
             });
 
         Assert.Empty(IssuedWork(outcome));
@@ -352,7 +351,6 @@ internal static class PairedWork
         Start: _ => "pair",
         Work: (_, ctx) => ctx.All(ctx.Execute(new Step("first")), ctx.Execute(new Step("second"))),
         Decide: (_, _, ctx) => ctx.Stay(),
-        Kind: _ => OutcomeKind.Succeeded,
         Cancel: _ => "cancel",
         GaveUp: failure => $"gave up on {failure.What}");
 }

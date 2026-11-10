@@ -24,7 +24,6 @@ The definition holds these functions:
 | `Start` | Returns the state a new workflow begins in. |
 | `Work` | Returns the work a state needs. |
 | `Decide` | The fact table. Returns what a fact means in a state. |
-| `Kind` | Says whether an outcome is `Succeeded`, `Failed` or `Cancelled`. |
 | `Cancel` | Turns a cancel request into one of your facts. |
 | `GaveUp` | Turns the notice "this work got no answer" into one of your facts. |
 
@@ -132,14 +131,6 @@ public static Transition<CheckoutState, CheckoutOutcome> Decide(
         (NeedsAttention, Reserved or OutOfStock or Charged or Declined or Undone or UndoRefused) => ctx.Unexpected(),
         (Reserving or Charging or Undoing, OperatorSaidRetry or OperatorSaidAbandon) => ctx.Unexpected(),
     };
-
-public static OutcomeKind Kind(CheckoutOutcome outcome) =>
-    outcome switch
-    {
-        OrderPlaced => OutcomeKind.Succeeded,
-        OrderFailed => OutcomeKind.Failed,
-        OrderCancelled => OutcomeKind.Cancelled,
-    };
 ```
 
 A handler runs one kind of effect and returns one of your facts. It is an `IEffectHandler<TEffect, TFact>`, the same interface that entities use:
@@ -165,7 +156,6 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
         Start: _ => new Reserving(),
         Work,
         Decide,
-        Kind,
         Cancel: request => new CancelRequested(request.Reason, request.By),
         GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
 ```
@@ -350,7 +340,7 @@ Getting a ref is cheap. It does not start or activate the workflow.
 
 - `WorkflowNotStarted`.
 - `WorkflowRunning`, with `State` (the name of the state's type, or for a union the name of the case it holds) and `Since` (when the workflow entered it).
-- `WorkflowFinished<TOutcome>`, with `Outcome`, `Kind` and `At`.
+- `WorkflowFinished<TOutcome>`, with `Outcome` and `At`. The outcome type says how the workflow ended.
 
 `WaitForOutcome(pollEvery)` reads the status every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
 

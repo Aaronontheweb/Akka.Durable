@@ -58,8 +58,7 @@ internal sealed record WfRunning(
 internal sealed record WfFinished(
     [property: AkkaField(0)] object Input,
     [property: AkkaField(1)] object Outcome,
-    [property: AkkaField(2)] OutcomeKind Kind,
-    [property: AkkaField(3)] DateTimeOffset At) : IDurableEntityProtocol;
+    [property: AkkaField(2)] DateTimeOffset At) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-state-v1")]
 internal readonly union WfState(WfNotStarted, WfRunning, WfFinished) : IDurableEntityProtocol;
@@ -76,9 +75,7 @@ internal sealed record WfStarted(
 internal sealed record WfMoved([property: AkkaField(0)] object Next) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-ended-v1")]
-internal sealed record WfEnded(
-    [property: AkkaField(0)] object Outcome,
-    [property: AkkaField(1)] OutcomeKind Kind) : IDurableEntityProtocol;
+internal sealed record WfEnded([property: AkkaField(0)] object Outcome) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-kept-v1", AllowEmpty = true)]
 internal sealed record WfKept : IDurableEntityProtocol;
@@ -512,7 +509,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
                     break;
 
                 case FinishTransition<TOutcome> finish:
-                    Record(new WfEnded(finish.Outcome, definition.Kind(finish.Outcome)));
+                    Record(new WfEnded(finish.Outcome));
                     finished = true;
                     break;
 
@@ -689,7 +686,7 @@ internal static class WorkflowEvolve
                 IssuedAt = recorded.At,
             },
             WfRepeated => running with { Entry = running.Entry + 1, Settled = [], IssuedAt = recorded.At },
-            WfEnded ended => new WfFinished(running.Input, ended.Outcome, ended.Kind, recorded.At),
+            WfEnded ended => new WfFinished(running.Input, ended.Outcome, recorded.At),
             WfKept or WfUnexpected => recorded.Answered is { } index
                 ? running with { Settled = running.Settled.Add(index) }
                 : running,

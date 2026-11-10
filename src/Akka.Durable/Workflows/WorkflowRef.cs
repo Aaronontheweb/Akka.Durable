@@ -45,7 +45,7 @@ public sealed record WorkflowNotStarted;
 /// <param name="Since">When it entered that state.</param>
 public sealed record WorkflowRunning(string State, DateTimeOffset Since);
 
-public sealed record WorkflowFinished<TOutcome>(TOutcome Outcome, OutcomeKind Kind, DateTimeOffset At);
+public sealed record WorkflowFinished<TOutcome>(TOutcome Outcome, DateTimeOffset At);
 
 /// <summary>The condition a workflow is in: not started, running, or finished with its outcome.</summary>
 public readonly union WorkflowStatus<TOutcome>(WorkflowNotStarted, WorkflowRunning, WorkflowFinished<TOutcome>);
@@ -205,7 +205,7 @@ internal class WorkflowRef<TInput, TOutcome>(WorkflowId id, IActorRef region) : 
         {
             WfNotStarted => new WorkflowNotStarted(),
             WfRunning running => new WorkflowRunning(NameOf(running.State), running.EnteredAt),
-            WfFinished finished => new WorkflowFinished<TOutcome>((TOutcome)finished.Outcome, finished.Kind, finished.At),
+            WfFinished finished => new WorkflowFinished<TOutcome>((TOutcome)finished.Outcome, finished.At),
         };
     }
 

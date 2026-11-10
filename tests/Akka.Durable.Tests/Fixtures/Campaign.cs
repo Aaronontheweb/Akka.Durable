@@ -146,7 +146,6 @@ public static class Campaign
             Start: _ => new Waiting(),
             Work,
             Decide,
-            Kind,
             Cancel: request => new StopRequested(request.Reason, request.By),
             GaveUp: failure => new WorkFailed(failure.What, failure.Reason));
 
@@ -210,14 +209,6 @@ public static class Campaign
             (Waiting or Reminding or Pausing or Escalating, NotYetPaid or CheckOverdue) => ctx.Unexpected(),
             (Verifying, DueDateReached or SendNow or ReminderSent or PauseOver or CollectionsNotified or CollectionsDeclined
                 or GraceOver) => ctx.Unexpected(),
-        };
-
-    public static OutcomeKind Kind(CampaignOutcome outcome) =>
-        outcome switch
-        {
-            PaidInFull => OutcomeKind.Succeeded,
-            SentToCollections => OutcomeKind.Failed,
-            CampaignStopped => OutcomeKind.Cancelled,
         };
 }
 

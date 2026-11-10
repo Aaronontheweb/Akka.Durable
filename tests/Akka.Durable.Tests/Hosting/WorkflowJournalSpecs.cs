@@ -140,7 +140,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
     {
         Assert.Equal(DeepState, RoundTrip(DeepState));
 
-        WfState finished = new WfFinished(Order, (CheckoutOutcome)new OrderPlaced("charge-9"), OutcomeKind.Succeeded,
+        WfState finished = new WfFinished(Order, (CheckoutOutcome)new OrderPlaced("charge-9"),
             new DateTimeOffset(2026, 11, 9, 12, 0, 0, TimeSpan.Zero));
         Assert.Equal(finished, RoundTrip(finished));
     }

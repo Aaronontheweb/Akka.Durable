@@ -124,7 +124,6 @@ public static class Checkout
             Start: _ => new Reserving(),
             Work,
             Decide,
-            Kind,
             Cancel: request => new CancelRequested(request.Reason, request.By),
             GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
 
@@ -180,14 +179,6 @@ public static class Checkout
             (Undoing, Reserved or OutOfStock or Charged or Declined or TicketOpened) => ctx.Unexpected(),
             (NeedsAttention, Reserved or OutOfStock or Charged or Declined or Undone or UndoRefused) => ctx.Unexpected(),
             (Reserving or Charging or Undoing, OperatorSaidRetry or OperatorSaidAbandon) => ctx.Unexpected(),
-        };
-
-    public static OutcomeKind Kind(CheckoutOutcome outcome) =>
-        outcome switch
-        {
-            OrderPlaced => OutcomeKind.Succeeded,
-            OrderFailed => OutcomeKind.Failed,
-            OrderCancelled => OutcomeKind.Cancelled,
         };
 }
 

@@ -9,14 +9,6 @@ namespace Akka.Durable;
 /// </summary>
 public readonly record struct WorkflowTypeName(string Value);
 
-/// <summary>What kind of ending an outcome is.</summary>
-public enum OutcomeKind
-{
-    Succeeded = 0,
-    Failed = 1,
-    Cancelled = 2,
-}
-
 /// <summary>Why a piece of work got no answer.</summary>
 public enum GaveUpReason
 {
@@ -87,7 +79,6 @@ public sealed record WorkflowOptions
 /// know what a state's work is, so it must give the same answer every time.
 /// </param>
 /// <param name="Decide">What a fact means in a state. One table for everything that arrives.</param>
-/// <param name="Kind">What kind of ending an outcome is.</param>
 /// <param name="Cancel">
 /// The fact a cancel arrives as. The table decides what a cancel means in each state.
 /// </param>
@@ -119,7 +110,6 @@ public sealed record WorkflowDefinition<TInput, TState, TFact, TOutcome>(
     Func<TInput, TState> Start,
     Func<TState, WorkContext<TInput, TFact>, WorkList<TFact>> Work,
     Func<TState, TFact, DecideContext<TInput, TState, TOutcome>, Transition<TState, TOutcome>> Decide,
-    Func<TOutcome, OutcomeKind> Kind,
     Func<CancelRequest, TFact> Cancel,
     Func<WorkGaveUp, TFact> GaveUp,
     WorkflowOptions? Options = null)
