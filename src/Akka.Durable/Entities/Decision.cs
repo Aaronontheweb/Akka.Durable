@@ -60,7 +60,15 @@ public sealed record SendEffect(Type CommandType, EntityId Target, object Comman
 // Scheduling effects are backed by Akka.Reminders: the reminder is persisted by the
 // reminder subsystem and delivered back to this entity at least once. Registration
 // happens after the decision's events commit and is NOT atomic with the journal write.
-public sealed record ScheduleEffect(string Key, TimeSpan Delay, object Message);
+public sealed record ScheduleEffect(string Key, TimeSpan Delay, object Message)
+{
+    /// <summary>
+    /// Stores the reminder before the decision's events are persisted, not after. When it cannot be stored,
+    /// nothing is persisted and no other effect runs. Workflows use it for their wake-up reminder.
+    /// </summary>
+    internal bool BeforePersist { get; init; }
+}
+
 public sealed record ScheduleRecurringEffect(string Key, TimeSpan InitialDelay, TimeSpan Interval, object Message);
 public sealed record CancelTimerEffect(string Key);
 

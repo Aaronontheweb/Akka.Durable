@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Akka.Actor;
 using Akka.Cluster.Hosting;
 using Akka.Hosting;
+using Akka.Reminders;
 
 namespace Akka.Durable;
 
@@ -257,6 +258,9 @@ public static class DurableWorkflowHostingExtensions
         // The author's types are carried inside the library's own, so they are checked here by name.
         builder.WithActors((system, _) => DurableEntityHostingExtensions.EnsureSerializable(
             system, "Durable workflow", entity.TypeName, typeof(TInput), typeof(TState), typeof(TFact), typeof(TOutcome)));
+
+        // Every workflow stores a reminder that carries a WfCommand. Without this, Native AOT cannot build its envelope.
+        ReminderMessageTypes.Register<WfCommand>();
 
         // Refs that can send facts find the same actor under a key that also names the fact type.
         return builder.HostEntity<WfState, WfCommand, WfEvent, WorkflowRegion<TInput, TOutcome>>(entity, sharding,

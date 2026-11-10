@@ -103,6 +103,11 @@ public sealed record WorkflowOptions
 /// reply. While the work of the current state is in flight, it is held. When the work settles, the work's
 /// own fact is decided first, then each held fact in the order it arrived, and only then is the work of the
 /// state that follows issued.</para>
+/// <para>A state can also wait for a point in time with <c>ctx.Timer</c>. A wait is not work: it holds nothing,
+/// it never gives up, and it can last months. One durable reminder for each workflow wakes it when a timer is
+/// due, and also when work was interrupted by a crash, so the give-up fact arrives without another message.
+/// The reminder is stored before the decision is journaled. When it cannot be stored, the workflow does
+/// nothing: no fact is journaled and no work is issued.</para>
 /// <para>The workflow is hosted as a durable entity. All four types need a serializer, like an entity's
 /// state, command and event types.</para>
 /// </remarks>
@@ -136,23 +141,90 @@ public sealed record WorkflowDefinition<TInput, TState, TFact, TOutcome>(
 }
 
 /// <summary>
-/// One piece of work a state needs: an effect for its registered <see cref="IEffectHandler{TEffect,TOutcome}"/>,
-/// whose result is one of the workflow's facts.
+/// One thing a state needs: work (<see cref="ExecuteWork{TFact}"/>) or a wait for a point in time
+/// (<see cref="TimerWork{TFact}"/>). Build it with <see cref="WorkContext{TInput,TFact}"/>.
 /// </summary>
-/// <remarks>The effect is plain data: assert on it, log it. Two pieces of work are equal when their effects are.</remarks>
-public sealed record Work<TFact>(object Effect)
+/// <remarks>
+/// <para>Work and a wait are different. Work is a call to a service. It holds facts from outside while it has
+/// no answer, and it gives up after <see cref="WorkflowOptions.AttemptLimit"/>.</para>
+/// <para>A wait holds nothing: a fact from outside is decided at once. It can last months and it never gives
+/// up. When it is due, its fact is decided, unless the workflow has left the state by then.</para>
+/// </remarks>
+public abstract record Work<TFact>
 {
-    // Bound when the work is built, where TEffect is known, so no reflection is needed to find the handler.
-    internal Func<IServiceProvider, Func<CancellationToken, Task<TFact>>>? Resolve { get; init; }
+    private protected Work()
+    {
+    }
 
-    public bool Equals(Work<TFact>? other) => other is not null && Equals(Effect, other.Effect);
-
-    public override int GetHashCode() => Effect.GetHashCode();
+    // Only the library derives from Work: a type outside it cannot override an internal abstract member.
+    internal abstract bool IsWait { get; }
 
     public static implicit operator WorkList<TFact>(Work<TFact> work) => new([work]);
 }
 
-/// <summary>The work a state needs. Empty for a state that only waits.</summary>
+/// <summary>
+/// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for the effect's type, whose result
+/// is one of the workflow's facts.
+/// </summary>
+/// <remarks>The effect is plain data: assert on it, log it. Two pieces of work are equal when their effects are.</remarks>
+public sealed record ExecuteWork<TFact> : Work<TFact>
+{
+    internal ExecuteWork(object effect) => Effect = effect;
+
+    /// <summary>The effect the handler receives.</summary>
+    public object Effect { get; }
+
+    internal override bool IsWait => false;
+
+    // Bound when the work is built, where TEffect is known, so no reflection is needed to find the handler.
+    internal Func<IServiceProvider, Func<CancellationToken, Task<TFact>>>? Resolve { get; init; }
+
+    public bool Equals(ExecuteWork<TFact>? other) => other is not null && Equals(Effect, other.Effect);
+
+    public override int GetHashCode() => Effect.GetHashCode();
+}
+
+/// <summary>
+/// A wait for a point in time. When it is due, the workflow receives <see cref="Fact"/>.
+/// </summary>
+/// <remarks>
+/// <para>The point in time is a duration counted from when the state was entered (<see cref="After"/>), or a
+/// date (<see cref="At"/>). Two timers are equal when their rule and their fact are equal.</para>
+/// <para>A timer is kept by a durable reminder, so it fires after a restart too. When the workflow leaves the
+/// state, the timer is gone. <c>Stay</c> keeps the state, so its timers stay armed.</para>
+/// </remarks>
+public sealed record TimerWork<TFact> : Work<TFact>
+{
+    internal TimerWork(TimeSpan? after, DateTimeOffset? at, TFact fact, DateTimeOffset due)
+    {
+        After = after;
+        At = at;
+        Fact = fact;
+        Due = due;
+    }
+
+    /// <summary>The wait, counted from when the state was entered. Null for a timer given as a date.</summary>
+    public TimeSpan? After { get; }
+
+    /// <summary>The date the timer is due. Null for a timer given as a duration.</summary>
+    public DateTimeOffset? At { get; }
+
+    /// <summary>The fact the workflow receives when the timer is due.</summary>
+    public TFact Fact { get; }
+
+    /// <summary>When the timer is due.</summary>
+    public DateTimeOffset Due { get; }
+
+    internal override bool IsWait => true;
+
+    public bool Equals(TimerWork<TFact>? other) =>
+        other is not null && After == other.After && At == other.At
+        && EqualityComparer<TFact>.Default.Equals(Fact, other.Fact);
+
+    public override int GetHashCode() => HashCode.Combine(After, At, Fact);
+}
+
+/// <summary>What a state needs. Empty for a state that waits only for facts from outside.</summary>
 public sealed record WorkList<TFact>(ImmutableArray<Work<TFact>> Items)
 {
     public static readonly WorkList<TFact> Nothing = new([]);
@@ -164,7 +236,7 @@ public sealed record WorkList<TFact>(ImmutableArray<Work<TFact>> Items)
 
 /// <summary>
 /// What <c>Work</c> may read, plus builders for work. It has no clock: a state's work must be the same every
-/// time it is asked for.
+/// time it is asked for. A timer's duration is counted from <see cref="EnteredAt"/>, which is journaled.
 /// </summary>
 /// <param name="Id">The workflow's id.</param>
 /// <param name="Input">The record the workflow started with.</param>
@@ -175,13 +247,53 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
     /// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for <typeparamref name="TEffect"/>
     /// with the workflow's fact type as its outcome. Build the effect from the state and the input only.
     /// </summary>
-    public Work<TFact> Execute<TEffect>(TEffect effect) where TEffect : notnull
+    /// <remarks>
+    /// Work holds facts from outside while it has no answer. They are decided after the work's own fact.
+    /// </remarks>
+    public ExecuteWork<TFact> Execute<TEffect>(TEffect effect) where TEffect : notnull
     {
         ArgumentNullException.ThrowIfNull(effect);
-        return new Work<TFact>(effect) { Resolve = services => WorkHandlers.Resolve<TEffect, TFact>(services, effect) };
+        return new ExecuteWork<TFact>(effect) { Resolve = services => WorkHandlers.Resolve<TEffect, TFact>(services, effect) };
     }
 
-    /// <summary>For a state that has no work: it waits.</summary>
+    /// <summary>
+    /// A wait that ends <paramref name="after"/> the workflow entered the state. Then the workflow receives
+    /// <paramref name="fact"/>.
+    /// </summary>
+    /// <remarks>
+    /// A wait is not work. It holds nothing: a fact from outside is decided at once. It never gives up.
+    /// <c>Again</c> keeps the time the state was entered, so a duration that has passed is due again at once.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="after"/> is not positive.</exception>
+    public TimerWork<TFact> Timer(TimeSpan after, TFact fact)
+    {
+        if (after <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(after), after, "A timer's duration must be positive.");
+        ArgumentNullException.ThrowIfNull(fact);
+        return new TimerWork<TFact>(after, at: null, fact, EnteredAt + after);
+    }
+
+    /// <summary>A wait that ends at <paramref name="at"/>. Then the workflow receives <paramref name="fact"/>.</summary>
+    /// <remarks>
+    /// A wait is not work. It holds nothing: a fact from outside is decided at once. It never gives up.
+    /// A date that has passed is due at once.
+    /// </remarks>
+    public TimerWork<TFact> Timer(DateTimeOffset at, TFact fact)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        return new TimerWork<TFact>(after: null, at, fact, at);
+    }
+
+    /// <summary>Several things in one state: work, timers, or both. Positions follow the order given.</summary>
+    public WorkList<TFact> All(params Work<TFact>[] work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        foreach (var item in work)
+            ArgumentNullException.ThrowIfNull(item, nameof(work));
+        return new WorkList<TFact>([.. work]);
+    }
+
+    /// <summary>For a state that has no work: it waits for facts from outside.</summary>
     public WorkList<TFact> Nothing() => WorkList<TFact>.Nothing;
 }
 

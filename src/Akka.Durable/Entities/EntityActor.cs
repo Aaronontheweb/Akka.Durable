@@ -338,6 +338,31 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         ImmutableArray<TEvent> events = handled.Events.IsDefault ? [] : handled.Events;
         ImmutableArray<EntityEffect> effects = handled.Effects.IsDefault ? [] : handled.Effects;
 
+        if (!effects.Any(IsBeforePersist))
+        {
+            PersistAndRun(events, effects, origin, reminder);
+            return;
+        }
+
+        // Reminders that must exist before the events do. RunTask suspends the mailbox until the task ends, so
+        // no other command is handled in between. Eventsourced flushes the PersistAll below once the task ends,
+        // and a failure goes to supervision with nothing persisted.
+        var first = effects.Select(effect => effect.Value).OfType<ScheduleEffect>()
+            .Where(schedule => schedule.BeforePersist).ToImmutableArray();
+        var rest = effects.RemoveAll(IsBeforePersist);
+        RunTask(async () =>
+        {
+            foreach (var schedule in first)
+                await ScheduleAsync(schedule);
+            PersistAndRun(events, rest, origin, reminder);
+        });
+    }
+
+    private static bool IsBeforePersist(EntityEffect effect) => effect is ScheduleEffect { BeforePersist: true };
+
+    private void PersistAndRun(
+        ImmutableArray<TEvent> events, ImmutableArray<EntityEffect> effects, IActorRef origin, ReminderEnvelope? reminder)
+    {
         // Zero events is fine here: PersistAll routes onCompleteAsync through the internal
         // *stashing* Defer, so no further commands are processed until the effects are dispatched.
         // (Public DeferAsync does NOT stash - don't swap it in.)
@@ -417,11 +442,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     break;
 
                 case ScheduleEffect schedule:
-                    EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
-                        new ReminderKey(schedule.Key),
-                        _timeProvider.Now + schedule.Delay,
-                        schedule.Message,
-                        ct: _lifetime.Token));
+                    await ScheduleAsync(schedule);
                     break;
 
                 case ScheduleRecurringEffect recurring:
@@ -618,6 +639,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
+
+    private async Task ScheduleAsync(ScheduleEffect schedule) =>
+        EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
+            new ReminderKey(schedule.Key),
+            _timeProvider.Now + schedule.Delay,
+            schedule.Message,
+            ct: _lifetime.Token));
 
     private static void EnsureScheduled(ReminderProtocol.ReminderScheduled result)
     {

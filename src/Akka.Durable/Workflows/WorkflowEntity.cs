@@ -24,9 +24,15 @@ internal sealed record WfNotStarted : IDurableEntityProtocol;
 /// the entry its work was issued for, so an answer to earlier work is not mistaken for current work.
 /// </param>
 /// <param name="EnteredAt">When the workflow entered <paramref name="State"/>.</param>
-/// <param name="Settled">Positions in the state's work list that have been answered during this entry.</param>
+/// <param name="Settled">
+/// Positions in the state's work list that have been answered during this entry. A timer is settled when its
+/// fact is journaled.
+/// </param>
 /// <param name="Held">
 /// Facts that arrived while work was in flight, in arrival order. They are decided when the work settles.
+/// </param>
+/// <param name="IssuedAt">
+/// When the work of this entry was issued: the time of the start, the move or the repeat.
 /// </param>
 [AkkaSerializable(Manifest = "durable-wf-running-v1")]
 internal sealed record WfRunning(
@@ -35,28 +41,39 @@ internal sealed record WfRunning(
     [property: AkkaField(2)] int Entry,
     [property: AkkaField(3)] DateTimeOffset EnteredAt,
     [property: AkkaField(4)] ImmutableArray<int> Settled,
-    [property: AkkaField(5)] ImmutableArray<WfHeldFact> Held) : IDurableEntityProtocol
+    [property: AkkaField(5)] ImmutableArray<WfHeldFact> Held,
+    [property: AkkaField(6)] DateTimeOffset IssuedAt = default) : IDurableEntityProtocol
 {
     /// <summary>The held facts. A state written before this field existed has none.</summary>
     public ImmutableArray<WfHeldFact> HeldFacts => Held.IsDefault ? [] : Held;
+
+    /// <summary>
+    /// When the work of this entry was issued. A state written before <see cref="IssuedAt"/> existed has no
+    /// repeat to tell apart, so it uses the time the state was entered.
+    /// </summary>
+    public DateTimeOffset WorkIssuedAt => IssuedAt == default ? EnteredAt : IssuedAt;
 
     // ImmutableArray compares by reference; compare its contents so records with equal data are equal.
     public bool Equals(WfRunning? other) =>
         other is not null && Equals(Input, other.Input) && Equals(State, other.State) && Entry == other.Entry
         && EnteredAt == other.EnteredAt && Settled.SequenceEqual(other.Settled)
-        && HeldFacts.SequenceEqual(other.HeldFacts);
+        && HeldFacts.SequenceEqual(other.HeldFacts) && IssuedAt == other.IssuedAt;
 
     public override int GetHashCode() =>
-        HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length, HeldFacts.Length);
+        HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length, HeldFacts.Length, IssuedAt);
 }
 
 /// <summary>A fact that arrived while work was in flight.</summary>
 /// <param name="Fact">The author's fact.</param>
 /// <param name="At">When it arrived.</param>
+/// <param name="AnswersEntry">For a timer's fact: the entry the timer belongs to. Null for any other fact.</param>
+/// <param name="AnswersPosition">For a timer's fact: the timer's position in that entry's work list.</param>
 [AkkaSerializable(Manifest = "durable-wf-held-fact-v1")]
 internal sealed record WfHeldFact(
     [property: AkkaField(0)] object Fact,
-    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol;
+    [property: AkkaField(1)] DateTimeOffset At,
+    [property: AkkaField(2)] int? AnswersEntry = null,
+    [property: AkkaField(3)] int? AnswersPosition = null) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-finished-v1")]
 internal sealed record WfFinished(
@@ -112,10 +129,14 @@ internal sealed record WfFactRecorded(
 /// <summary>A fact arrived while work was in flight. It is held, not decided.</summary>
 /// <param name="Fact">The author's fact.</param>
 /// <param name="At">When it arrived.</param>
+/// <param name="AnswersEntry">For a timer's fact: the entry the timer belongs to. Null for any other fact.</param>
+/// <param name="AnswersPosition">For a timer's fact: the timer's position in that entry's work list.</param>
 [AkkaSerializable(Manifest = "durable-wf-held-v1")]
 internal sealed record WfHeld(
     [property: AkkaField(0)] object Fact,
-    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol;
+    [property: AkkaField(1)] DateTimeOffset At,
+    [property: AkkaField(2)] int? AnswersEntry = null,
+    [property: AkkaField(3)] int? AnswersPosition = null) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-event-v1")]
 internal readonly union WfEvent(WfStarted, WfFactRecorded, WfHeld) : IDurableEntityProtocol;
@@ -160,8 +181,14 @@ internal sealed record WfCancel(
     public WfCommand ToCommand() => new(this);
 }
 
+/// <summary>
+/// The payload of the workflow's reminder: decide the timers that are due, and let interrupted work give up.
+/// </summary>
+[AkkaSerializable(Manifest = "durable-wf-wake-v1", AllowEmpty = true)]
+internal sealed record WfWake : IDurableEntityProtocol;
+
 [AkkaSerializable(Manifest = "durable-wf-command-v1")]
-internal readonly union WfCommand(WfStart, WfAnswer, WfDeliver, WfCancel) : IDurableEntityProtocol;
+internal readonly union WfCommand(WfStart, WfAnswer, WfDeliver, WfCancel, WfWake) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-start-accepted-v1", AllowEmpty = true)]
 internal sealed record WfStartAccepted : IDurableEntityProtocol;
@@ -199,6 +226,20 @@ internal readonly union WfDeliveryReply(WfDelivered, WfHeldReply, WfNotStartedRe
 /// <summary>Stands in for the effect of work that was interrupted by a restart. Nothing runs for it.</summary>
 internal sealed record InterruptedWork(object Work);
 
+/// <summary>The workflow's one reminder.</summary>
+internal static class WorkflowWake
+{
+    /// <summary>The reminder's key. Storing it again replaces it.</summary>
+    public const string Key = "durable-workflow-wake";
+
+    /// <summary>
+    /// How long after <see cref="WorkflowOptions.AttemptLimit"/> the reminder wakes a workflow whose work has no
+    /// answer. If the process died in the middle of a call, the wake activates the workflow, and the interrupted
+    /// work gives up. A live workflow has its answer or its give-up by then, so the wake finds nothing to do.
+    /// </summary>
+    public static readonly TimeSpan BackstopMargin = TimeSpan.FromSeconds(5);
+}
+
 /// <summary>
 /// Turns a <see cref="WorkflowDefinition{TInput,TState,TFact,TOutcome}"/> into the entity definition that hosts it.
 /// </summary>
@@ -209,16 +250,17 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     where TFact : notnull
     where TOutcome : notnull
 {
+    private static readonly WfCommand Wake = new WfWake();
     private static readonly WfStartReply Accepted = new WfStartAccepted();
     private static readonly WfStartReply RefusedRunning = new WfStartRefusedRunning();
     private static readonly WfDeliveryReply Delivered = new WfDelivered();
     private static readonly WfDeliveryReply HeldReply = new WfHeldReply();
     private static readonly WfDeliveryReply NotStarted = new WfNotStartedReply();
 
+    private readonly WorkflowOptions _options = definition.Options ?? WorkflowOptions.Default;
+
     public EntityDefinition<WfState, WfCommand, WfEvent> Compile()
     {
-        var options = definition.Options ?? WorkflowOptions.Default;
-
         // A message sent to the workflow's address by an actor is a fact. That actor expects no reply.
         var accepted = ImmutableDictionary<Type, Func<object, WfCommand>>.Empty
             .SetItem(typeof(TFact), message => new WfDeliver(message, WantsReply: false));
@@ -230,14 +272,27 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             _ => new WfNotStarted(),
             Decide,
             WorkflowEvolve.Evolve,
-            options.Hosting with { EffectTimeout = options.AttemptLimit })
+            _options.Hosting with { EffectTimeout = _options.AttemptLimit })
         {
             Resume = Resume,
             Accepted = accepted,
         };
     }
 
+    /// <summary>
+    /// Decides a command. A decision that journals something, or that handles a wake, also stores the reminder
+    /// for the position the workflow is left in.
+    /// </summary>
     private Decision<WfCommand, WfEvent> Decide(
+        WfState state, WfCommand command, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var decision = DecideCommand(state, command, ctx);
+        return decision is Handled<WfCommand, WfEvent> handled && (command is WfWake || !handled.Events.IsDefaultOrEmpty)
+            ? ArmWake(state, handled, ctx)
+            : decision;
+    }
+
+    private Decision<WfCommand, WfEvent> DecideCommand(
         WfState state, WfCommand command, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
         (state, command) switch
         {
@@ -264,6 +319,11 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
                 ReplyIf(ctx.None(), deliver, deliver.WantsReply, new WfClosedReply(finished.Outcome)),
             (WfFinished finished, WfCancel cancel) =>
                 ReplyIf(ctx.None(), cancel, wantsReply: true, new WfClosedReply(finished.Outcome)),
+
+            (WfRunning running, WfWake) => WakeUp(running, ctx),
+
+            // A stale wake: the workflow is not started, or it has finished and needs no wake.
+            (WfNotStarted or WfFinished, WfWake) => ctx.Ignore(),
         };
 
     private Handled<WfCommand, WfEvent> Begin(WfStart start, DecisionContext<WfState, WfCommand, WfEvent> ctx)
@@ -284,13 +344,13 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         {
             // Work is issued once for each entry, so a second answer to the same work is not expected.
             if (running.Settled.Contains(answer.Index)) return ctx.Ignore();
-            return Advance(running, answer.Fact, answer.Index, ctx, ctx.None());
+            return Advance(running, [(answer.Fact, answer.Index)], ctx, ctx.None());
         }
 
         // A late answer, to work of an earlier entry. It settles nothing, so it is treated like a fact from outside.
         return InFlight(running, ctx)
             ? ctx.Persist(new WfHeld(answer.Fact, ctx.UtcNow))
-            : Advance(running, answer.Fact, answered: null, ctx, ctx.None());
+            : Advance(running, [(answer.Fact, null)], ctx, ctx.None());
     }
 
     /// <summary>A fact from outside: held while work is in flight, otherwise decided at once.</summary>
@@ -302,7 +362,27 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
         InFlight(running, ctx)
             ? ReplyIf(ctx.Persist(new WfHeld(fact, ctx.UtcNow)), request, wantsReply, HeldReply)
-            : Advance(running, fact, answered: null, ctx, ReplyIf(ctx.None(), request, wantsReply, Delivered));
+            : Advance(running, [(fact, null)], ctx, ReplyIf(ctx.None(), request, wantsReply, Delivered));
+
+    /// <summary>
+    /// The reminder arrived. Decides the timers of the current entry that are due, in list order. While work is
+    /// in flight their facts are held instead, like facts from outside.
+    /// </summary>
+    private Decision<WfCommand, WfEvent> WakeUp(WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var due = DueTimers(running, ctx);
+
+        // An early or a stale wake. Nothing is journaled. This delivery is acknowledged, so a workflow that still
+        // needs a wake gets its reminder stored again.
+        if (due.Count == 0) return NextWake(running, ctx) is null ? ctx.Ignore() : ctx.None();
+
+        // A held timer fact remembers its timer: it is not held twice, and it settles the timer when it is decided.
+        if (InFlight(running, ctx))
+            return ctx.Persist([.. due.Select(timer =>
+                (WfEvent)new WfHeld(timer.Work.Fact, ctx.UtcNow, running.Entry, timer.Position))]);
+
+        return Advance(running, [.. due.Select(timer => ((object)timer.Work.Fact, (int?)timer.Position))], ctx, ctx.None());
+    }
 
     private static Handled<WfCommand, WfEvent> ReplyIf(
         Handled<WfCommand, WfEvent> handled,
@@ -312,21 +392,103 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         wantsReply ? handled.Reply(request, reply) : handled;
 
     /// <summary>
-    /// True when a piece of the current entry's work has no answer yet. The state a workflow is in always has
-    /// its work issued: a state and its work come from one decision.
+    /// True when a piece of the current entry's work has no answer yet. Timers do not count: a wait holds
+    /// nothing. The state a workflow is in always has its work issued: a state and its work come from one decision.
     /// </summary>
     private bool InFlight(WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
-        WorkOf((TState)running.State, ctx, (TInput)running.Input, running.EnteredAt).Length > running.Settled.Length;
+        HasWorkInFlight(WorkOf(running, ctx), running.Settled);
+
+    private static bool HasWorkInFlight(ImmutableArray<Work<TFact>> work, ImmutableArray<int> settled)
+    {
+        for (var position = 0; position < work.Length; position++)
+            if (work[position] is ExecuteWork<TFact> && !settled.Contains(position))
+                return true;
+
+        return false;
+    }
+
+    /// <summary>A timer of the current entry is answered by a held fact when its fact was held and not yet decided.</summary>
+    private static bool IsHeld(WfRunning running, int position) =>
+        running.HeldFacts.Any(held => held.AnswersEntry == running.Entry && held.AnswersPosition == position);
+
+    /// <summary>The timers of the current entry that are due, not settled, and not held, in list order.</summary>
+    private List<(int Position, TimerWork<TFact> Work)> DueTimers(
+        WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var work = WorkOf(running, ctx);
+        var due = new List<(int, TimerWork<TFact>)>();
+        for (var position = 0; position < work.Length; position++)
+            if (work[position] is TimerWork<TFact> timer && timer.Due <= ctx.UtcNow
+                && !running.Settled.Contains(position) && !IsHeld(running, position))
+                due.Add((position, timer));
+
+        return due;
+    }
 
     /// <summary>
-    /// Decides a fact, then each held fact in arrival order while no work is in flight, and journals them all
-    /// in one write. The work of the state the workflow ends in is issued last, once.
+    /// When the workflow next needs a wake: the earliest timer that is neither settled nor held, and, while work
+    /// has no answer, the time by which it must have answered or given up. Null when nothing needs a wake.
     /// </summary>
-    /// <param name="answered">The position of the work the first fact answers, when it answers current work.</param>
+    private DateTimeOffset? NextWake(WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var work = WorkOf(running, ctx);
+        DateTimeOffset? wake = null;
+        var working = false;
+        for (var position = 0; position < work.Length; position++)
+        {
+            if (running.Settled.Contains(position)) continue;
+
+            switch (work[position])
+            {
+                case TimerWork<TFact> timer when !IsHeld(running, position):
+                    wake = Earliest(wake, timer.Due);
+                    break;
+
+                case ExecuteWork<TFact>:
+                    working = true;
+                    break;
+            }
+        }
+
+        if (!working) return wake;
+
+        // Work that is still in flight past this time is running in this process: look again a margin later.
+        var backstop = running.WorkIssuedAt + _options.AttemptLimit + WorkflowWake.BackstopMargin;
+        return Earliest(wake, backstop > ctx.UtcNow ? backstop : ctx.UtcNow + WorkflowWake.BackstopMargin);
+    }
+
+    private static DateTimeOffset Earliest(DateTimeOffset? current, DateTimeOffset candidate) =>
+        current is { } known && known <= candidate ? known : candidate;
+
+    /// <summary>
+    /// Stores the reminder for the position <paramref name="handled"/> leaves the workflow in, before its events
+    /// are journaled. When that write fails, the workflow stays where it was and needs that position's wake.
+    /// The one reminder is due at the earlier of the two; a wake that finds nothing due stores it again.
+    /// </summary>
+    private Handled<WfCommand, WfEvent> ArmWake(
+        WfState before, Handled<WfCommand, WfEvent> handled, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var after = handled.Events.IsDefaultOrEmpty ? before : handled.Events.Aggregate(before, WorkflowEvolve.Evolve);
+        if (after is not WfRunning running || NextWake(running, ctx) is not { } wake) return handled;
+
+        if (before is WfRunning was && NextWake(was, ctx) is { } earlier) wake = Earliest(earlier, wake);
+
+        var delay = wake > ctx.UtcNow ? wake - ctx.UtcNow : TimeSpan.Zero;
+        return handled.Add(new ScheduleEffect(WorkflowWake.Key, delay, Wake) { BeforePersist = true });
+    }
+
+    /// <summary>
+    /// Decides the given facts, then each held fact in arrival order while no work is in flight, and journals
+    /// them all in one write. The work of the state the workflow ends in is issued last, once.
+    /// </summary>
+    /// <param name="facts">
+    /// The facts to decide, each with the position of the work it answers when it answers current work. The
+    /// first is always decided. Each further one is a timer of the same entry, decided only while the workflow
+    /// is still in that entry.
+    /// </param>
     private Handled<WfCommand, WfEvent> Advance(
         WfRunning running,
-        object firstFact,
-        int? answered,
+        IReadOnlyList<(object Fact, int? Answered)> facts,
         DecisionContext<WfState, WfCommand, WfEvent> ctx,
         Handled<WfCommand, WfEvent> handled)
     {
@@ -384,14 +546,21 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             }
         }
 
-        bool WorkInFlight() => issued && WorkOf(state, ctx, input, enteredAt).Length > settled.Length;
+        bool WorkInFlight() => issued && HasWorkInFlight(WorkOf(state, ctx, input, enteredAt), settled);
 
-        Step(firstFact, answered, fromHeld: false);
+        foreach (var (fact, answered) in facts)
+        {
+            if (finished || entry != running.Entry) break;
+            Step(fact, answered, fromHeld: false);
+        }
+
         while (!finished && !held.IsEmpty && !WorkInFlight())
         {
             var next = held[0];
             held = held.RemoveAt(0);
-            Step(next.Fact, position: null, fromHeld: true);
+
+            // A held timer fact settles its timer only in the entry it was held in. Otherwise it is a late fact.
+            Step(next.Fact, next.AnswersEntry == entry ? next.AnswersPosition : null, fromHeld: true);
         }
 
         handled = handled.Persist([.. events]);
@@ -412,19 +581,20 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
 
     /// <summary>
     /// After a restart: every piece of the state's work that has no answer was interrupted. It is not issued
-    /// again. The workflow receives the give-up fact for it, and the table decides.
+    /// again. The workflow receives the give-up fact for it, and the table decides. Timers need nothing here:
+    /// the reminder still covers them.
     /// </summary>
     private Handled<WfCommand, WfEvent> Resume(WfState state, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
         var handled = ctx.None();
         if (state is not WfRunning running) return handled;
 
-        var work = WorkOf((TState)running.State, ctx, (TInput)running.Input, running.EnteredAt);
+        var work = WorkOf(running, ctx);
         for (var index = 0; index < work.Length; index++)
         {
-            if (running.Settled.Contains(index)) continue;
+            if (running.Settled.Contains(index) || work[index] is not ExecuteWork<TFact> execute) continue;
 
-            var effect = work[index].Effect;
+            var effect = execute.Effect;
             object answer = (WfCommand)new WfAnswer(running.Entry, index,
                 definition.GaveUp(new WorkGaveUp(effect, GaveUpReason.Interrupted)));
 
@@ -438,7 +608,10 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         return handled;
     }
 
-    /// <summary>Adds the work of <paramref name="state"/> to a decision, to run once its events are journaled.</summary>
+    /// <summary>
+    /// Adds the work of <paramref name="state"/> to a decision, to run once its events are journaled. Timers are
+    /// not issued: the reminder covers them.
+    /// </summary>
     private Handled<WfCommand, WfEvent> Issue(
         Handled<WfCommand, WfEvent> handled,
         DecisionContext<WfState, WfCommand, WfEvent> ctx,
@@ -449,10 +622,14 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     {
         var work = WorkOf(state, ctx, input, enteredAt);
         for (var index = 0; index < work.Length; index++)
-            handled = handled.Add(Execute(work[index], entry, index));
+            if (work[index] is ExecuteWork<TFact> execute)
+                handled = handled.Add(Execute(execute, entry, index));
 
         return handled;
     }
+
+    private ImmutableArray<Work<TFact>> WorkOf(WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
+        WorkOf((TState)running.State, ctx, (TInput)running.Input, running.EnteredAt);
 
     private ImmutableArray<Work<TFact>> WorkOf(
         TState state, DecisionContext<WfState, WfCommand, WfEvent> ctx, TInput input, DateTimeOffset enteredAt)
@@ -464,7 +641,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         return list.Items.IsDefault ? [] : list.Items;
     }
 
-    private ExecuteEffect Execute(Work<TFact> work, int entry, int index)
+    private ExecuteEffect Execute(ExecuteWork<TFact> work, int entry, int index)
     {
         if (work.Resolve is null)
             throw new InvalidOperationException("Work must be created through WorkContext.Execute.");
@@ -494,9 +671,12 @@ internal static class WorkflowEvolve
     public static WfState Evolve(WfState state, WfEvent @event) =>
         (state, @event) switch
         {
-            (WfNotStarted, WfStarted started) => new WfRunning(started.Input, started.First, 1, started.At, [], []),
-            (WfRunning running, WfHeld held) =>
-                running with { Held = running.HeldFacts.Add(new WfHeldFact(held.Fact, held.At)) },
+            (WfNotStarted, WfStarted started) =>
+                new WfRunning(started.Input, started.First, 1, started.At, [], [], started.At),
+            (WfRunning running, WfHeld held) => running with
+            {
+                Held = running.HeldFacts.Add(new WfHeldFact(held.Fact, held.At, held.AnswersEntry, held.AnswersPosition)),
+            },
             // A fact taken from the held list leaves it, then its step applies as for any fact.
             (WfRunning running, WfFactRecorded { FromHeld: true } recorded) =>
                 Apply(running with { Held = running.HeldFacts.RemoveAt(0) }, recorded),
@@ -506,14 +686,16 @@ internal static class WorkflowEvolve
                 "That event cannot follow that state, so the journal is not one this workflow wrote."),
         };
 
+    // A move and a repeat issue the work of the new entry, so they set the time the work was issued.
     private static WfState Apply(WfRunning running, WfFactRecorded recorded) =>
         recorded.Step switch
         {
             WfMoved moved => running with
             {
                 State = moved.Next, Entry = running.Entry + 1, EnteredAt = recorded.At, Settled = [],
+                IssuedAt = recorded.At,
             },
-            WfRepeated => running with { Entry = running.Entry + 1, Settled = [] },
+            WfRepeated => running with { Entry = running.Entry + 1, Settled = [], IssuedAt = recorded.At },
             WfEnded ended => new WfFinished(running.Input, ended.Outcome, ended.Kind, recorded.At),
             WfKept or WfUnexpected => recorded.Answered is { } index
                 ? running with { Settled = running.Settled.Add(index) }
