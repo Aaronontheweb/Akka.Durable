@@ -151,6 +151,25 @@ public sealed class SwitchableReminderStorage : IConditionalReminderMutationStor
     private readonly ConcurrentDictionary<string, int> _deliveries = new();
     private volatile bool _failing;
     private int _failedWrites;
+    private volatile bool _failingCancels;
+    private int _refusedCancels;
+
+    /// <summary>Cancelling a reminder fails while this is set.</summary>
+    public bool FailingCancels
+    {
+        get => _failingCancels;
+        set => _failingCancels = value;
+    }
+
+    /// <summary>The cancels refused while <see cref="FailingCancels"/> was set.</summary>
+    public int RefusedCancels => Volatile.Read(ref _refusedCancels);
+
+    private void RefuseCancelWhenSet()
+    {
+        if (!_failingCancels) return;
+        Interlocked.Increment(ref _refusedCancels);
+        throw new InvalidOperationException("The reminder storage refuses to cancel.");
+    }
 
     public bool Failing
     {
@@ -196,15 +215,21 @@ public sealed class SwitchableReminderStorage : IConditionalReminderMutationStor
         return committed;
     }
 
-    public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default) =>
-        _inner.CancelReminderAsync(entity, key, ct);
+    public Task<ReminderProtocol.RemindersCancelled> CancelReminderAsync(ReminderEntity entity, ReminderKey key, CancellationToken ct = default)
+    {
+        RefuseCancelWhenSet();
+        return _inner.CancelReminderAsync(entity, key, ct);
+    }
 
     public Task<IReadOnlyList<ScheduledReminder>> GetRemindersForEntityAsync(
         ReminderEntity entity, int take = 10, int skip = 0, CancellationToken ct = default) =>
         _inner.GetRemindersForEntityAsync(entity, take, skip, ct);
 
-    public Task<ReminderProtocol.RemindersCancelled> CancelAllRemindersForEntityAsync(ReminderEntity entity, CancellationToken ct = default) =>
-        _inner.CancelAllRemindersForEntityAsync(entity, ct);
+    public Task<ReminderProtocol.RemindersCancelled> CancelAllRemindersForEntityAsync(ReminderEntity entity, CancellationToken ct = default)
+    {
+        RefuseCancelWhenSet();
+        return _inner.CancelAllRemindersForEntityAsync(entity, ct);
+    }
 
     public Task<ReminderOverview> GetRemindersOverviewAsync(DateTimeOffset now, CancellationToken ct = default) =>
         _inner.GetRemindersOverviewAsync(now, ct);
