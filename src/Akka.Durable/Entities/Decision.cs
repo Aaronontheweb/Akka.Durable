@@ -233,6 +233,18 @@ public static class Decisions
     public static Stashed Stash() => new();
 }
 
+/// <summary>
+/// No <c>IEffectHandler</c> is registered for an effect. A deployment mistake, not a failure of the handler, so
+/// the logging site tells it apart by type and says it loudly.
+/// </summary>
+internal sealed class MissingEffectHandlerException(Type effectType, Type resultType) : InvalidOperationException(
+    $"No effect handler is registered for {effectType.Name}. " +
+    $"Register an IEffectHandler<{effectType.Name}, {resultType.Name}>.")
+{
+    internal string EffectType { get; } = effectType.Name;
+    internal string HandlerInterface { get; } = $"IEffectHandler<{effectType.Name}, {resultType.Name}>";
+}
+
 internal static class EffectHandlers
 {
     /// <summary>
@@ -243,9 +255,7 @@ internal static class EffectHandlers
         IServiceProvider services, TEffect effect) where TEffect : notnull
     {
         var handler = services.GetService<IEffectHandler<TEffect, TCommand>>()
-            ?? throw new InvalidOperationException(
-                $"No effect handler is registered for {typeof(TEffect)}. Register an " +
-                $"IEffectHandler<{typeof(TEffect).Name}, {typeof(TCommand).Name}>.");
+            ?? throw new MissingEffectHandlerException(typeof(TEffect), typeof(TCommand));
 
         return async ct => await handler.HandleAsync(effect, ct);
     }

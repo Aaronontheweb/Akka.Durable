@@ -298,15 +298,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 // The state already records that the effect was issued. Resume re-derives it on the next
                 // incarnation and a retry arm in Decide can re-issue it sooner. A handler that has to report a
                 // failure to the entity returns it as an outcome instead of throwing.
-                _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. State is unchanged.",
-                    completed.Effect, EntityType.Value, _entityId.Value);
+                LogFailedEffect(completed.Effect, failure, "State is unchanged.");
                 StopIfRequested();
                 return;
             }
 
             // The effect says what a failure means to this entity: it is an outcome like any other.
-            _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. The entity decides on the failure.",
-                completed.Effect, EntityType.Value, _entityId.Value);
+            LogFailedEffect(completed.Effect, failure, "The entity decides on the failure.");
             outcome = completed.Failed(failure);
         }
 
@@ -327,6 +325,21 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     $"not a {typeof(TCommand)}. A handler returns one of the entity's commands.");
         }
     }
+
+    private void LogFailedEffect(object effect, Exception failure, string consequence)
+    {
+        if (failure is MissingEffectHandlerException missing)
+            LogMissingHandler(missing);
+        else
+            _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. {3}",
+                effect, EntityType.Value, _entityId.Value, consequence);
+    }
+
+    // The effect's contents may hold personal data, so only its type is named.
+    private void LogMissingHandler(MissingEffectHandlerException missing) =>
+        _log.Error("No effect handler is registered for effect {0} issued by [{1}/{2}]. Register an {3} in the " +
+                   "service provider. The effect was not run.",
+            missing.EffectType, EntityType.Value, _entityId.Value, missing.HandlerInterface);
 
     private void Commit(Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder)
     {
@@ -465,8 +478,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             // Only the handler's own run is best effort.
             invoke = execute.Resolve(scope.ServiceProvider);
         }
-        catch
+        catch (Exception ex)
         {
+            if (ex is MissingEffectHandlerException missing)
+                LogMissingHandler(missing);
             await scope.DisposeAsync();
             throw;
         }

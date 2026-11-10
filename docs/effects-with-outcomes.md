@@ -27,7 +27,7 @@ The [invoice in the README](../README.md#define-its-behavior) does this for reci
 
 ## The handler returns a command
 
-The second type argument of the handler's registration is the entity's command type. The result goes through `Decide` like any other command, so `Decide` can decline it, retry, or ignore it. Exactly one handler is registered per effect type. `VerifyRecipientHandler` is one:
+The second type argument of the handler's registration is the entity's command type. The result goes through `Decide` like any other command, so `Decide` can decline it, retry, or ignore it. Exactly one handler is registered per effect type. An effect with no handler is a deployment mistake: an error is logged that names the effect type and the `IEffectHandler` to register, and the entity restarts under its supervisor. `VerifyRecipientHandler` is one:
 
 ```csharp
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
