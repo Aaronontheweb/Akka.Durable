@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Akka.Serialization.V2;
 using Microsoft.Extensions.Logging;
 
@@ -644,7 +645,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             Resolve = services =>
             {
                 var invoke = work.Resolve(services);
-                return async ct => (WfCommand)new WfAnswer(entry, index, await invoke(ct));
+                return async ct => (WfCommand)new WfAnswer(entry, index, FactOf(await invoke(ct), work.Effect));
             },
 
             // A failure or a timeout is an answer too: the fact the definition names for work that gave up.
@@ -654,6 +655,15 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
                 failure.Message))),
         };
     }
+
+    /// <summary>
+    /// Work must answer with a fact. A null, or a union that holds no value, cannot be decided by the table, so it
+    /// is a failure of the work like any other and the workflow receives the give-up fact.
+    /// </summary>
+    private static TFact FactOf(TFact fact, object work) =>
+        fact is null or IUnion { Value: null }
+            ? throw new InvalidOperationException($"The work {work} answered with no fact.")
+            : fact;
 
     private static WorkflowId IdOf(DecisionContext<WfState, WfCommand, WfEvent> ctx) => new(ctx.EntityId.Value);
 }

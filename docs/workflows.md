@@ -228,6 +228,7 @@ A send is work, like `Execute`:
 - Facts from outside are held while the send has no reply.
 - If the entity sends no reply within the time limit for work, the work times out. The workflow receives the give-up fact with `TimedOut`.
 - If the entity type is not hosted, the workflow receives the give-up fact with `Failed`. The error names the command protocol.
+- If the function that turns the reply into a fact throws, or returns no fact, the workflow receives the give-up fact with `Failed`. The entity has applied the command by then.
 
 After a give-up, the command may or may not have been applied. The entity can journal its event and the reply can still be lost. So the entity must answer a repeated command safely. For example, it can reply with the result it recorded the first time.
 

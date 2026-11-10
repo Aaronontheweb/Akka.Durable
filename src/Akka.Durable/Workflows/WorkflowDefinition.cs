@@ -19,7 +19,10 @@ public enum GaveUpReason
     /// </summary>
     Failed = 0,
 
-    /// <summary>The handler did not answer within <see cref="EntityOptions.EffectTimeout"/>.</summary>
+    /// <summary>
+    /// The handler, or the entity a command was sent to, did not answer within
+    /// <see cref="EntityOptions.EffectTimeout"/>.
+    /// </summary>
     TimedOut = 1,
 
     /// <summary>
@@ -160,7 +163,7 @@ public sealed record ExecuteWork<TFact> : Work<TFact>
 {
     internal ExecuteWork(object effect) => Effect = effect;
 
-    /// <summary>The effect the handler receives.</summary>
+    /// <summary>The effect the handler receives. For a send, the <see cref="SendEffect"/> that names the entity and the command.</summary>
     public object Effect { get; }
 
     internal override bool IsWait => false;
@@ -253,6 +256,8 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
     /// <para>This is work like <see cref="Execute{TEffect}"/>, with no effect handler to write. The command is sent
     /// once. When the entity does not reply in the time limit for work, or its entity type is not hosted, the
     /// workflow receives the give-up fact.</para>
+    /// <para>When <paramref name="then"/> throws, or returns no fact, the work fails and the workflow receives the
+    /// give-up fact. The entity has applied the command by then.</para>
     /// <para>After a give-up the command may have been applied, so the entity must answer a repeated command
     /// safely. Two sends are equal when their target and command are equal.</para>
     /// </remarks>
