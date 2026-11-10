@@ -27,7 +27,7 @@ The definition holds these functions:
 | `Cancel` | Turns a cancel request into one of your facts. |
 | `GaveUp` | Turns the notice "this work got no answer" into one of your facts. |
 
-`WorkflowDefinition` also takes a `WorkflowTypeName`, and optional `WorkflowOptions`.
+`WorkflowDefinition` also takes a `WorkflowTypeName`, and optional `EntityOptions`: the settings of the entity type that hosts the workflow.
 
 ### Example: a checkout
 
@@ -184,7 +184,7 @@ Sometimes work gets no answer. The workflow then receives the give-up fact: the 
 |---|---|
 | The handler throws. | `Failed` |
 | No handler is registered for the effect. | `Failed` |
-| The handler does not answer within `WorkflowOptions.AttemptLimit` (30 seconds by default). | `TimedOut` |
+| The handler does not answer within `EntityOptions.EffectTimeout` (30 seconds by default). | `TimedOut` |
 | The workflow restarted after it entered the state and before the answer arrived. | `Interrupted` |
 
 For `Interrupted`, the work may have run, may have run in part, or may not have run. Nothing runs again after the restart. The workflow receives the give-up fact for the work that had no answer.
@@ -193,10 +193,10 @@ No answer does not mean the work did not happen. A charge can go through and its
 
 The checkout sends every give-up fact to `NeedsAttention`. That state opens a support ticket and waits for a person.
 
-To set the attempt limit, pass options to the definition:
+To set the time one attempt may take, pass options to the definition:
 
 ```csharp
-Checkout.Definition with { Options = new WorkflowOptions { AttemptLimit = TimeSpan.FromSeconds(10) } }
+Checkout.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(10) } }
 ```
 
 ## Timers, and several things in one state
@@ -220,7 +220,7 @@ public static WorkList<CampaignFact> Work(CampaignState state, WorkContext<Invoi
 - `ctx.All` gives a state several things at once: here a piece of work and a time limit for it.
 - When the workflow leaves a state, that state's timers are gone. There is nothing to cancel.
 
-Work and a wait are different. An `Execute` is work: it expects an answer within the attempt limit, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
+Work and a wait are different. An `Execute` is work: it expects an answer within `EffectTimeout`, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
 
 ### The reminder
 

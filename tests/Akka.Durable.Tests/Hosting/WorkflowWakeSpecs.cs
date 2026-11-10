@@ -11,15 +11,15 @@ namespace Akka.Durable.Tests.Hosting;
 /// </summary>
 public abstract class WorkflowWakeSpecs(ITestOutputHelper output) : CampaignWorkflowKit(output)
 {
-    private static readonly TimeSpan AttemptLimit = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan EffectTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan Long = TimeSpan.FromHours(1);
 
     // The backstop wake is due this long after the work was issued. Allow for its delivery and the decision.
     private static readonly TimeSpan BackstopArrives =
-        AttemptLimit + WorkflowWake.BackstopMargin + TimeSpan.FromSeconds(5);
+        EffectTimeout + WorkflowWake.BackstopMargin + TimeSpan.FromSeconds(5);
 
     protected override WorkflowDefinition<Invoice, CampaignState, CampaignFact, CampaignOutcome> Definition =>
-        Campaign.Definition with { Options = new WorkflowOptions { AttemptLimit = AttemptLimit } };
+        Campaign.Definition with { Options = EntityOptions.Default with { EffectTimeout = EffectTimeout } };
 
     [Fact]
     public async Task A_workflow_whose_process_died_during_a_call_is_woken_and_the_interrupted_work_gives_up()
@@ -44,8 +44,8 @@ public abstract class WorkflowWakeSpecs(ITestOutputHelper output) : CampaignWork
 
         await StopWorkflow("g1");
         await interrupted.Task.WaitAsync(TestCancellation);
-        Assert.True(DateTimeOffset.UtcNow < reminding.IssuedAt + AttemptLimit,
-            "The call reached its attempt limit before the workflow stopped; the test proves nothing.");
+        Assert.True(DateTimeOffset.UtcNow < reminding.IssuedAt + EffectTimeout,
+            "The call reached its effect timeout before the workflow stopped; the test proves nothing.");
 
         // Nothing is sent to the workflow. The reminder activates it, the interrupted send gives up, the table
         // pauses the campaign, and after the pause the reminder is sent again.
@@ -56,7 +56,7 @@ public abstract class WorkflowWakeSpecs(ITestOutputHelper output) : CampaignWork
         // The start, the due date, the give-up, and the end of the pause.
         var again = await AwaitRunning("g1", running => Assert.Equal(new Reminding(1), StateOf(running)));
         Assert.Equal(4, (await HostedState("g1")).SequenceNr);
-        Assert.True(again.EnteredAt >= reminding.IssuedAt + AttemptLimit);
+        Assert.True(again.EnteredAt >= reminding.IssuedAt + EffectTimeout);
     }
 
     [Fact]

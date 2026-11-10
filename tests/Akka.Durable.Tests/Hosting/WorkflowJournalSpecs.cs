@@ -26,14 +26,11 @@ public abstract class WorkflowJournalSpecs(ITestOutputHelper output) : CheckoutW
     protected override WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> Definition =>
         Checkout.Definition with
         {
-            Options = new WorkflowOptions
+            Options = EntityOptions.Default with
             {
-                Hosting = EntityOptions.Default with
-                {
-                    JournalPluginId = "akka.persistence.journal.sql",
-                    SnapshotPluginId = "akka.persistence.snapshot-store.sql",
-                    SnapshotEvery = SnapshotEvery,
-                },
+                JournalPluginId = "akka.persistence.journal.sql",
+                SnapshotPluginId = "akka.persistence.snapshot-store.sql",
+                SnapshotEvery = SnapshotEvery,
             },
         };
 

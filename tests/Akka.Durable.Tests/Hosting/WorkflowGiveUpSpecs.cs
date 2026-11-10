@@ -8,13 +8,13 @@ namespace Akka.Durable.Tests.Hosting;
 /// <summary>
 /// Work that runs out of time gets no second attempt: the workflow receives the give-up fact.
 /// </summary>
-public sealed class WorkflowAttemptLimitSpecs(ITestOutputHelper output) : CheckoutWorkflowKit(output)
+public sealed class WorkflowEffectTimeoutSpecs(ITestOutputHelper output) : CheckoutWorkflowKit(output)
 {
     protected override WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> Definition =>
-        Checkout.Definition with { Options = new WorkflowOptions { AttemptLimit = TimeSpan.FromMilliseconds(300) } };
+        Checkout.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromMilliseconds(300) } };
 
     [Fact]
-    public async Task Work_that_takes_longer_than_the_attempt_limit_gives_up()
+    public async Task Work_that_takes_longer_than_the_effect_timeout_gives_up()
     {
         Services.Charge = (_, ct) => Never(ct);
 

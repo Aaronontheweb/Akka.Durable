@@ -211,7 +211,7 @@ internal static class WorkflowWake
     public const string Key = "durable-workflow-wake";
 
     /// <summary>
-    /// How long after <see cref="WorkflowOptions.AttemptLimit"/> the reminder wakes a workflow whose work has no
+    /// How long after <see cref="EntityOptions.EffectTimeout"/> the reminder wakes a workflow whose work has no
     /// answer. If the process died in the middle of a call, the wake activates the workflow, and the interrupted
     /// work gives up. A live workflow has its answer or its give-up by then, so the wake finds nothing to do.
     /// </summary>
@@ -234,7 +234,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     private static readonly WfDeliveryReply HeldReply = new WfHeldReply();
     private static readonly WfDeliveryReply NotStarted = new WfNotStartedReply();
 
-    private readonly WorkflowOptions _options = definition.Options ?? WorkflowOptions.Default;
+    private readonly EntityOptions _options = definition.Options ?? EntityOptions.Default;
 
     public EntityDefinition<WfState, WfCommand, WfEvent> Compile()
     {
@@ -249,7 +249,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             _ => new WfNotStarted(),
             Decide,
             WorkflowEvolve.Evolve,
-            _options.Hosting with { EffectTimeout = _options.AttemptLimit })
+            _options)
         {
             Resume = Resume,
             Accepted = accepted,
@@ -427,7 +427,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         if (HasWorkInFlight(work, running.Settled))
         {
             // Work that is still in flight past this time is running in this process: look again a margin later.
-            var backstop = running.IssuedAt + _options.AttemptLimit + WorkflowWake.BackstopMargin;
+            var backstop = running.IssuedAt + _options.EffectTimeout + WorkflowWake.BackstopMargin;
             return backstop > reached ? backstop : ctx.UtcNow + WorkflowWake.BackstopMargin;
         }
 
