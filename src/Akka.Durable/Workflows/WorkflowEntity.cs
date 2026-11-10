@@ -219,6 +219,60 @@ internal static class WorkflowWake
     public static readonly TimeSpan BackstopMargin = TimeSpan.FromSeconds(5);
 }
 
+/// <summary>A value in a workflow's journal whose type is not the one the definition gives it.</summary>
+/// <param name="What">What the value is: the input, the state, a held fact or the outcome.</param>
+internal readonly record struct StoredTypeMismatch(string What, Type Stored, Type Expected);
+
+/// <summary>
+/// The one rule for the values a workflow's journal holds that the definition gives a type to: the input, the
+/// state, each held fact, and the outcome of a finished workflow. A journal written by another definition under
+/// the same persistence id can hold values of other types. No stored value is cast to an author type before
+/// <see cref="Check"/> passes, or other than through <see cref="State"/> and <see cref="Outcome"/>.
+/// </summary>
+internal static class WorkflowJournal<TInput, TState, TFact, TOutcome>
+    where TInput : notnull
+    where TState : notnull
+    where TFact : notnull
+    where TOutcome : notnull
+{
+    /// <summary>The first stored value that does not have the definition's type, or null when they all do.</summary>
+    public static StoredTypeMismatch? Check(WfState state) =>
+        state switch
+        {
+            WfRunning { Input: var input } when input is not TInput => new("input", input.GetType(), typeof(TInput)),
+            WfRunning { State: var value } when value is not TState => new("state", value.GetType(), typeof(TState)),
+            WfRunning running => HeldFact(running.Held),
+            WfFinished { Input: var input } when input is not TInput => new("input", input.GetType(), typeof(TInput)),
+            WfFinished finished => OutcomeCheck(finished.Outcome),
+            WfNotStarted => null,
+        };
+
+    /// <summary>The stored state, for a status read. A state of another type is the named error.</summary>
+    public static TState State(WorkflowId id, object state) =>
+        state is TState typed ? typed : throw Unreadable(id, new("state", state.GetType(), typeof(TState)));
+
+    /// <summary>The stored outcome, for a status read or a reply. An outcome of another type is the named error.</summary>
+    public static TOutcome Outcome(WorkflowId id, object outcome) =>
+        outcome is TOutcome typed ? typed : throw Unreadable(id, OutcomeCheck(outcome)!.Value);
+
+    private static StoredTypeMismatch? HeldFact(ImmutableArray<object> held)
+    {
+        foreach (var fact in held)
+            if (fact is not TFact)
+                return new("held fact", fact.GetType(), typeof(TFact));
+
+        return null;
+    }
+
+    private static StoredTypeMismatch? OutcomeCheck(object outcome) =>
+        outcome is TOutcome ? null : new("outcome", outcome.GetType(), typeof(TOutcome));
+
+    private static InvalidOperationException Unreadable(WorkflowId id, StoredTypeMismatch mismatch) =>
+        new($"Workflow [{id.Value}] holds a {mismatch.What} of type {mismatch.Stored.FullName}, but its ref reads " +
+            $"the {mismatch.What} type {mismatch.Expected.FullName}. The journal was written with another " +
+            $"{mismatch.What} type.");
+}
+
 /// <summary>
 /// Turns a <see cref="WorkflowDefinition{TInput,TState,TFact,TOutcome}"/> into the entity definition that hosts it.
 /// </summary>
@@ -264,8 +318,10 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     private Decision<WfCommand, WfEvent> Decide(
         WfState state, WfCommand command, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
-        // A journal written with another input or state type cannot be decided. Resume has logged it.
-        if (state is WfRunning stored && !Readable(stored))
+        // A running workflow whose journal holds a value of another type cannot be decided. Resume has logged it.
+        // A finished workflow decides nothing and journals nothing: its answers carry the outcome, and the ref
+        // reads that outcome through the same rule.
+        if (state is WfRunning && WorkflowJournal<TInput, TState, TFact, TOutcome>.Check(state) is not null)
             return Refuse(command, ctx);
 
         // A wake delivered early counts as arriving at the time its reminder was stored for.
@@ -280,13 +336,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     }
 
     /// <summary>
-    /// True when the stored input and state have the definition's types. A journal written by another definition
-    /// under the same persistence id can hold other types, and the workflow cannot decide or resume on them.
-    /// </summary>
-    private static bool Readable(WfRunning running) => running.Input is TInput && running.State is TState;
-
-    /// <summary>
-    /// A command to a workflow whose journal holds another input or state type. Nothing is journaled and no work
+    /// A command to a running workflow whose journal holds a value of another type. Nothing is journaled and no work
     /// is issued. <c>Start</c> gets its usual answer for a running workflow. A fact or a cancel gets no reply: the
     /// reply types have no failure case, so a caller's ask times out. <c>Status</c> reports the error by name.
     /// An answer or a wake is dropped, so it is not delivered again.
@@ -309,7 +359,11 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             (WfFinished finished, WfStart start) =>
                 ctx.None().Reply(start, (WfStartReply)new WfStartRefusedFinished(finished.Outcome)),
 
-            (WfRunning running, WfAnswer answer) => Answer(running, answer, reached, ctx),
+            // Answers come from the workflow's own work, so their fact is a TFact. One that is not is dropped, so
+            // it is never held and journaled.
+            (WfRunning running, WfAnswer answer) => answer.Fact is TFact
+                ? Answer(running, answer, reached, ctx)
+                : ctx.Ignore(),
 
             // An answer for a workflow that has ended. A finished workflow is closed.
             (WfNotStarted or WfFinished, WfAnswer) => ctx.Ignore(),
@@ -604,8 +658,9 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     /// </summary>
     private Handled<WfCommand, WfEvent> Resume(WfState state, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
+        if (WorkflowJournal<TInput, TState, TFact, TOutcome>.Check(state) is { } mismatch)
+            return LogUnreadable(mismatch, ctx);
         if (state is not WfRunning running) return ctx.None();
-        if (!Readable(running)) return LogUnreadable(running, ctx);
         var handled = StoreWakeFirst(ctx.None(), running, ctx.UtcNow, ctx);
 
         var work = WorkOf(running, ctx);
@@ -628,24 +683,22 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     }
 
     /// <summary>
-    /// The one error for a recovered workflow whose journal holds another input or state type. It names the types,
-    /// not the values. Nothing else is resumed: no reminder is stored and no work is given up, so the entity stays
-    /// up and a status read can answer.
+    /// The one error for a recovered workflow whose journal holds a value of another type. It names the types, not
+    /// the values. Nothing else is resumed: no reminder is stored and no work is given up, so the entity stays up
+    /// and a status read can answer.
     /// </summary>
     private Handled<WfCommand, WfEvent> LogUnreadable(
-        WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+        StoredTypeMismatch mismatch, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
         var (type, id) = (definition.TypeName.Value, ctx.EntityId.Value);
-        var (what, stored, expected) = running.Input is TInput
-            ? ("state", running.State.GetType().FullName, typeof(TState).FullName)
-            : ("input", running.Input.GetType().FullName, typeof(TInput).FullName);
+        var (what, stored, expected) = (mismatch.What, mismatch.Stored.FullName, mismatch.Expected.FullName);
 
         return ctx.None().Run<ILoggerFactory>((loggers, _) =>
         {
             loggers.CreateLogger("Akka.Durable.Workflow").LogError(
-                "Workflow [{WorkflowType}/{WorkflowId}] cannot resume: its journal holds the {What} type {StoredType}, " +
+                "Workflow [{WorkflowType}/{WorkflowId}] cannot be read: its journal holds a {What} of type {StoredType}, " +
                 "but the definition expects {ExpectedType}. The journal was written by another definition. " +
-                "The workflow decides nothing and refuses commands until the journal and the definition match.",
+                "The workflow journals nothing until the journal and the definition match.",
                 type, id, what, stored, expected);
             return Task.CompletedTask;
         });
