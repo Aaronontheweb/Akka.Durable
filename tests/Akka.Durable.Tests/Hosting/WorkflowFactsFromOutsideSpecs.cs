@@ -60,7 +60,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         reserved.SetResult(new Reserved("res-f2"));
 
         Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
-        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
+        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderCancelled("customer asked"), finished.Outcome.Value);
 
         // The reservation moved the checkout to Charging, but the cancel was decided before the charge was issued.

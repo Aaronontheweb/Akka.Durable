@@ -45,7 +45,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OrderPlaced("charge-o1"), outcome.Value);
         Assert.Equal([new ReserveStock("o1"), new ChargeCard("o1", 4200)], Services.Issued);
 
-        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
+        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderPlaced("charge-o1"), finished.Outcome.Value);
     }
 
@@ -54,7 +54,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     {
         var checkout = CheckoutRef("never");
 
-        Assert.IsType<WorkflowNotStarted>((await checkout.Status(AskCancellation())).Value);
+        Assert.IsType<WorkflowNotStarted>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         await Assert.ThrowsAsync<InvalidOperationException>(() => checkout.WaitForOutcome(Poll, AskCancellation()));
     }
 
@@ -69,7 +69,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.IsType<Started>((await checkout.Start(order, AskCancellation())).Value);
         Assert.IsType<AlreadyRunning>((await checkout.Start(order, AskCancellation())).Value);
 
-        var running = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.Status(AskCancellation())).Value);
+        var running = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(nameof(Reserving), running.StateName);
 
         reserved.SetResult(new Reserved("res-o2"));
@@ -93,7 +93,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OrderFailed("no funds"), outcome.Value);
         Assert.Equal([new ReserveStock("o3"), new ChargeCard("o3", 100), new UndoOrder("o3")], Services.Issued);
 
-        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
+        var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderFailed("no funds"), finished.Outcome.Value);
     }
 
@@ -126,7 +126,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(new OpenSupportTicket("o5", "ChargeCard Failed"), Services.Issued[^1]);
         Assert.Single(Services.Issued.OfType<ChargeCard>());
 
-        var status = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.Status(AskCancellation())).Value);
+        var status = Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(nameof(NeedsAttention), status.StateName);
     }
 
@@ -241,11 +241,11 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     {
         var writer = WorkflowRef<Shout, Listening, EchoFact, Heard>("m4");
         await writer.Start(new Shout("hi"), AskCancellation());
-        await AwaitAssertAsync(async () => Assert.IsType<WorkflowFinished<Heard>>((await writer.Status(AskCancellation())).Value),
+        await AwaitAssertAsync(async () => Assert.IsType<WorkflowFinished<Heard>>((await writer.GetStateAsync(AskCancellation())).State.Value),
             cancellationToken: TestCancellation);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            WorkflowRef<Shout, Listening, EchoFact, Echoed>("m4").Status(AskCancellation()));
+            WorkflowRef<Shout, Listening, EchoFact, Echoed>("m4").GetStateAsync(AskCancellation()));
 
         Assert.Contains(typeof(Heard).FullName!, ex.Message);
         Assert.Contains(typeof(Echoed).FullName!, ex.Message);

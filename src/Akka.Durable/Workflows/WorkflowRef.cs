@@ -91,7 +91,7 @@ public readonly union DeliveryResult<TOutcome>(Delivered, Held, WorkflowNotStart
 /// <remarks>
 /// <para>
 /// The type arguments are those of the workflow's <see cref="WorkflowDefinition{TInput,TState,TFact,TOutcome}"/>,
-/// in the same order. The ref knows the state type, so <see cref="Status"/> returns the state typed.
+/// in the same order. The ref knows the state type, so <see cref="GetStateAsync"/> returns the state typed.
 /// </para>
 /// <para>
 /// The caller chooses the id, from something durable: a domain key, plus an attempt number when the same
@@ -112,15 +112,29 @@ public interface IWorkflowRef<in TInput, TState, in TFact, TOutcome>
     Task<StartResult<TOutcome>> Start(TInput input, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Reads the condition the workflow is in. Answered at once; it never waits for the workflow. A running
-    /// workflow gives its state as a <typeparamref name="TState"/>.
+    /// Reads the condition the workflow is in, and the sequence number of its journal, activating the workflow
+    /// if needed. This is the state read of the entity that hosts the workflow. The condition is not started,
+    /// running in a state, or finished with an outcome. A running workflow gives its state as a
+    /// <typeparamref name="TState"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The read is queued behind commands the workflow has already received: it is answered only after their
+    /// facts are journaled. It does not wait for the workflow's work: the read may return while work is in flight.
+    /// </para>
+    /// <para>
+    /// <see cref="StateSnapshot{TState}.SequenceNr"/> is the sequence number of the hosting entity's journal. It
+    /// grows with each event the workflow journals: the start, each decided fact and each held fact. Compare it
+    /// with an earlier read to see whether anything changed since. It is not a count of the workflow's state changes: a fact that keeps the state
+    /// also adds one.
+    /// </para>
+    /// </remarks>
     /// <exception cref="InvalidOperationException">
     /// The journal holds a state that is not a <typeparamref name="TState"/>, or an outcome that is not a
     /// <typeparamref name="TOutcome"/>, for example because the definition's types changed after the workflow
     /// was started. The message names the stored type and the expected type.
     /// </exception>
-    Task<WorkflowStatus<TState, TOutcome>> Status(CancellationToken cancellationToken = default);
+    Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> GetStateAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Reads the status every <paramref name="pollEvery"/> until the workflow has finished, and returns its
@@ -238,15 +252,17 @@ internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id
         };
     }
 
-    public async Task<WorkflowStatus<TState, TOutcome>> Status(CancellationToken cancellationToken = default)
+    public async Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> GetStateAsync(
+        CancellationToken cancellationToken = default)
     {
         var snapshot = await Entity.GetStateAsync(cancellationToken);
-        return snapshot.State switch
+        WorkflowStatus<TState, TOutcome> status = snapshot.State switch
         {
             WfNotStarted => new WorkflowNotStarted(),
             WfRunning running => new WorkflowRunning<TState>(Stored<TState>(running.State), running.EnteredAt),
             WfFinished finished => new WorkflowFinished<TOutcome>(Stored<TOutcome>(finished.Outcome), finished.At),
         };
+        return new StateSnapshot<WorkflowStatus<TState, TOutcome>>(status, snapshot.SequenceNr);
     }
 
     /// <summary>A stored state or outcome as the type this ref reads. Another type means another definition wrote the journal.</summary>
@@ -261,7 +277,7 @@ internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id
 
         while (true)
         {
-            switch (await Status(cancellationToken))
+            switch ((await GetStateAsync(cancellationToken)).State)
             {
                 case WorkflowFinished<TOutcome> finished:
                     return finished.Outcome;

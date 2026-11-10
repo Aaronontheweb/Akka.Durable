@@ -45,7 +45,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
         WorkflowRunning<TState>? found = null;
         await AwaitAssertAsync(async () =>
         {
-            found = Assert.IsType<WorkflowRunning<TState>>((await workflow.Status(AskCancellation())).Value);
+            found = Assert.IsType<WorkflowRunning<TState>>((await workflow.GetStateAsync(AskCancellation())).State.Value);
             assert(found);
         }, cancellationToken: TestCancellation);
         return found!;

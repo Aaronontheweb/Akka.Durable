@@ -82,7 +82,7 @@ public abstract class BumpWorkflowKit(ITestOutputHelper output) : DurableEntityT
         actor.Tell(PoisonPill.Instance);
         await ExpectTerminatedAsync(actor, cancellationToken: TestCancellation);
         // A message sent before the host sees the stop is lost, so ask with a short limit until a new actor answers.
-        await AwaitAssertAsync(() => W1.Status(AskCancellation(TimeSpan.FromMilliseconds(500))),
+        await AwaitAssertAsync(() => W1.GetStateAsync(AskCancellation(TimeSpan.FromMilliseconds(500))),
             TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
     }
 }
