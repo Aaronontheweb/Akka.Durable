@@ -140,7 +140,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         Assert.IsType<Held>((await checkout.Cancel("customer asked", AskCancellation())).Value);
         await AwaitRunning("f7", running => Assert.Single(running.Held));
 
-        await StopWorkflow("f7");
+        await RestartWorkflow("f7");
 
         // The interrupted charge gives up and the table sends the checkout to a person. The held cancel is
         // decided there, where the table keeps the state, and only then is the ticket issued.

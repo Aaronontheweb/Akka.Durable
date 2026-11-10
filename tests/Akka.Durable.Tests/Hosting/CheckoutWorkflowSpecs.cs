@@ -169,7 +169,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         await AwaitAssertAsync(() => Assert.Equal(before.Entry, Services.Issued.Count), cancellationToken: TestCancellation);
         var issuedBefore = Services.Issued;
 
-        await StopWorkflow(id);
+        await RestartWorkflow(id);
 
         // The next message starts the workflow again. The interrupted work gives up; the table sends it to a person.
         var after = await SettledIn<NeedsAttention>(id);
@@ -191,7 +191,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         var before = await HostedState("o7");
         var issuedBefore = Services.Issued;
 
-        await StopWorkflow("o7");
+        await RestartWorkflow("o7");
 
         Assert.Equal(before, await HostedState("o7"));
         await Task.Delay(NoChangeWindow, TestCancellation);
@@ -206,7 +206,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         await checkout.Start(new PlaceOrder("o8", 100), AskCancellation());
         await checkout.WaitForOutcome(Poll, AskCancellation());
 
-        await StopWorkflow("o8");
+        await RestartWorkflow("o8");
 
         var again = Assert.IsType<AlreadyFinished<CheckoutOutcome>>(
             (await checkout.Start(new PlaceOrder("o8", 100), AskCancellation())).Value);
