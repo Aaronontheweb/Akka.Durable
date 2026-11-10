@@ -60,7 +60,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.IsType<AlreadyRunning>((await checkout.Start(order, AskCancellation())).Value);
 
         var running = Assert.IsType<WorkflowRunning>((await checkout.Status(AskCancellation())).Value);
-        Assert.Equal(nameof(Reserving), running.State);
+        Assert.Equal(nameof(Reserving), running.StateName);
 
         reserved.SetResult(new Reserved("res-o2"));
         await checkout.WaitForOutcome(Poll, AskCancellation());
@@ -117,7 +117,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Single(Services.Issued.OfType<ChargeCard>());
 
         var status = Assert.IsType<WorkflowRunning>((await checkout.Status(AskCancellation())).Value);
-        Assert.Equal(nameof(NeedsAttention), status.State);
+        Assert.Equal(nameof(NeedsAttention), status.StateName);
     }
 
     [Fact]

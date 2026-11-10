@@ -373,8 +373,18 @@ Getting a ref is cheap. It does not start or activate the workflow.
 `Status` reads the condition the workflow is in. It answers at once and never waits for the workflow. It returns one of:
 
 - `WorkflowNotStarted`.
-- `WorkflowRunning`, with `State` (the name of the state's type, or for a union the name of the case it holds) and `Since` (when the workflow entered it).
+- `WorkflowRunning`, with `State` (the state the workflow is in) and `Since` (when the workflow entered it).
 - `WorkflowFinished<TOutcome>`, with `Outcome` and `At`. The outcome type says how the workflow ended.
+
+`State` is the state value, so you can read its data. When the state type is a C# union, `State` is the case the union holds, such as the `Charging` record. Match on its type:
+
+```csharp
+var status = await checkout.Status(ct);
+if (status.Value is WorkflowRunning { State: Charging charging } running)
+    Console.WriteLine($"Charging since {running.Since}, reservation {charging.Reservation}");
+```
+
+When the state type is not a union, `State` is the state object as it is. `StateName` is the name of the state's type, or for a union the name of the case it holds. Use it for logs and simple displays.
 
 `WaitForOutcome(pollEvery)` reads the status every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
 
