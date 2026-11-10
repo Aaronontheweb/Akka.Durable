@@ -27,7 +27,7 @@ public class WorkflowEngineSpecs
     private static WfEvent Recorded(CheckoutFact fact, int? answered, WfStep step, bool fromHeld = false) =>
         new WfFactRecorded(fact, answered, Now, step, fromHeld);
 
-    private static WfEvent Held(CheckoutFact fact) => new WfHeld(fact, Now);
+    private static WfEvent Held(CheckoutFact fact) => new WfHeld(fact);
 
     private static WfStep MovedTo(CheckoutState next) => new WfMoved(next);
 
@@ -105,7 +105,7 @@ public class WorkflowEngineSpecs
                 Assert.Equal<CheckoutState>(new Reserving(), (CheckoutState)running.State);
                 Assert.Equal(1, running.Entry);
                 Assert.Empty(running.Settled);
-                Assert.Equal(new WfHeldFact((CheckoutFact)new Charged("c1"), Now), Assert.Single(running.HeldFacts));
+                Assert.Equal<object>((CheckoutFact)new Charged("c1"), Assert.Single(running.HeldFacts));
             });
 
         // The only effect is the reminder, for the deadline of the work that is still in flight.

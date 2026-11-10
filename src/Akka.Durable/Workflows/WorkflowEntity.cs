@@ -41,11 +41,11 @@ internal sealed record WfRunning(
     [property: AkkaField(2)] int Entry,
     [property: AkkaField(3)] DateTimeOffset EnteredAt,
     [property: AkkaField(4)] ImmutableArray<int> Settled,
-    [property: AkkaField(5)] ImmutableArray<WfHeldFact> Held,
+    [property: AkkaField(5)] ImmutableArray<object> Held,
     [property: AkkaField(6)] DateTimeOffset IssuedAt = default) : IDurableEntityProtocol
 {
     /// <summary>The held facts. A state written before this field existed has none.</summary>
-    public ImmutableArray<WfHeldFact> HeldFacts => Held.IsDefault ? [] : Held;
+    public ImmutableArray<object> HeldFacts => Held.IsDefault ? [] : Held;
 
     // ImmutableArray compares by reference; compare its contents so records with equal data are equal.
     public bool Equals(WfRunning? other) =>
@@ -56,14 +56,6 @@ internal sealed record WfRunning(
     public override int GetHashCode() =>
         HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length, HeldFacts.Length, IssuedAt);
 }
-
-/// <summary>A fact that arrived while work was in flight.</summary>
-/// <param name="Fact">The author's fact.</param>
-/// <param name="At">When it arrived.</param>
-[AkkaSerializable(Manifest = "durable-wf-held-fact-v1")]
-internal sealed record WfHeldFact(
-    [property: AkkaField(0)] object Fact,
-    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-finished-v1")]
 internal sealed record WfFinished(
@@ -118,11 +110,8 @@ internal sealed record WfFactRecorded(
 
 /// <summary>A fact arrived while work was in flight. It is held, not decided.</summary>
 /// <param name="Fact">The author's fact.</param>
-/// <param name="At">When it arrived.</param>
 [AkkaSerializable(Manifest = "durable-wf-held-v1")]
-internal sealed record WfHeld(
-    [property: AkkaField(0)] object Fact,
-    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol;
+internal sealed record WfHeld([property: AkkaField(0)] object Fact) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-event-v1")]
 internal readonly union WfEvent(WfStarted, WfFactRecorded, WfHeld) : IDurableEntityProtocol;
@@ -344,7 +333,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
 
         // A late answer, to work of an earlier entry. It settles nothing, so it is treated like a fact from outside.
         return InFlight(running, ctx)
-            ? ctx.Persist(new WfHeld(answer.Fact, ctx.UtcNow))
+            ? ctx.Persist(new WfHeld(answer.Fact))
             : Advance(running, [(answer.Fact, null)], reached, ctx, ctx.None());
     }
 
@@ -357,7 +346,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         DateTimeOffset reached,
         DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
         InFlight(running, ctx)
-            ? ReplyIf(ctx.Persist(new WfHeld(fact, ctx.UtcNow)), request, wantsReply, HeldReply)
+            ? ReplyIf(ctx.Persist(new WfHeld(fact)), request, wantsReply, HeldReply)
             : Advance(running, [(fact, null)], reached, ctx, ReplyIf(ctx.None(), request, wantsReply, Delivered));
 
     /// <summary>
@@ -537,7 +526,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         {
             var next = held[0];
             held = held.RemoveAt(0);
-            Step(next.Fact, position: null, fromHeld: true);
+            Step(next, position: null, fromHeld: true);
         }
 
         // One pass over the timers of the position reached, if it is at rest. A timer that moves the workflow on
@@ -663,7 +652,7 @@ internal static class WorkflowEvolve
             (WfNotStarted, WfStarted started) =>
                 new WfRunning(started.Input, started.First, 1, started.At, [], [], started.At),
             (WfRunning running, WfHeld held) =>
-                running with { Held = running.HeldFacts.Add(new WfHeldFact(held.Fact, held.At)) },
+                running with { Held = running.HeldFacts.Add(held.Fact) },
             // A fact taken from the held list leaves it, then its step applies as for any fact.
             (WfRunning running, WfFactRecorded { FromHeld: true } recorded) =>
                 Apply(running with { Held = running.HeldFacts.RemoveAt(0) }, recorded),
