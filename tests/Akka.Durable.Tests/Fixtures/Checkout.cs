@@ -67,9 +67,26 @@ public sealed record WorkStuck(
 [AkkaSerializable(Manifest = "checkout-ticket-opened-v1", AllowEmpty = true)]
 public sealed record TicketOpened : ICheckoutProtocol;
 
+/// <summary>Someone asked to stop the checkout.</summary>
+[AkkaSerializable(Manifest = "checkout-cancel-requested-v1")]
+public sealed record CancelRequested([property: AkkaField(0)] string Reason) : ICheckoutProtocol;
+
+/// <summary>A person looked at the checkout and wants the step it was stuck in tried again.</summary>
+[AkkaSerializable(Manifest = "checkout-operator-said-retry-v1", AllowEmpty = true)]
+public sealed record OperatorSaidRetry : ICheckoutProtocol;
+
+/// <summary>A person looked at the checkout and wants the order undone.</summary>
+[AkkaSerializable(Manifest = "checkout-operator-said-abandon-v1", AllowEmpty = true)]
+public sealed record OperatorSaidAbandon : ICheckoutProtocol;
+
 [AkkaSerializable(Manifest = "checkout-fact-v1")]
 public readonly union CheckoutFact(
-    Reserved, OutOfStock, Charged, Declined, Undone, UndoRefused, WorkStuck, TicketOpened) : ICheckoutProtocol;
+    Reserved, OutOfStock, Charged, Declined, Undone, UndoRefused, WorkStuck, TicketOpened,
+    CancelRequested, OperatorSaidRetry, OperatorSaidAbandon) : ICheckoutProtocol;
+
+/// <summary>An operator tool's own message. It is not a checkout fact; the workflow accepts it as one.</summary>
+[AkkaSerializable(Manifest = "checkout-operator-decision-v1")]
+public sealed record OperatorDecision([property: AkkaField(0)] bool Retry) : ICheckoutProtocol;
 
 // Outcomes
 [AkkaSerializable(Manifest = "checkout-order-placed-v1")]
@@ -78,8 +95,11 @@ public sealed record OrderPlaced([property: AkkaField(0)] string Charge) : IChec
 [AkkaSerializable(Manifest = "checkout-order-failed-v1")]
 public sealed record OrderFailed([property: AkkaField(0)] string Reason) : ICheckoutProtocol;
 
+[AkkaSerializable(Manifest = "checkout-order-cancelled-v1")]
+public sealed record OrderCancelled([property: AkkaField(0)] string Reason) : ICheckoutProtocol;
+
 [AkkaSerializable(Manifest = "checkout-outcome-v1")]
-public readonly union CheckoutOutcome(OrderPlaced, OrderFailed) : ICheckoutProtocol;
+public readonly union CheckoutOutcome(OrderPlaced, OrderFailed, OrderCancelled) : ICheckoutProtocol;
 
 // Effects. Plain records: they never leave the process.
 public sealed record ReserveStock(string Order);
@@ -101,7 +121,13 @@ public static class Checkout
             Work,
             Decide,
             Kind,
+            Cancel: request => new CancelRequested(request.Reason),
             GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
+
+    /// <summary>The same checkout, which also takes an operator tool's own message as a fact.</summary>
+    public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> WithOperatorTool =
+        Definition.Accepts<OperatorDecision>(decision =>
+            decision.Retry ? new OperatorSaidRetry() : new OperatorSaidAbandon());
 
     /// <summary>The work each state needs. Every effect is built from the state and the input alone.</summary>
     public static WorkList<CheckoutFact> Work(CheckoutState state, WorkContext<PlaceOrder, CheckoutFact> ctx) =>
@@ -136,11 +162,20 @@ public static class Checkout
             (NeedsAttention, TicketOpened) => ctx.Stay(),
             (NeedsAttention, WorkStuck) => ctx.Stay(),
 
+            // A person decides what happens to a checkout that needs attention.
+            (NeedsAttention attention, OperatorSaidRetry) => ctx.Next(attention.Was),
+            (NeedsAttention attention, OperatorSaidAbandon) => ctx.Next(new Undoing(new OrderFailed(attention.Why))),
+
+            // A cancel undoes the order, unless it is already being undone or waits for a person.
+            (Reserving or Charging, CancelRequested cancel) => ctx.Next(new Undoing(new OrderCancelled(cancel.Reason))),
+            (Undoing or NeedsAttention, CancelRequested) => ctx.Stay(),
+
             // Pairs that should not happen, written out so that a new state or fact does not compile until it is placed.
             (Reserving, Charged or Declined or Undone or UndoRefused or TicketOpened) => ctx.Unexpected(),
             (Charging, Reserved or OutOfStock or Undone or UndoRefused or TicketOpened) => ctx.Unexpected(),
             (Undoing, Reserved or OutOfStock or Charged or Declined or TicketOpened) => ctx.Unexpected(),
             (NeedsAttention, Reserved or OutOfStock or Charged or Declined or Undone or UndoRefused) => ctx.Unexpected(),
+            (Reserving or Charging or Undoing, OperatorSaidRetry or OperatorSaidAbandon) => ctx.Unexpected(),
         };
 
     public static OutcomeKind Kind(CheckoutOutcome outcome) =>
@@ -148,6 +183,7 @@ public static class Checkout
         {
             OrderPlaced => OutcomeKind.Succeeded,
             OrderFailed => OutcomeKind.Failed,
+            OrderCancelled => OutcomeKind.Cancelled,
         };
 }
 

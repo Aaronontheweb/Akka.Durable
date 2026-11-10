@@ -99,6 +99,13 @@ public abstract class DurableEntityTestKit(
     protected IWorkflowRef<TInput, TOutcome> WorkflowRef<TInput, TOutcome>(string workflowId) =>
         Host.Services.GetRequiredService<IWorkflowRefs<TInput, TOutcome>>().Get(new WorkflowId(workflowId));
 
+    /// <summary>
+    /// A logical reference to one workflow that can also send it facts, as application code would get it from
+    /// <see cref="IWorkflowRefs{TInput,TFact,TOutcome}"/>.
+    /// </summary>
+    protected IWorkflowRef<TInput, TFact, TOutcome> WorkflowRef<TInput, TFact, TOutcome>(string workflowId) =>
+        Host.Services.GetRequiredService<IWorkflowRefs<TInput, TFact, TOutcome>>().Get(new WorkflowId(workflowId));
+
     /// <summary>The current test's cancellation token, for awaited calls.</summary>
     protected static CancellationToken TestCancellation => TestContext.Current.CancellationToken;
 

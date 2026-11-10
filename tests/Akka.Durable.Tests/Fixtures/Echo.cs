@@ -47,6 +47,7 @@ public static class Echo
                 EchoLost => ctx.Finish(new Heard("")),
             },
             Kind: _ => OutcomeKind.Succeeded,
+            Cancel: _ => new EchoLost(),
             GaveUp: _ => new EchoLost());
 }
 

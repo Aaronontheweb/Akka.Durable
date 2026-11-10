@@ -51,6 +51,11 @@ public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error 
     public string What => Work.GetType().Name;
 }
 
+/// <summary>The request to stop a workflow. The definition's <c>Cancel</c> function turns it into a fact.</summary>
+/// <param name="Reason">Why the workflow should stop.</param>
+/// <param name="By">Who asked, when that is known.</param>
+public sealed record CancelRequest(string Reason, string? By = null);
+
 public sealed record WorkflowOptions
 {
     /// <summary>
@@ -80,6 +85,9 @@ public sealed record WorkflowOptions
 /// </param>
 /// <param name="Decide">What a fact means in a state. One table for everything that arrives.</param>
 /// <param name="Kind">What kind of ending an outcome is.</param>
+/// <param name="Cancel">
+/// The fact a cancel arrives as. The table decides what a cancel means in each state.
+/// </param>
 /// <param name="GaveUp">The fact that says a piece of work got no answer.</param>
 /// <param name="Options">Optional settings.</param>
 /// <typeparam name="TInput">The record the workflow starts with. Available in every state.</typeparam>
@@ -90,6 +98,11 @@ public sealed record WorkflowOptions
 /// <para>Work is issued once. When a piece of work gets no answer, because its handler failed, ran out of
 /// time, or the workflow restarted in the middle, the library does not issue it again. It sends the fact
 /// that <paramref name="GaveUp"/> names and the table decides.</para>
+/// <para>Facts can also come from outside: a ref's <c>Notify</c> and <c>Cancel</c>, or a message of a type
+/// named by <see cref="Accepts{TMessage}"/>. A fact from outside is journaled before the caller gets its
+/// reply. While the work of the current state is in flight, it is held. When the work settles, the work's
+/// own fact is decided first, then each held fact in the order it arrived, and only then is the work of the
+/// state that follows issued.</para>
 /// <para>The workflow is hosted as a durable entity. All four types need a serializer, like an entity's
 /// state, command and event types.</para>
 /// </remarks>
@@ -99,12 +112,28 @@ public sealed record WorkflowDefinition<TInput, TState, TFact, TOutcome>(
     Func<TState, WorkContext<TInput, TFact>, WorkList<TFact>> Work,
     Func<TState, TFact, DecideContext<TInput, TState, TOutcome>, Transition<TState, TOutcome>> Decide,
     Func<TOutcome, OutcomeKind> Kind,
+    Func<CancelRequest, TFact> Cancel,
     Func<WorkGaveUp, TFact> GaveUp,
     WorkflowOptions? Options = null)
     where TInput : notnull
     where TState : notnull
     where TFact : notnull
-    where TOutcome : notnull;
+    where TOutcome : notnull
+{
+    internal ImmutableDictionary<Type, Func<object, TFact>> Accepted { get; init; } =
+        ImmutableDictionary<Type, Func<object, TFact>>.Empty;
+
+    /// <summary>
+    /// Declares how a message of another type becomes one of this workflow's facts. An existing actor can
+    /// then send its own message type to the workflow's address. It gets no reply.
+    /// </summary>
+    public WorkflowDefinition<TInput, TState, TFact, TOutcome> Accepts<TMessage>(Func<TMessage, TFact> wrap)
+        where TMessage : notnull
+    {
+        ArgumentNullException.ThrowIfNull(wrap);
+        return this with { Accepted = Accepted.SetItem(typeof(TMessage), message => wrap((TMessage)message)) };
+    }
+}
 
 /// <summary>
 /// One piece of work a state needs: an effect for its registered <see cref="IEffectHandler{TEffect,TOutcome}"/>,

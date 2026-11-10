@@ -120,7 +120,10 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
         (CheckoutState)new NeedsAttention(new NeedsAttention(new Undoing(new OrderFailed("no funds")), "first"), "second"),
         Entry: 4,
         EnteredAt: new DateTimeOffset(2026, 11, 9, 12, 0, 0, TimeSpan.FromHours(-6)),
-        Settled: [0, 2]);
+        Settled: [0, 2],
+        Held: []);
+
+    private static readonly DateTimeOffset At = new(2026, 11, 9, 12, 0, 0, TimeSpan.Zero);
 
     private object RoundTrip(object message)
     {
@@ -175,8 +178,72 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
             (CheckoutFact)new WorkStuck("ChargeCard", GaveUpReason.TimedOut),
             Answered: 0,
             At: new DateTimeOffset(2026, 11, 9, 12, 0, 0, TimeSpan.Zero),
-            Step: new WfMoved((CheckoutState)new NeedsAttention(new Charging("res-1"), "ChargeCard TimedOut")));
+            Step: new WfMoved((CheckoutState)new NeedsAttention(new Charging("res-1"), "ChargeCard TimedOut")),
+            FromHeld: false);
 
         Assert.Equal(recorded, RoundTrip(recorded));
+    }
+
+    [Fact]
+    public void State_round_trips_with_held_facts_in_order()
+    {
+        WfState state = new WfRunning(
+            Order,
+            (CheckoutState)new Charging("res-1"),
+            Entry: 2,
+            EnteredAt: At,
+            Settled: [],
+            Held:
+            [
+                new WfHeldFact((CheckoutFact)new CancelRequested("first"), At),
+                new WfHeldFact((CheckoutFact)new OperatorSaidRetry(), At.AddSeconds(1)),
+            ]);
+
+        var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);
+
+        Assert.Equal(state.Value, received);
+        Assert.Equal<object>((CheckoutFact)new CancelRequested("first"), received.Held[0].Fact);
+    }
+
+    [Fact]
+    public void A_held_fact_and_a_fact_taken_from_the_held_list_round_trip()
+    {
+        WfEvent held = new WfHeld((CheckoutFact)new CancelRequested("customer asked"), At);
+        WfEvent recorded = new WfFactRecorded(
+            (CheckoutFact)new CancelRequested("customer asked"),
+            Answered: null,
+            At: At,
+            Step: new WfMoved((CheckoutState)new Undoing(new OrderCancelled("customer asked"))),
+            FromHeld: true);
+
+        Assert.Equal(held, RoundTrip(held));
+        Assert.Equal(recorded, RoundTrip(recorded));
+    }
+
+    [Fact]
+    public void Sharding_envelope_carries_a_fact_and_a_cancel()
+    {
+        WfCommand deliver = new WfDeliver((CheckoutFact)new OperatorSaidRetry(), WantsReply: true);
+        WfCommand cancel = new WfCancel("customer asked", By: "support");
+
+        Assert.Equal(deliver, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", deliver))).Message);
+        Assert.Equal(cancel, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", cancel))).Message);
+    }
+
+    public static TheoryData<int> DeliveryReplies => [0, 1, 2, 3];
+
+    [Theory]
+    [MemberData(nameof(DeliveryReplies))]
+    public void Each_delivery_reply_round_trips(int which)
+    {
+        WfDeliveryReply reply = which switch
+        {
+            0 => new WfDelivered(),
+            1 => new WfHeldReply(),
+            2 => new WfNotStartedReply(),
+            _ => new WfClosedReply((CheckoutOutcome)new OrderCancelled("customer asked")),
+        };
+
+        Assert.Equal(reply, RoundTrip(reply));
     }
 }
