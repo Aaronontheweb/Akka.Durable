@@ -47,12 +47,6 @@ internal sealed record WfRunning(
     /// <summary>The held facts. A state written before this field existed has none.</summary>
     public ImmutableArray<WfHeldFact> HeldFacts => Held.IsDefault ? [] : Held;
 
-    /// <summary>
-    /// When the work of this entry was issued. A state written before <see cref="IssuedAt"/> existed has no
-    /// repeat to tell apart, so it uses the time the state was entered.
-    /// </summary>
-    public DateTimeOffset WorkIssuedAt => IssuedAt == default ? EnteredAt : IssuedAt;
-
     // ImmutableArray compares by reference; compare its contents so records with equal data are equal.
     public bool Equals(WfRunning? other) =>
         other is not null && Equals(Input, other.Input) && Equals(State, other.State) && Entry == other.Entry
@@ -468,7 +462,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         if (!working) return wake;
 
         // Work that is still in flight past this time is running in this process: look again a margin later.
-        var backstop = running.WorkIssuedAt + _options.AttemptLimit + WorkflowWake.BackstopMargin;
+        var backstop = running.IssuedAt + _options.AttemptLimit + WorkflowWake.BackstopMargin;
         return Earliest(wake, backstop > reached ? backstop : ctx.UtcNow + WorkflowWake.BackstopMargin);
     }
 

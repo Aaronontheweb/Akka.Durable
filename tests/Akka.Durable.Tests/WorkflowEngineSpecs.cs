@@ -108,7 +108,9 @@ public class WorkflowEngineSpecs
                 Assert.Equal(new WfHeldFact((CheckoutFact)new Charged("c1"), Now), Assert.Single(running.HeldFacts));
             });
 
-        Assert.Empty(outcome.Effects);
+        // The only effect is the reminder, for the deadline of the work that is still in flight.
+        Assert.Empty(IssuedWork(outcome));
+        Assert.IsType<ScheduleEffect>(Assert.Single(outcome.Effects).Value);
     }
 
     [Fact]
@@ -298,8 +300,7 @@ internal static class PairedWork
     public static readonly WorkflowDefinition<string, string, string, string> Definition = new(
         new WorkflowTypeName("paired"),
         Start: _ => "pair",
-        Work: (_, ctx) => new WorkList<string>(ImmutableArray.Create(
-            ctx.Execute(new Step("first")), ctx.Execute(new Step("second")))),
+        Work: (_, ctx) => ctx.All(ctx.Execute(new Step("first")), ctx.Execute(new Step("second"))),
         Decide: (_, _, ctx) => ctx.Stay(),
         Kind: _ => OutcomeKind.Succeeded,
         Cancel: _ => "cancel",

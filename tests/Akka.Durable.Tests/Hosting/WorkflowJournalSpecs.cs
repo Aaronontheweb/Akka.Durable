@@ -246,17 +246,8 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
         var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);
 
         Assert.Equal(state.Value, received);
-        Assert.Equal(At.AddMinutes(5), received.WorkIssuedAt);
+        Assert.Equal(At.AddMinutes(5), received.IssuedAt);
         Assert.Equal(new WfHeldFact((CheckoutFact)new CancelRequested("late"), At.AddSeconds(2), 3, 1), received.Held[0]);
-    }
-
-    [Fact]
-    public void A_state_without_the_time_its_work_was_issued_counts_it_from_when_the_state_was_entered()
-    {
-        var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(DeepState)).Value);
-
-        Assert.Equal(default, received.IssuedAt);
-        Assert.Equal(received.EnteredAt, received.WorkIssuedAt);
     }
 
     [Fact]
