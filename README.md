@@ -127,7 +127,7 @@ dotnet build
 dotnet test
 ```
 
-The solution targets `net11.0` and enables preview C# features (C# 15 unions are used throughout). Package versions are managed centrally; Akka.NET packages are pinned to 1.6.0-beta6 (Aaron.Akka.Reminders to 1.6.0-beta5).
+The solution targets `net11.0` and enables preview C# features (C# 15 unions are used throughout). Package versions are managed centrally; Akka.NET packages are pinned to 1.6.0-beta7 (Aaron.Akka.Reminders to 1.6.0-beta5).
 
 | Package | Contents |
 |---|---|
