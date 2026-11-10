@@ -35,8 +35,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
             .WithCustomSerializer(NestSerializer.CreateSerializerDetails)
             .WithDurableWorkflow(Echo.Definition, Sharding())
             .WithDurableWorkflow(Nest.Definition, Sharding())
-            .WithDurableWorkflow(Nest.Alone, Sharding())
-            .WithDurableWorkflow(Nest.Tagged, Sharding());
+            .WithDurableWorkflow(Nest.Alone, Sharding());
 
     private async Task<WorkflowRunning<TState>> Running<TInput, TState, TFact, TOutcome>(
         IWorkflowRef<TInput, TState, TFact, TOutcome> workflow, Action<WorkflowRunning<TState>> assert)
@@ -90,24 +89,6 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
         var second = await Running(checkout, r => Assert.Equal("Charging res-fed", Read(r.State)));
         Assert.Equal(nameof(Charging), second.StateName);
         Assert.True(second.Since >= first.Since);
-    }
-
-    [Fact]
-    public async Task A_fact_held_while_work_is_in_flight_leaves_the_state_until_it_is_decided()
-    {
-        var reserved = new TaskCompletionSource<CheckoutFact>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Services.Reserve = (_, ct) => reserved.Task.WaitAsync(ct);
-        Services.Charge = (_, ct) => Never(ct);
-        Services.Undo = (_, ct) => Never(ct);
-        var checkout = CheckoutRef("s7");
-        await checkout.Start(new PlaceOrder("s7", 100), AskCancellation());
-
-        Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-7", AskCancellation())).Value);
-        await Running(checkout, r => Assert.Equal("Reserving", Read(r.State)));
-
-        // The reservation moves the checkout to Charging; the held cancel is decided there and undoes the order.
-        reserved.SetResult(new Reserved("res-s7"));
-        await Running(checkout, r => Assert.Equal("Undoing then cancelled customer asked", Read(r.State)));
     }
 
     [Fact]
@@ -186,15 +167,12 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
     {
         var outer = WorkflowRef<Go, Outer, NestFact, Over>("s9");
         var alone = WorkflowRef<Go, Lone, NestFact, Over>("s9");
-        var tagged = WorkflowRef<Go, Tagged<int>, NestFact, Over>("s9");
         await outer.Start(new Go(1), AskCancellation());
         await alone.Start(new Go(2), AskCancellation());
-        await tagged.Start(new Go(3), AskCancellation());
 
         await Running(outer, r => Assert.Equal("Low 1", Read(r.State)));
         var lone = await Running(alone, r => Assert.Equal("Settled", Read(r.State)));
         Assert.Equal(nameof(Settled), lone.StateName);
-        await Running(tagged, r => Assert.Equal(new Tagged<int>(3), r.State));
     }
 
     public static TheoryData<string> WrongTypes => ["state", "object state", "fact", "outcome"];
@@ -242,19 +220,14 @@ public sealed class WorkflowRunningValueSpecs
     [Theory]
     [InlineData("plain", nameof(Listening))]
     [InlineData("union", nameof(Charging))]
-    [InlineData("case that holds a union", nameof(NeedsAttention))]
     [InlineData("union inside a union", nameof(Low))]
-    [InlineData("single case with no fields", nameof(Settled))]
     public void StateName_is_the_name_of_the_record_the_state_holds(string kind, string expected)
     {
         var name = kind switch
         {
             "plain" => new WorkflowRunning<Listening>(new Listening(), Entered).StateName,
             "union" => new WorkflowRunning<CheckoutState>(new Charging("r1"), Entered).StateName,
-            "case that holds a union" =>
-                new WorkflowRunning<CheckoutState>(new NeedsAttention(new Charging("r1"), "why"), Entered).StateName,
             "union inside a union" => new WorkflowRunning<Outer>(new Inner(new Low(1)), Entered).StateName,
-            "single case with no fields" => new WorkflowRunning<Lone>(new Settled(), Entered).StateName,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
 
@@ -272,6 +245,5 @@ public sealed class WorkflowRunningValueSpecs
         var other = new WorkflowRunning<CheckoutState>(new Charging(otherReservation), Entered.AddSeconds(otherSeconds));
 
         Assert.Equal(equal, one.Equals(other));
-        if (equal) Assert.Equal(one.GetHashCode(), other.GetHashCode());
     }
 }

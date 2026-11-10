@@ -237,7 +237,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     }
 
     [Fact]
-    public async Task A_journal_with_another_outcome_type_fails_the_status_read_and_names_both_types()
+    public async Task A_journal_with_another_outcome_type_fails_the_state_read_and_names_both_types()
     {
         var writer = WorkflowRef<Shout, Listening, EchoFact, Heard>("m4");
         await writer.Start(new Shout("hi"), AskCancellation());
