@@ -1,0 +1,12 @@
+root = true
+
+# Every text file is UTF-8 without a byte-order mark. Line endings are not set here:
+# .gitattributes (text=auto) stores LF and gives each platform its own on checkout.
+[*]
+charset = utf-8
+insert_final_newline = true
+
+# The library uses one namespace, Akka.Durable. Its folders (Entities, Workflows) only group files,
+# so a namespace that does not match its folder is not a mistake here.
+[src/Akka.Durable/**.cs]
+dotnet_style_namespace_match_folder = false
