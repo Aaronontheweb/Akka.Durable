@@ -2,7 +2,7 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <!-- Nuget package versions -->
-    <AkkaVersion>1.6.0-beta6</AkkaVersion>
+    <AkkaVersion>1.6.0-beta7</AkkaVersion>
     <!-- Aaron.Akka.Reminders ships separately and can lag the Akka.NET beta it targets. -->
     <AkkaRemindersVersion>1.6.0-beta5</AkkaRemindersVersion>
     <!-- Akka.Persistence.Sql also ships separately; used only by tests, for a real serializing journal. -->
