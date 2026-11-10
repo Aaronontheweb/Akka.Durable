@@ -336,23 +336,6 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     }
 
     [Fact]
-    public async Task Event_outcome_is_journaled_through_Evolve_and_recovered()
-    {
-        var entity = SpawnEntity("e4");
-
-        Send(entity, new AddFromLookup(5));
-        await ExpectMsgAsync<Accepted>(cancellationToken: Ct); // declared after Execute, sent before the outcome lands
-        await AssertCountBecomes(entity, 5);
-
-        Watch(entity);
-        entity.Tell(PoisonPill.Instance);
-        await ExpectTerminatedAsync(entity, cancellationToken: Ct);
-
-        Assert.Equal(5, await CountOf(SpawnEntity("e4")));
-        Assert.Equal([(CounterEvent)new Incremented(5)], await ReadJournal("counter-e4"));
-    }
-
-    [Fact]
     public async Task Failed_effect_is_logged_and_the_entity_keeps_running()
     {
         var entity = SpawnEntity("e5");

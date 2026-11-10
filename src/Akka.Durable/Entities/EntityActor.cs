@@ -316,11 +316,6 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 HandleCommand(command, completed.Origin, reminder: null);
                 break;
 
-            case TEvent @event:
-                // A fact from the outside world: journaled as it is, no decision involved.
-                Commit(Decisions.Persist<TCommand, TEvent>(@event), completed.Origin, reminder: null);
-                break;
-
             case null:
                 _log.Debug("Effect {0} completed with no outcome", completed.Effect);
                 StopIfRequested();
@@ -329,7 +324,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             default:
                 throw new InvalidOperationException(
                     $"The handler for effect {completed.Effect} returned a {outcome.GetType()}, which is " +
-                    $"neither a {typeof(TCommand)} nor a {typeof(TEvent)}.");
+                    $"not a {typeof(TCommand)}. A handler returns one of the entity's commands.");
         }
     }
 

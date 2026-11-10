@@ -95,13 +95,6 @@ public sealed record IncrementViaService([property: AkkaField(0)] int By, [prope
 [AkkaSerializable(Manifest = "counter-computed-v1")]
 public sealed record Computed([property: AkkaField(0)] IncrementViaService Request, [property: AkkaField(1)] int Value) : ICounterProtocol;
 
-/// <summary>Adds a value the service looks up. Its outcome is an event, journaled as it is.</summary>
-[AkkaSerializable(Manifest = "counter-add-from-lookup-v1")]
-public sealed record AddFromLookup([property: AkkaField(0)] int Key) : ICounterProtocol, IReplies<CounterCommand, Accepted>
-{
-    public CounterCommand ToCommand() => new(this);
-}
-
 [AkkaSerializable(Manifest = "counter-explode-later-v1", AllowEmpty = true)]
 public sealed record ExplodeLater : ICounterProtocol, IReplies<CounterCommand, Accepted>
 {
@@ -115,7 +108,7 @@ public sealed record NoHandler : ICounterProtocol;
 public readonly union CounterCommand(
     Increment, GetCount, Noop, Unsupported, LockCounter, UnlockCounter,
     IncrementAndRecord, IncrementThenFail, WaitForGate, WaitForGateWithTimeout, RemindLater, Shutdown,
-    IncrementViaService, Computed, AddFromLookup, ExplodeLater, NoHandler) : ICounterProtocol;
+    IncrementViaService, Computed, ExplodeLater, NoHandler) : ICounterProtocol;
 
 // Events
 [AkkaSerializable(Manifest = "counter-incremented-v1")]
@@ -149,7 +142,6 @@ public sealed record GateOpened : ICounterProtocol;
 
 // Effects. Plain data handed to the registered IEffectHandler; never serialized.
 public sealed record Compute(IncrementViaService Request);
-public sealed record Lookup(int Key);
 public sealed record Explode;
 public sealed record Unregistered;
 
@@ -209,9 +201,6 @@ public static class Counter
                 .UnstashAll(),
             Computed => ctx.Ignore(), // a late outcome from a previous incarnation
 
-            // The lookup's outcome is an Incremented event: journaled without a decision.
-            AddFromLookup c => ctx.None().Execute(new Lookup(c.Key)).Reply(c, new Accepted()),
-
             ExplodeLater c => ctx.None().Execute(new Explode()).Reply(c, new Accepted()),
             NoHandler => ctx.None().Execute(new Unregistered()),
         };
@@ -245,13 +234,6 @@ public sealed class ComputeHandler(Gate gate, ScopedRecorder recorder) : IEffect
     }
 }
 
-/// <summary>Returns an event: the entity journals it without deciding.</summary>
-public sealed class LookupHandler : IEffectHandler<Lookup, CounterEvent>
-{
-    public Task<CounterEvent> HandleAsync(Lookup effect, CancellationToken cancellationToken) =>
-        Task.FromResult<CounterEvent>(new Incremented(effect.Key));
-}
-
 public sealed class ExplodeHandler : IEffectHandler<Explode, CounterCommand>
 {
     public Task<CounterCommand> HandleAsync(Explode effect, CancellationToken cancellationToken) =>
@@ -262,6 +244,5 @@ public static class CounterHandlers
 {
     public static IServiceCollection AddCounterHandlers(this IServiceCollection services) => services
         .AddScoped<IEffectHandler<Compute, CounterCommand>, ComputeHandler>()
-        .AddScoped<IEffectHandler<Lookup, CounterEvent>, LookupHandler>()
         .AddScoped<IEffectHandler<Explode, CounterCommand>, ExplodeHandler>();
 }
