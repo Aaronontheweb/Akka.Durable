@@ -264,6 +264,10 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     private Decision<WfCommand, WfEvent> Decide(
         WfState state, WfCommand command, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
+        // A journal written with another input or state type cannot be decided. Resume has logged it.
+        if (state is WfRunning stored && !Readable(stored))
+            return Refuse(command, ctx);
+
         // A wake delivered early counts as arriving at the time its reminder was stored for.
         var reached = command is WfWake { At: { } at } && at > ctx.UtcNow ? at : ctx.UtcNow;
 
@@ -274,6 +278,27 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         var after = handled.Events.IsDefaultOrEmpty ? state : handled.Events.Aggregate(state, WorkflowEvolve.Evolve);
         return after is WfRunning running ? StoreWakeFirst(handled, running, reached, ctx) : handled;
     }
+
+    /// <summary>
+    /// True when the stored input and state have the definition's types. A journal written by another definition
+    /// under the same persistence id can hold other types, and the workflow cannot decide or resume on them.
+    /// </summary>
+    private static bool Readable(WfRunning running) => running.Input is TInput && running.State is TState;
+
+    /// <summary>
+    /// A command to a workflow whose journal holds another input or state type. Nothing is journaled and no work
+    /// is issued. <c>Start</c> gets its usual answer for a running workflow. A fact or a cancel gets no reply: the
+    /// reply types have no failure case, so a caller's ask times out. <c>Status</c> reports the error by name.
+    /// An answer or a wake is dropped, so it is not delivered again.
+    /// </summary>
+    private static Decision<WfCommand, WfEvent> Refuse(
+        WfCommand command, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
+        command switch
+        {
+            WfStart start => ctx.None().Reply(start, RefusedRunning),
+            WfDeliver or WfCancel => ctx.Unhandled(),
+            WfAnswer or WfWake => ctx.Ignore(),
+        };
 
     private Decision<WfCommand, WfEvent> DecideCommand(
         WfState state, WfCommand command, DateTimeOffset reached, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
@@ -580,6 +605,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     private Handled<WfCommand, WfEvent> Resume(WfState state, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
         if (state is not WfRunning running) return ctx.None();
+        if (!Readable(running)) return LogUnreadable(running, ctx);
         var handled = StoreWakeFirst(ctx.None(), running, ctx.UtcNow, ctx);
 
         var work = WorkOf(running, ctx);
@@ -599,6 +625,30 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         }
 
         return handled;
+    }
+
+    /// <summary>
+    /// The one error for a recovered workflow whose journal holds another input or state type. It names the types,
+    /// not the values. Nothing else is resumed: no reminder is stored and no work is given up, so the entity stays
+    /// up and a status read can answer.
+    /// </summary>
+    private Handled<WfCommand, WfEvent> LogUnreadable(
+        WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx)
+    {
+        var (type, id) = (definition.TypeName.Value, ctx.EntityId.Value);
+        var (what, stored, expected) = running.Input is TInput
+            ? ("state", running.State.GetType().FullName, typeof(TState).FullName)
+            : ("input", running.Input.GetType().FullName, typeof(TInput).FullName);
+
+        return ctx.None().Run<ILoggerFactory>((loggers, _) =>
+        {
+            loggers.CreateLogger("Akka.Durable.Workflow").LogError(
+                "Workflow [{WorkflowType}/{WorkflowId}] cannot resume: its journal holds the {What} type {StoredType}, " +
+                "but the definition expects {ExpectedType}. The journal was written by another definition. " +
+                "The workflow decides nothing and refuses commands until the journal and the definition match.",
+                type, id, what, stored, expected);
+            return Task.CompletedTask;
+        });
     }
 
     /// <summary>
