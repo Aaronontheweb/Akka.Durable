@@ -1,5 +1,7 @@
+using Akka.Actor;
 using Akka.Hosting;
 using Akka.Reminders;
+using Akka.Reminders.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -39,6 +41,12 @@ public abstract class DurableEntityTestKit(
     };
 
     /// <summary>
+    /// The storage behind the test host's reminders. In memory by default. Override it to wrap the storage, for
+    /// example to make storing a reminder fail on demand.
+    /// </summary>
+    protected virtual IReminderStorage CreateReminderStorage(ActorSystem system) => new InMemoryReminderStorage();
+
+    /// <summary>
     /// Run with <c>akka.actor.serialize-messages = on</c>, so every message is serialized and deserialized as
     /// if it crossed the network. Off by default.
     /// </summary>
@@ -72,7 +80,7 @@ public abstract class DurableEntityTestKit(
             builder.AddHocon("akka.actor.serialize-messages = on", HoconAddMode.Prepend);
 
         builder.WithLocalReminders(reminders => reminders
-            .WithInMemoryStorage()
+            .WithStorage(CreateReminderStorage)
             .WithResolver(system => new DurableEntityReminderResolver(system))
             .WithSettings(ReminderSettings));
 

@@ -209,6 +209,47 @@ To set the attempt limit, pass options to the definition:
 Checkout.Definition with { Options = new WorkflowOptions { AttemptLimit = TimeSpan.FromSeconds(10) } }
 ```
 
+## Timers, and several things in one state
+
+A state can wait for a point in time. `ctx.Timer` takes a duration or a date, and the fact to deliver when it is due:
+
+```csharp
+public static WorkList<CampaignFact> Work(CampaignState state, WorkContext<Invoice, CampaignFact> ctx) =>
+    state switch
+    {
+        Waiting => ctx.Timer(ctx.Input.DueAt, new DueDateReached()),
+        Reminding reminding => ctx.Execute(new SendReminder(ctx.Input.Id, reminding.Number)),
+        Pausing => ctx.Timer(ctx.Input.Pause, new PauseOver()),
+        Escalating => ctx.All(
+            ctx.Execute(new NotifyCollections(ctx.Input.Id)),
+            ctx.Timer(ctx.Input.Grace, new GraceOver())),
+    };
+```
+
+- A duration is counted from the time the workflow entered the state. That time is journaled, so the timer does not move when `Work` is called again.
+- `ctx.All` gives a state several things at once: here a piece of work and a time limit for it.
+- When the workflow leaves a state, that state's timers are gone. There is nothing to cancel.
+
+Work and a wait are different. An `Execute` is work: it expects an answer within the attempt limit, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
+
+### The reminder
+
+Each workflow has one durable reminder, stored through Akka.Reminders. It is due at the earliest time the workflow needs to do something: the next timer, or the time by which work in flight must have answered. So a workflow hosts only with Akka.Reminders configured.
+
+A workflow that waits only for facts from outside has no reminder. Nothing wakes it until a fact arrives.
+
+The journal write comes first. Then, before any work is issued and before any reply is sent, the reminder is stored for the state the workflow is now in. Storing it again replaces the old one, so the old reminder stays in place until the journal has the new state.
+
+When a process dies after the journal write and before the reminder is stored, recovery fixes it: whatever activates the workflow next makes it store the reminder for the state it recovered.
+
+The reminder also wakes a workflow whose process died in the middle of a call. Nobody has to send it a message. The workflow recovers, the interrupted work gives up, and the table decides.
+
+A reminder can arrive a little early: Akka.Reminders fetches reminders that are due within its `MaxSlippage` (5 seconds by default). A timer due by the time the reminder was stored for is then decided at once. So a timer can fire up to `MaxSlippage` early, never more, and one timer wakes the workflow once.
+
+When the reminder cannot be stored, because the reminder store is down, the fact is already journaled, but nothing after it happens: no work is issued and the caller gets no reply. The workflow restarts and tries again each time it recovers. When the store is back, the reminder is stored, and the work that was never issued gives up as interrupted. The workflow cannot tell work that was not issued from work that was issued and lost, so the table decides, as for any interrupted work. A caller that got no reply can send the fact again.
+
+While the store is down, a workflow that hit this restarts at once, again and again, until the store is back. Each restart replays the journal and logs an error.
+
 ## Facts from outside
 
 A fact does not have to be the answer to work. Code outside the workflow can send one:
@@ -259,7 +300,7 @@ builder.Services.AddScoped<IEffectHandler<OpenSupportTicket, CheckoutFact>, Open
 
 builder.Services.AddAkka("shop", (akka, sp) =>
 {
-    // Configure an Akka.Persistence journal / snapshot store here.
+    // Configure an Akka.Persistence journal / snapshot store and Akka.Reminders here.
 
     akka.WithCustomSerializer(CheckoutSerializer.CreateSerializerDetails);
     akka.WithDurableWorkflow(Checkout.Definition);
@@ -327,14 +368,11 @@ Mark each type with `[AkkaSerializable(Manifest = "...")]`, and each union as we
 
 These are not in Akka.Durable today:
 
-- Timers. A workflow cannot ask to be woken at a time.
 - Retry policies. To repeat work, the table uses `Again`, or moves to a state with the same work.
-- Several pieces of work in one state. `WorkContext` builds one piece of work for a state, or none.
+- `Again` with a delay. `Again` issues the work at once. A table that answers a timer's own fact with `Again` loops, because the timer is still due.
 - Calls to entities from `Work`. `Work` has no `Send`.
 - Child workflows.
 - A scenario test kit for workflows, like `DeciderScenario` for entities. Test a workflow through the hosted `DurableEntityTestKit`. You can test `Decide` and `Work` as plain functions too.
-
-Today this means: a workflow whose work was interrupted by a restart learns of it when its next message arrives. The workflow is recovered when a message reaches it, or when sharding starts it again (see `RememberEntities` on `ShardedHosting`). Then the workflow receives the give-up fact with the reason `Interrupted`.
 
 ---
 

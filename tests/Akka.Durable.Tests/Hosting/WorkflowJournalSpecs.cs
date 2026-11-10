@@ -2,6 +2,7 @@ using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Hosting;
 using Akka.Persistence.Sql.Hosting;
+using Akka.Reminders;
 using LinqToDB;
 using Microsoft.Data.Sqlite;
 using Xunit;
@@ -228,6 +229,43 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
 
         Assert.Equal(deliver, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", deliver))).Message);
         Assert.Equal(cancel, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", cancel))).Message);
+    }
+
+    [Fact]
+    public void State_round_trips_with_the_time_its_work_was_issued()
+    {
+        WfState state = new WfRunning(
+            Order,
+            (CheckoutState)new Charging("res-1"),
+            Entry: 3,
+            EnteredAt: At,
+            Settled: [0],
+            Held: [new WfHeldFact((CheckoutFact)new CancelRequested("late"), At.AddSeconds(2))],
+            IssuedAt: At.AddMinutes(5));
+
+        var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);
+
+        Assert.Equal(state.Value, received);
+        Assert.Equal(At.AddMinutes(5), received.IssuedAt);
+    }
+
+    [Fact]
+    public void Sharding_envelope_and_reminder_envelope_carry_a_wake()
+    {
+        WfCommand wake = new WfWake(At);
+        WfCommand wakeWithoutTime = new WfWake();
+
+        Assert.Equal(wake, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", wake))).Message);
+        Assert.Equal(wakeWithoutTime, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", wakeWithoutTime))).Message);
+
+        // How the workflow's reminder travels from reminder storage to the workflow.
+        var sent = new ReminderEnvelope(new ReminderEntity("checkouts", "o1"), new ReminderKey(WorkflowWake.Key), At,
+            ReminderDeadline.Infinite, wake);
+        var received = (ReminderEnvelope)RoundTrip(sent);
+
+        Assert.Equal(wake, received.Message);
+        Assert.Equal(new ReminderKey(WorkflowWake.Key), received.Key);
+        Assert.Equal(At, received.DueTimeUtc);
     }
 
     public static TheoryData<int> DeliveryReplies => [0, 1, 2, 3];
