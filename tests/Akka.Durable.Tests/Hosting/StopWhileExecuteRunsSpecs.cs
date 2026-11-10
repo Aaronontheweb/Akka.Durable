@@ -1,5 +1,4 @@
 using Akka.Actor;
-using Akka.Cluster.Hosting;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Hosting;
 using Xunit;
@@ -77,7 +76,7 @@ public abstract class StopWhileExecuteRunsSpec(ITestOutputHelper output) : Count
 
 public class LocalStopWhileExecuteRunsSpecs(ITestOutputHelper output) : StopWhileExecuteRunsSpec(output)
 {
-    protected override ShardOptions? Sharding => null;
+    protected override ShardedHosting? Sharding => null;
 
     protected override string EntityPath(string id) =>
         $"/user/{LocalEntityHost.ActorName(Counter.TypeName)}/{Uri.EscapeDataString(id)}";
@@ -85,7 +84,7 @@ public class LocalStopWhileExecuteRunsSpecs(ITestOutputHelper output) : StopWhil
 
 public class ShardedStopWhileExecuteRunsSpecs(ITestOutputHelper output) : StopWhileExecuteRunsSpec(output)
 {
-    protected override ShardOptions? Sharding => new();
+    protected override ShardedHosting? Sharding => new();
 
     protected override void ConfigureCluster(AkkaConfigurationBuilder builder) => ConfigureSingleNodeCluster(builder);
 
@@ -93,10 +92,10 @@ public class ShardedStopWhileExecuteRunsSpecs(ITestOutputHelper output) : StopWh
 }
 
 /// <summary>
-/// One <see cref="ShardOptions"/> object reused for two entity types. The shard's stop message is set by the
-/// first registration, so it has to be one that every entity type handles.
+/// One <see cref="ShardedHosting"/> value reused for two entity types. Every entity type has the same stop
+/// message, and each registration gets its own sharding settings.
 /// </summary>
-public class SharedShardOptionsSpecs(ITestOutputHelper output) : CounterHostingSpec(output)
+public class SharedShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(output)
 {
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromSeconds(1);
 
@@ -107,9 +106,9 @@ public class SharedShardOptionsSpecs(ITestOutputHelper output) : CounterHostingS
 
     private static readonly EntityOptions Idle = EntityOptions.Default with { PassivateIdleAfter = IdleTimeout };
 
-    private readonly ShardOptions _shared = new();
+    private readonly ShardedHosting _shared = new();
 
-    protected override ShardOptions? Sharding => _shared;
+    protected override ShardedHosting? Sharding => _shared;
 
     protected override EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition =>
         Counter.Definition with { Options = Idle };
@@ -127,7 +126,7 @@ public class SharedShardOptionsSpecs(ITestOutputHelper output) : CounterHostingS
         Sys.ActorSelection($"/system/sharding/{type.Value}/*/{id}").ResolveOne(TimeSpan.FromSeconds(5), TestCancellation);
 
     [Fact]
-    public async Task Two_entity_types_registered_with_one_ShardOptions_both_passivate()
+    public async Task Two_entity_types_hosted_with_one_ShardedHosting_both_passivate()
     {
         await CounterRef("a").Ask(new GetCount(), AskCancellation(ClusterFormation));
         await DurableEntityRef<TallyCommand, TallyState, TallyEvent>("t").GetStateAsync(AskCancellation(ClusterFormation));
