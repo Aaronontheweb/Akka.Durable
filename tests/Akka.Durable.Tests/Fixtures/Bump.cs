@@ -4,61 +4,36 @@ using Akka.Serialization.V2;
 
 namespace Akka.Durable.Tests.Fixtures.Bumps;
 
-// A workflow that talks to a durable entity from Work, with no effect handler: it sends the counter an
-// Increment, then a GetCount, and ends with the count. Each reply becomes one of its facts.
+// A one-state workflow whose Work sends Adjust to the railway entity with the workflow's own id. The railway replies
+// after an effect of its own, with Adjusted or AdjustmentRejected. The input's plan picks the work:
+// Send: a reply or a give-up ends the workflow. Stay: the table answers everything with Stay, so the journal
+// shows what was decided. WithTimer and Both: like Stay, with a 1 ms timer or a second send in the state.
+// Twice: the first reply is answered with Again. Unhosted: sends the counter, whose entity type is not hosted.
+// ThenThrows and ThenNull: the function that turns the reply into a fact throws, or returns no fact.
+public enum Plan { Send, Stay, WithTimer, Both, Twice, Unhosted, ThenThrows, ThenNull }
 
 public interface IBumpProtocol;
 
-// Input
 [AkkaSerializable(Manifest = "bump-input-v1")]
-public sealed record BumpCounter([property: AkkaField(0)] string Counter, [property: AkkaField(1)] int By) : IBumpProtocol;
-
-// States
-[AkkaSerializable(Manifest = "bump-bumping-v1", AllowEmpty = true)]
-public sealed record Bumping : IBumpProtocol;
-
-[AkkaSerializable(Manifest = "bump-reading-v1", AllowEmpty = true)]
-public sealed record Reading : IBumpProtocol;
-
-[AkkaSerializable(Manifest = "bump-state-v1")]
-public readonly union BumpState(Bumping, Reading) : IBumpProtocol;
-
-// Facts
-/// <summary>The counter accepted the increment.</summary>
-[AkkaSerializable(Manifest = "bump-counter-bumped-v1", AllowEmpty = true)]
-public sealed record CounterBumped : IBumpProtocol;
-
-/// <summary>The counter reported its count.</summary>
-[AkkaSerializable(Manifest = "bump-count-read-v1")]
-public sealed record CountRead([property: AkkaField(0)] int Count) : IBumpProtocol;
-
+public sealed record BumpInput([property: AkkaField(0)] int By, [property: AkkaField(1)] Plan Plan) : IBumpProtocol;
+[AkkaSerializable(Manifest = "bump-sending-v1", AllowEmpty = true)]
+public sealed record Sending : IBumpProtocol;
+[AkkaSerializable(Manifest = "bump-adjusted-v1")]
+public sealed record BumpAdjusted([property: AkkaField(0)] int Count) : IBumpProtocol;
+[AkkaSerializable(Manifest = "bump-rejected-v1")]
+public sealed record BumpRejected([property: AkkaField(0)] string Reason) : IBumpProtocol;
 [AkkaSerializable(Manifest = "bump-gave-up-v1")]
-public sealed record BumpGaveUp(
-    [property: AkkaField(0)] string What,
-    [property: AkkaField(1)] GaveUpReason Reason,
+public sealed record BumpGaveUp([property: AkkaField(0)] string What, [property: AkkaField(1)] GaveUpReason Reason,
     [property: AkkaField(2)] string Error) : IBumpProtocol;
-
-[AkkaSerializable(Manifest = "bump-cancelled-v1")]
-public sealed record BumpCancelled([property: AkkaField(0)] string Reason) : IBumpProtocol;
-
+[AkkaSerializable(Manifest = "bump-noted-v1")]
+public sealed record BumpNoted([property: AkkaField(0)] string Note) : IBumpProtocol;
+[AkkaSerializable(Manifest = "bump-timer-due-v1", AllowEmpty = true)]
+public sealed record BumpTimerDue : IBumpProtocol;
 [AkkaSerializable(Manifest = "bump-fact-v1")]
-public readonly union BumpFact(CounterBumped, CountRead, BumpGaveUp, BumpCancelled) : IBumpProtocol;
-
-// Outcomes
-[AkkaSerializable(Manifest = "bump-bumped-v1")]
-public sealed record Bumped([property: AkkaField(0)] int Count) : IBumpProtocol;
-
-[AkkaSerializable(Manifest = "bump-failed-v1")]
-public sealed record BumpFailed(
-    [property: AkkaField(0)] string What,
-    [property: AkkaField(1)] GaveUpReason Reason,
-    [property: AkkaField(2)] string Error) : IBumpProtocol;
-
-[AkkaSerializable(Manifest = "bump-stopped-v1")]
-public sealed record BumpStopped([property: AkkaField(0)] string Reason) : IBumpProtocol;
-
-[AkkaSerializable(Manifest = "bump-outcome-v1")]
-public readonly union BumpOutcome(Bumped, BumpFailed, BumpStopped) : IBumpProtocol;
+public readonly union BumpFact(BumpAdjusted, BumpRejected, BumpGaveUp, BumpNoted, BumpTimerDue) : IBumpProtocol;
+// The outcome is the fact that ended the workflow. A Notify or a cancel arrives as BumpNoted.
+[AkkaSerializable(Manifest = "bump-ended-v1")]
+public sealed record Ended([property: AkkaField(0)] BumpFact Last) : IBumpProtocol;
 
 [AkkaSerializer<IBumpProtocol>("bump-test", 22605)]
 public sealed partial class BumpSerializer : AkkaSerializer
@@ -68,34 +43,37 @@ public sealed partial class BumpSerializer : AkkaSerializer
 
 public static class Bump
 {
-    public static readonly WorkflowDefinition<BumpCounter, BumpState, BumpFact, BumpOutcome> Definition =
-        new(new WorkflowTypeName("bumps"),
-            Start: _ => new Bumping(),
-            Work,
-            Decide,
-            Cancel: request => new BumpCancelled(request.Reason),
+    public static readonly WorkflowDefinition<BumpInput, Sending, BumpFact, Ended> Definition =
+        new(new WorkflowTypeName("bumps"), Start: _ => new Sending(), Work, Decide,
+            Cancel: request => new BumpNoted($"cancel:{request.Reason}"),
             GaveUp: gaveUp => new BumpGaveUp(gaveUp.What, gaveUp.Reason, gaveUp.Error ?? ""));
 
-    /// <summary>Each state sends one command to the counter. The type arguments of Send are inferred.</summary>
-    public static WorkList<BumpFact> Work(BumpState state, WorkContext<BumpCounter, BumpFact> ctx) =>
-        state switch
+    /// <summary>No type arguments: Send infers them from the command's IReplies.</summary>
+    public static WorkList<BumpFact> Work(Sending state, WorkContext<BumpInput, BumpFact> ctx)
+    {
+        var (target, by) = (new EntityId(ctx.Id.Value), ctx.Input.By);
+        var send = ctx.Send(target, new Adjust(by), FactOf);
+        return ctx.Input.Plan switch
         {
-            Bumping => ctx.Send(new EntityId(ctx.Input.Counter), new Increment(ctx.Input.By), _ => new CounterBumped()),
-            Reading => ctx.Send(new EntityId(ctx.Input.Counter), new GetCount(), reply => new CountRead(reply.Count)),
+            Plan.WithTimer => ctx.All(send, ctx.Timer(TimeSpan.FromMilliseconds(1), new BumpTimerDue())),
+            Plan.Both => ctx.All(send, ctx.Send(new EntityId($"{ctx.Id.Value}-b"), new Adjust(by), FactOf)),
+            Plan.Unhosted => ctx.Send(target, new Increment(by), _ => new BumpNoted("incremented")),
+            Plan.ThenThrows => ctx.Send(target, new Adjust(by), _ => throw new InvalidOperationException("then failed")),
+            Plan.ThenNull => ctx.Send(target, new Adjust(by), _ => default),
+            _ => send,
         };
+    }
 
-    /// <summary>The fact table. It has no catch-all arm.</summary>
-    public static Transition<BumpState, BumpOutcome> Decide(
-        BumpState state, BumpFact fact, DecideContext<BumpCounter, BumpState, BumpOutcome> ctx) =>
-        (state, fact) switch
+    public static BumpFact FactOf(AdjustmentReply reply) =>
+        reply switch { Adjusted a => new BumpAdjusted(a.Count), AdjustmentRejected r => new BumpRejected(r.Reason) };
+
+    /// <summary>The fact table. One state, so it switches on the fact. It has no catch-all arm.</summary>
+    public static Transition<Sending, Ended> Decide(Sending state, BumpFact fact, DecideContext<BumpInput, Sending, Ended> ctx) =>
+        fact switch
         {
-            (Bumping, CounterBumped) => ctx.Next(new Reading()),
-            (Reading, CountRead read) => ctx.Finish(new Bumped(read.Count)),
-
-            (Bumping or Reading, BumpGaveUp gaveUp) => ctx.Finish(new BumpFailed(gaveUp.What, gaveUp.Reason, gaveUp.Error)),
-            (Bumping or Reading, BumpCancelled cancelled) => ctx.Finish(new BumpStopped(cancelled.Reason)),
-
-            (Bumping, CountRead) => ctx.Unexpected(),
-            (Reading, CounterBumped) => ctx.Unexpected(),
+            BumpAdjusted adjusted when ctx.Input.Plan == Plan.Twice && adjusted.Count < 2 * ctx.Input.By => ctx.Again(),
+            BumpAdjusted or BumpRejected or BumpGaveUp when ctx.Input.Plan is Plan.Stay or Plan.WithTimer or Plan.Both => ctx.Stay(),
+            BumpAdjusted or BumpRejected or BumpGaveUp => ctx.Finish(new Ended(fact)),
+            BumpNoted or BumpTimerDue => ctx.Stay(),
         };
 }
