@@ -34,6 +34,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private long _lastSnapshotSequenceNr;
 
+    // Execute handlers this incarnation started whose outcome it has not received yet. Send is not counted:
+    // a send has no time limit. Run is awaited in place, so a stop waits for it anyway.
+    private int _executesInFlight;
+
+    // The host asked this entity to stop while an Execute handler was in flight. It stops at the end of the
+    // first decision that leaves nothing in flight.
+    private bool _stopRequested;
+
     public EntityActor(
         EntityId entityId,
         EntityDefinition<TState, TCommand, TEvent> definition,
@@ -174,7 +182,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Command<TCommand>(command => HandleCommand(command, Sender, reminder: null));
         Command<EffectCompleted>(HandleEffectCompleted);
         Command<ForeignReply>(reply => HandleForeign(reply.Message, reply.Origin));
-        Command<StopEntity>(_ => Context.Stop(Self));
+        Command<StopEntity>(_ => RequestStop());
 
         Command<SaveSnapshotSuccess>(HandleSnapshotSaved);
         Command<SaveSnapshotFailure>(f =>
@@ -205,6 +213,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             case Ignored:
                 // Deliberately ignored reminders are acknowledged so they aren't redelivered.
                 if (reminder is not null) AckReminder(reminder);
+                StopIfRequested();
                 break;
 
             case NotHandled:
@@ -219,12 +228,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 {
                     Unhandled(command);
                 }
+                StopIfRequested();
                 break;
 
             case Stashed:
                 // Stashes the original envelope + sender. A stashed reminder is not
                 // acknowledged until it is actually processed after UnstashAll.
                 Stash.Stash();
+                StopIfRequested();
                 break;
 
             default:
@@ -269,6 +280,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void HandleEffectCompleted(EffectCompleted completed)
     {
+        // An outcome sent just before a restart can reach the next incarnation, which never counted it.
+        _executesInFlight = Math.Max(0, _executesInFlight - 1);
+
         var outcome = completed.Outcome;
         if (completed.Failure is { } failure)
         {
@@ -279,6 +293,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 // failure to the entity returns it as an outcome instead of throwing.
                 _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. State is unchanged.",
                     completed.Effect, EntityType.Value, _entityId.Value);
+                StopIfRequested();
                 return;
             }
 
@@ -301,6 +316,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
             case null:
                 _log.Debug("Effect {0} completed with no outcome", completed.Effect);
+                StopIfRequested();
                 break;
 
             default:
@@ -323,7 +339,32 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             if (!events.IsEmpty) MaybeSnapshot();
             await ExecuteEffectsAsync(effects, origin);
             if (reminder is not null) AckReminder(reminder);
+
+            // The decision is complete. It may have started new Execute effects; then the entity keeps running.
+            StopIfRequested();
         });
+    }
+
+    /// <summary>
+    /// The host asks the entity to stop. With an <c>Execute</c> handler in flight the entity stops later, once
+    /// it has decided on every outcome. The host buffers the entity's messages until then.
+    /// </summary>
+    /// <remarks>
+    /// The wait is bounded during a rebalance or a node shutdown: the shard stops the entity itself once its
+    /// hand-off timeout has passed.
+    /// </remarks>
+    private void RequestStop()
+    {
+        _stopRequested = true;
+        if (_executesInFlight > 0)
+            _log.Debug("Stop deferred until {0} Execute effects in flight have completed", _executesInFlight);
+        StopIfRequested();
+    }
+
+    /// <summary>Stops the entity if its host asked it to and no <c>Execute</c> handler is in flight.</summary>
+    private void StopIfRequested()
+    {
+        if (_stopRequested && _executesInFlight == 0) Context.Stop(Self);
     }
 
     #endregion
@@ -433,15 +474,22 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         var log = _log;
         var effect = execute.Effect;
         var failed = execute.Failed;
+        _executesInFlight++;
         _ = InvokeAsync(scope, (_, ct) => invoke(ct), timeout: null).ContinueWith(t =>
         {
             // This incarnation is gone; its successor re-derives pending effects in Resume.
             if (lifetime.IsCancellationRequested) return;
 
             if (t.IsCompletedSuccessfully)
+            {
                 self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin, failed), self);
+            }
             else
+            {
                 log.Error(t.Exception, "The outcome of effect {0} could not be observed", effect);
+                // Still report back, so that the entity no longer counts the effect as in flight.
+                self.Tell(new EffectCompleted(effect, null, null, origin, null), self);
+            }
         }, TaskScheduler.Default);
     }
 
@@ -638,23 +686,17 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     #endregion
 
+    protected override void PreRestart(Exception reason, object message)
+    {
+        // A deferred stop must outlive a restart: the host buffers this entity's messages until it stops.
+        if (_stopRequested) Self.Tell(StopEntity.Instance, ActorRefs.NoSender);
+        base.PreRestart(reason, message);
+    }
+
     protected override void PostStop()
     {
         _lifetime.Cancel();
         base.PostStop();
-    }
-
-    /// <summary>
-    /// Stop message handed back by the shard / local host after <see cref="Passivate"/>.
-    /// </summary>
-    /// <remarks>
-    /// Only ever sent by an entity's own parent (its shard or local host) on the same node, also as the
-    /// shard's hand-off stop message, so it never crosses a serialization boundary.
-    /// </remarks>
-    internal sealed class StopEntity : INoSerializationVerificationNeeded
-    {
-        public static readonly StopEntity Instance = new();
-        private StopEntity() { }
     }
 
     /// <summary>The result of an <c>Execute</c> handler, sent by the entity to itself.</summary>

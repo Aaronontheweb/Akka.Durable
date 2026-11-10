@@ -89,7 +89,7 @@ public static class DurableEntityHostingExtensions
         }
 
         var options = definition.Options ?? EntityOptions.Default;
-        var stopMessage = EntityActor<TState, TCommand, TEvent>.StopEntity.Instance;
+        var stopMessage = StopEntity.Instance;
         var passivateIdleAfter = options.PassivateIdleAfter;
 
         AddFrameworkSerializerOnce(builder);

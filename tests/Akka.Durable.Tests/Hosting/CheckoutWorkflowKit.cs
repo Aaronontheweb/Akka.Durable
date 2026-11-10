@@ -88,7 +88,7 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
             : $"/user/{LocalEntityHost.ActorName(new EntityTypeName(type))}/{id}";
         var actor = await Sys.ActorSelection(path).ResolveOne(TimeSpan.FromSeconds(5), TestCancellation);
         Watch(actor);
-        actor.Tell(EntityActor<WfState, WfCommand, WfEvent>.StopEntity.Instance);
+        actor.Tell(PoisonPill.Instance);
         await ExpectTerminatedAsync(actor, cancellationToken: TestCancellation);
     }
 
