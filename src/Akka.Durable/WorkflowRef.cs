@@ -13,6 +13,7 @@ namespace Akka.Durable;
 /// One actor system hosts at most one workflow type for a pair of input and outcome types.
 /// <c>WithDurableWorkflow</c> rejects a second one.
 /// </remarks>
+// ReSharper disable once ClassCannotBeInstantiated
 public sealed class WorkflowRegion<TInput, TOutcome>
 {
     private WorkflowRegion() { }
