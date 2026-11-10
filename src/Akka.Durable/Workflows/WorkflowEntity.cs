@@ -44,17 +44,14 @@ internal sealed record WfRunning(
     [property: AkkaField(5)] ImmutableArray<object> Held,
     [property: AkkaField(6)] DateTimeOffset IssuedAt = default) : IDurableEntityProtocol
 {
-    /// <summary>The held facts. A state written before this field existed has none.</summary>
-    public ImmutableArray<object> HeldFacts => Held.IsDefault ? [] : Held;
-
     // ImmutableArray compares by reference; compare its contents so records with equal data are equal.
     public bool Equals(WfRunning? other) =>
         other is not null && Equals(Input, other.Input) && Equals(State, other.State) && Entry == other.Entry
         && EnteredAt == other.EnteredAt && Settled.SequenceEqual(other.Settled)
-        && HeldFacts.SequenceEqual(other.HeldFacts) && IssuedAt == other.IssuedAt;
+        && Held.SequenceEqual(other.Held) && IssuedAt == other.IssuedAt;
 
     public override int GetHashCode() =>
-        HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length, HeldFacts.Length, IssuedAt);
+        HashCode.Combine(Input, State, Entry, EnteredAt, Settled.Length, Held.Length, IssuedAt);
 }
 
 [AkkaSerializable(Manifest = "durable-wf-finished-v1")]
@@ -468,7 +465,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         var entry = running.Entry;
         var enteredAt = running.EnteredAt;
         var settled = running.Settled;
-        var held = running.HeldFacts;
+        var held = running.Held;
         var issued = true;
         var finished = false;
         var events = new List<WfEvent>();
@@ -652,10 +649,10 @@ internal static class WorkflowEvolve
             (WfNotStarted, WfStarted started) =>
                 new WfRunning(started.Input, started.First, 1, started.At, [], [], started.At),
             (WfRunning running, WfHeld held) =>
-                running with { Held = running.HeldFacts.Add(held.Fact) },
+                running with { Held = running.Held.Add(held.Fact) },
             // A fact taken from the held list leaves it, then its step applies as for any fact.
             (WfRunning running, WfFactRecorded { FromHeld: true } recorded) =>
-                Apply(running with { Held = running.HeldFacts.RemoveAt(0) }, recorded),
+                Apply(running with { Held = running.Held.RemoveAt(0) }, recorded),
             (WfRunning running, WfFactRecorded recorded) => Apply(running, recorded),
             _ => throw new InvalidOperationException(
                 $"The journal holds the workflow event {@event.Value} for a workflow in the state {state.Value}. " +

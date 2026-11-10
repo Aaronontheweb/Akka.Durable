@@ -86,7 +86,7 @@ public class WorkflowEngineSpecs
                 var running = RunningState(state);
                 Assert.Equal(2, running.Entry);
                 Assert.Equal<int>([0], running.Settled);
-                Assert.Empty(running.HeldFacts);
+                Assert.Empty(running.Held);
             });
 
         Assert.Empty(IssuedWork(outcome));
@@ -105,7 +105,7 @@ public class WorkflowEngineSpecs
                 Assert.Equal<CheckoutState>(new Reserving(), (CheckoutState)running.State);
                 Assert.Equal(1, running.Entry);
                 Assert.Empty(running.Settled);
-                Assert.Equal<object>((CheckoutFact)new Charged("c1"), Assert.Single(running.HeldFacts));
+                Assert.Equal<object>((CheckoutFact)new Charged("c1"), Assert.Single(running.Held));
             });
 
         // The only effect is the reminder, for the deadline of the work that is still in flight.
@@ -173,7 +173,7 @@ public class WorkflowEngineSpecs
                 Assert.Equal<CheckoutState>(
                     new Undoing(new OrderCancelled("changed my mind")), (CheckoutState)running.State);
                 Assert.Equal(3, running.Entry);
-                Assert.Empty(running.HeldFacts);
+                Assert.Empty(running.Held);
             });
 
         // Only the work of the state the workflow ends in. ChargeCard is not among it.
