@@ -52,12 +52,13 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
 
     protected CheckoutServices Services => Host.Services.GetRequiredService<CheckoutServices>();
 
-    protected IWorkflowRef<PlaceOrder, CheckoutOutcome> CheckoutRef(string id) => WorkflowRef<PlaceOrder, CheckoutOutcome>(id);
+    protected IWorkflowRef<PlaceOrder, CheckoutFact, CheckoutOutcome> CheckoutRef(string id) =>
+        WorkflowRef<PlaceOrder, CheckoutFact, CheckoutOutcome>(id);
 
     /// <summary>The state of the entity that hosts a checkout: the author's state and what the library tracks.</summary>
     private protected async Task<StateSnapshot<WfState>> HostedState(string id)
     {
-        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutOutcome>>>().ActorRef;
+        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutFact, CheckoutOutcome>>>().ActorRef;
         return await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region).GetStateAsync(AskCancellation());
     }
 
@@ -94,7 +95,7 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
         {
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(TestCancellation);
             attempt.CancelAfter(TimeSpan.FromMilliseconds(500));
-            var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutOutcome>>>().ActorRef;
+            var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutFact, CheckoutOutcome>>>().ActorRef;
             await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region).GetStateAsync(attempt.Token);
         }, TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
     }

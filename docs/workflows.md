@@ -24,11 +24,10 @@ The definition holds these functions:
 | `Start` | Returns the state a new workflow begins in. |
 | `Work` | Returns the work a state needs. |
 | `Decide` | The fact table. Returns what a fact means in a state. |
-| `Kind` | Says whether an outcome is `Succeeded`, `Failed` or `Cancelled`. |
 | `Cancel` | Turns a cancel request into one of your facts. |
 | `GaveUp` | Turns the notice "this work got no answer" into one of your facts. |
 
-`WorkflowDefinition` also takes a `WorkflowTypeName`, and optional `WorkflowOptions`.
+`WorkflowDefinition` also takes a `WorkflowTypeName`, and optional `EntityOptions`: the settings of the entity type that hosts the workflow.
 
 ### Example: a checkout
 
@@ -58,7 +57,7 @@ public sealed record Undone;
 public sealed record UndoRefused;
 public sealed record WorkStuck(string What, GaveUpReason Reason);
 public sealed record TicketOpened;
-public sealed record CancelRequested(string Reason);
+public sealed record CancelRequested(string Reason, string By);
 public sealed record OperatorSaidRetry;
 public sealed record OperatorSaidAbandon;
 
@@ -132,14 +131,6 @@ public static Transition<CheckoutState, CheckoutOutcome> Decide(
         (NeedsAttention, Reserved or OutOfStock or Charged or Declined or Undone or UndoRefused) => ctx.Unexpected(),
         (Reserving or Charging or Undoing, OperatorSaidRetry or OperatorSaidAbandon) => ctx.Unexpected(),
     };
-
-public static OutcomeKind Kind(CheckoutOutcome outcome) =>
-    outcome switch
-    {
-        OrderPlaced => OutcomeKind.Succeeded,
-        OrderFailed => OutcomeKind.Failed,
-        OrderCancelled => OutcomeKind.Cancelled,
-    };
 ```
 
 A handler runs one kind of effect and returns one of your facts. It is an `IEffectHandler<TEffect, TFact>`, the same interface that entities use:
@@ -165,8 +156,7 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
         Start: _ => new Reserving(),
         Work,
         Decide,
-        Kind,
-        Cancel: request => new CancelRequested(request.Reason),
+        Cancel: request => new CancelRequested(request.Reason, request.By),
         GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
 ```
 
@@ -194,7 +184,7 @@ Sometimes work gets no answer. The workflow then receives the give-up fact: the 
 |---|---|
 | The handler throws. | `Failed` |
 | No handler is registered for the effect. | `Failed` |
-| The handler does not answer within `WorkflowOptions.AttemptLimit` (30 seconds by default). | `TimedOut` |
+| The handler does not answer within `EntityOptions.EffectTimeout` (30 seconds by default). | `TimedOut` |
 | The workflow restarted after it entered the state and before the answer arrived. | `Interrupted` |
 
 For `Interrupted`, the work may have run, may have run in part, or may not have run. Nothing runs again after the restart. The workflow receives the give-up fact for the work that had no answer.
@@ -203,10 +193,10 @@ No answer does not mean the work did not happen. A charge can go through and its
 
 The checkout sends every give-up fact to `NeedsAttention`. That state opens a support ticket and waits for a person.
 
-To set the attempt limit, pass options to the definition:
+To set the time one attempt may take, pass options to the definition:
 
 ```csharp
-Checkout.Definition with { Options = new WorkflowOptions { AttemptLimit = TimeSpan.FromSeconds(10) } }
+Checkout.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(10) } }
 ```
 
 ## Timers, and several things in one state
@@ -230,7 +220,7 @@ public static WorkList<CampaignFact> Work(CampaignState state, WorkContext<Invoi
 - `ctx.All` gives a state several things at once: here a piece of work and a time limit for it.
 - When the workflow leaves a state, that state's timers are gone. There is nothing to cancel.
 
-Work and a wait are different. An `Execute` is work: it expects an answer within the attempt limit, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
+Work and a wait are different. An `Execute` is work: it expects an answer within `EffectTimeout`, and it holds facts from outside while it has none. A timer is a wait: it can last months, it never gives up, and it holds nothing. A fact from outside that arrives while a workflow only waits is decided at once. A timer is decided when it is due and the workflow is at rest, with no work in flight. A timer that comes due while work is in flight is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once the workflow leaves the state, the timer never fires.
 
 ### The reminder
 
@@ -254,9 +244,9 @@ While the store is down, a workflow that hit this restarts at once, again and ag
 
 A fact does not have to be the answer to work. Code outside the workflow can send one:
 
-- `Notify(fact)` sends one of the workflow's facts. It is on the ref that knows the fact type.
-- `Cancel(reason)` asks the workflow to stop. Your `Cancel` function turns the request into a fact, and the table decides what it means in the current state. A cancel is not an outcome until the table finishes the workflow.
-- `Accepts<TMessage>(wrap)` on the definition says how a message of another type becomes a fact. An existing actor can then send its own message type to the workflow's address. It gets no reply. A message of the fact type itself is also accepted.
+- `Notify(fact)` sends one of the workflow's facts.
+- `Cancel(reason, by)` asks the workflow to stop. Both are required. `by` says who or what asked. Use an id, such as a user id or a service name, not a person's name or e-mail address, because the value goes into the journal and the log. Your `Cancel` function turns the request into a fact, and the table decides what it means in the current state. A cancel is not an outcome until the table finishes the workflow. A running workflow logs each cancel at information level, with the reason and who asked.
+- `Accepts<TMessage>(wrap)` on the definition says how a message of another type becomes a fact. An existing actor can then send its own message type to the workflow's address. It gets no reply. A message of a type that the definition does not declare is refused, and a warning is logged.
 
 ```csharp
 public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> WithOperatorTool =
@@ -311,12 +301,9 @@ builder.Services.AddAkka("shop", (akka, sp) =>
 
 Without `ShardedHosting`, the workflow type runs in a local host actor in this process. With it, the workflow type runs in a shard region. `ShardedHosting` has the same settings as for entities.
 
-One actor system hosts at most one workflow type for each pair of input and outcome type. `WithDurableWorkflow` rejects a second one.
+One actor system hosts at most one workflow type for each set of input, fact and outcome types. `WithDurableWorkflow` rejects a second one.
 
-To call a workflow, inject a ref factory. There are two:
-
-- `IWorkflowRefs<TInput, TOutcome>` gives refs that can start a workflow, read its status, wait for its outcome and cancel it.
-- `IWorkflowRefs<TInput, TFact, TOutcome>` gives the same refs, which can also `Notify` the workflow with a fact.
+To call a workflow, inject `IWorkflowRefs<TInput, TFact, TOutcome>`. Its refs can start a workflow, read its status, wait for its outcome, cancel it, and `Notify` it with a fact.
 
 ```csharp
 public sealed class CheckoutService(IWorkflowRefs<PlaceOrder, CheckoutFact, CheckoutOutcome> checkouts)
@@ -350,11 +337,11 @@ Getting a ref is cheap. It does not start or activate the workflow.
 
 - `WorkflowNotStarted`.
 - `WorkflowRunning`, with `State` (the name of the state's type, or for a union the name of the case it holds) and `Since` (when the workflow entered it).
-- `WorkflowFinished<TOutcome>`, with `Outcome`, `Kind` and `At`.
+- `WorkflowFinished<TOutcome>`, with `Outcome` and `At`. The outcome type says how the workflow ended.
 
 `WaitForOutcome(pollEvery)` reads the status every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
 
-`DurableEntityTestKit` has `WorkflowRef` helpers that return the same refs in a test.
+`DurableEntityTestKit` has a `WorkflowRef` helper that returns the same ref in a test.
 
 ## Serialization
 

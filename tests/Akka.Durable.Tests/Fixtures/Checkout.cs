@@ -68,8 +68,12 @@ public sealed record WorkStuck(
 public sealed record TicketOpened : ICheckoutProtocol;
 
 /// <summary>Someone asked to stop the checkout.</summary>
+/// <param name="Reason">Why the checkout should stop.</param>
+/// <param name="By">Who or what asked: an id, not a person's name.</param>
 [AkkaSerializable(Manifest = "checkout-cancel-requested-v1")]
-public sealed record CancelRequested([property: AkkaField(0)] string Reason) : ICheckoutProtocol;
+public sealed record CancelRequested(
+    [property: AkkaField(0)] string Reason,
+    [property: AkkaField(1)] string By) : ICheckoutProtocol;
 
 /// <summary>A person looked at the checkout and wants the step it was stuck in tried again.</summary>
 [AkkaSerializable(Manifest = "checkout-operator-said-retry-v1", AllowEmpty = true)]
@@ -120,8 +124,7 @@ public static class Checkout
             Start: _ => new Reserving(),
             Work,
             Decide,
-            Kind,
-            Cancel: request => new CancelRequested(request.Reason),
+            Cancel: request => new CancelRequested(request.Reason, request.By),
             GaveUp: failure => new WorkStuck(failure.What, failure.Reason));
 
     /// <summary>The same checkout, which also takes an operator tool's own message as a fact.</summary>
@@ -176,14 +179,6 @@ public static class Checkout
             (Undoing, Reserved or OutOfStock or Charged or Declined or TicketOpened) => ctx.Unexpected(),
             (NeedsAttention, Reserved or OutOfStock or Charged or Declined or Undone or UndoRefused) => ctx.Unexpected(),
             (Reserving or Charging or Undoing, OperatorSaidRetry or OperatorSaidAbandon) => ctx.Unexpected(),
-        };
-
-    public static OutcomeKind Kind(CheckoutOutcome outcome) =>
-        outcome switch
-        {
-            OrderPlaced => OutcomeKind.Succeeded,
-            OrderFailed => OutcomeKind.Failed,
-            OrderCancelled => OutcomeKind.Cancelled,
         };
 }
 

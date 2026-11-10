@@ -37,7 +37,6 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
 
         var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
         Assert.Equal(new OrderPlaced("charge-o1"), finished.Outcome.Value);
-        Assert.Equal(OutcomeKind.Succeeded, finished.Kind);
     }
 
     [Fact]
@@ -85,7 +84,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal([new ReserveStock("o3"), new ChargeCard("o3", 100), new UndoOrder("o3")], Services.Issued);
 
         var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
-        Assert.Equal(OutcomeKind.Failed, finished.Kind);
+        Assert.Equal(new OrderFailed("no funds"), finished.Outcome.Value);
     }
 
     [Fact]
@@ -217,7 +216,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     [Fact]
     public async Task Two_workflow_types_run_in_one_actor_system()
     {
-        var echo = WorkflowRef<Shout, Heard>("e1");
+        var echo = WorkflowRef<Shout, EchoFact, Heard>("e1");
         var checkout = CheckoutRef("e1");
 
         await echo.Start(new Shout("hello"), AskCancellation());

@@ -26,14 +26,11 @@ public abstract class WorkflowJournalSpecs(ITestOutputHelper output) : CheckoutW
     protected override WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> Definition =>
         Checkout.Definition with
         {
-            Options = new WorkflowOptions
+            Options = EntityOptions.Default with
             {
-                Hosting = EntityOptions.Default with
-                {
-                    JournalPluginId = "akka.persistence.journal.sql",
-                    SnapshotPluginId = "akka.persistence.snapshot-store.sql",
-                    SnapshotEvery = SnapshotEvery,
-                },
+                JournalPluginId = "akka.persistence.journal.sql",
+                SnapshotPluginId = "akka.persistence.snapshot-store.sql",
+                SnapshotEvery = SnapshotEvery,
             },
         };
 
@@ -140,7 +137,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
     {
         Assert.Equal(DeepState, RoundTrip(DeepState));
 
-        WfState finished = new WfFinished(Order, (CheckoutOutcome)new OrderPlaced("charge-9"), OutcomeKind.Succeeded,
+        WfState finished = new WfFinished(Order, (CheckoutOutcome)new OrderPlaced("charge-9"),
             new DateTimeOffset(2026, 11, 9, 12, 0, 0, TimeSpan.Zero));
         Assert.Equal(finished, RoundTrip(finished));
     }
@@ -196,22 +193,22 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
             Settled: [],
             Held:
             [
-                new WfHeldFact((CheckoutFact)new CancelRequested("first"), At),
-                new WfHeldFact((CheckoutFact)new OperatorSaidRetry(), At.AddSeconds(1)),
+                (CheckoutFact)new CancelRequested("first", "user-17"),
+                (CheckoutFact)new OperatorSaidRetry(),
             ]);
 
         var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);
 
         Assert.Equal(state.Value, received);
-        Assert.Equal<object>((CheckoutFact)new CancelRequested("first"), received.Held[0].Fact);
+        Assert.Equal<object>((CheckoutFact)new CancelRequested("first", "user-17"), received.Held[0]);
     }
 
     [Fact]
     public void A_held_fact_and_a_fact_taken_from_the_held_list_round_trip()
     {
-        WfEvent held = new WfHeld((CheckoutFact)new CancelRequested("customer asked"), At);
+        WfEvent held = new WfHeld((CheckoutFact)new CancelRequested("customer asked", "user-17"));
         WfEvent recorded = new WfFactRecorded(
-            (CheckoutFact)new CancelRequested("customer asked"),
+            (CheckoutFact)new CancelRequested("customer asked", "user-17"),
             Answered: null,
             At: At,
             Step: new WfMoved((CheckoutState)new Undoing(new OrderCancelled("customer asked"))),
@@ -240,7 +237,7 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
             Entry: 3,
             EnteredAt: At,
             Settled: [0],
-            Held: [new WfHeldFact((CheckoutFact)new CancelRequested("late"), At.AddSeconds(2))],
+            Held: [(CheckoutFact)new CancelRequested("late", "user-17")],
             IssuedAt: At.AddMinutes(5));
 
         var received = Assert.IsType<WfRunning>(((WfState)RoundTrip(state)).Value);

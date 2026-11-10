@@ -9,21 +9,13 @@ namespace Akka.Durable;
 /// </summary>
 public readonly record struct WorkflowTypeName(string Value);
 
-/// <summary>What kind of ending an outcome is.</summary>
-public enum OutcomeKind
-{
-    Succeeded = 0,
-    Failed = 1,
-    Cancelled = 2,
-}
-
 /// <summary>Why a piece of work got no answer.</summary>
 public enum GaveUpReason
 {
     /// <summary>The handler threw, or no handler is registered for the effect.</summary>
     Failed = 0,
 
-    /// <summary>The handler did not answer within <see cref="WorkflowOptions.AttemptLimit"/>.</summary>
+    /// <summary>The handler did not answer within <see cref="EntityOptions.EffectTimeout"/>.</summary>
     TimedOut = 1,
 
     /// <summary>
@@ -53,25 +45,11 @@ public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error 
 
 /// <summary>The request to stop a workflow. The definition's <c>Cancel</c> function turns it into a fact.</summary>
 /// <param name="Reason">Why the workflow should stop.</param>
-/// <param name="By">Who asked, when that is known.</param>
-public sealed record CancelRequest(string Reason, string? By = null);
-
-public sealed record WorkflowOptions
-{
-    /// <summary>
-    /// How long one attempt at a piece of work may take. After that its result counts as unknown and the
-    /// workflow receives the give-up fact. Defaults to 30 seconds.
-    /// </summary>
-    public TimeSpan AttemptLimit { get; init; } = TimeSpan.FromSeconds(30);
-
-    /// <summary>
-    /// The settings of the entity type that hosts the workflow: shards, idle passivation, persistence id
-    /// and plugins. <see cref="EntityOptions.EffectTimeout"/> is replaced by <see cref="AttemptLimit"/>.
-    /// </summary>
-    public EntityOptions Hosting { get; init; } = EntityOptions.Default;
-
-    public static readonly WorkflowOptions Default = new();
-}
+/// <param name="By">
+/// Who or what asked for the cancel. Use an id, such as a user id or a service name, not a person's name or
+/// e-mail address, because the value goes into the journal and the log.
+/// </param>
+public sealed record CancelRequest(string Reason, string By);
 
 /// <summary>
 /// A finite process that survives restarts: it starts once, moves through the author's states, and ends
@@ -84,12 +62,15 @@ public sealed record WorkflowOptions
 /// know what a state's work is, so it must give the same answer every time.
 /// </param>
 /// <param name="Decide">What a fact means in a state. One table for everything that arrives.</param>
-/// <param name="Kind">What kind of ending an outcome is.</param>
 /// <param name="Cancel">
 /// The fact a cancel arrives as. The table decides what a cancel means in each state.
 /// </param>
 /// <param name="GaveUp">The fact that says a piece of work got no answer.</param>
-/// <param name="Options">Optional settings.</param>
+/// <param name="Options">
+/// The settings of the entity type that hosts the workflow: shards, idle passivation, persistence id and plugins.
+/// <see cref="EntityOptions.EffectTimeout"/> is the time one attempt at a piece of work may take. After that its
+/// result counts as unknown and the workflow receives the give-up fact.
+/// </param>
 /// <typeparam name="TInput">The record the workflow starts with. Available in every state.</typeparam>
 /// <typeparam name="TState">The states, typically a union of records.</typeparam>
 /// <typeparam name="TFact">Everything that can arrive, typically a union. Facts are what the journal records.</typeparam>
@@ -116,10 +97,9 @@ public sealed record WorkflowDefinition<TInput, TState, TFact, TOutcome>(
     Func<TInput, TState> Start,
     Func<TState, WorkContext<TInput, TFact>, WorkList<TFact>> Work,
     Func<TState, TFact, DecideContext<TInput, TState, TOutcome>, Transition<TState, TOutcome>> Decide,
-    Func<TOutcome, OutcomeKind> Kind,
     Func<CancelRequest, TFact> Cancel,
     Func<WorkGaveUp, TFact> GaveUp,
-    WorkflowOptions? Options = null)
+    EntityOptions? Options = null)
     where TInput : notnull
     where TState : notnull
     where TFact : notnull
@@ -146,7 +126,7 @@ public sealed record WorkflowDefinition<TInput, TState, TFact, TOutcome>(
 /// </summary>
 /// <remarks>
 /// <para>Work and a wait are different. Work is a call to a service. It holds facts from outside while it has
-/// no answer, and it gives up after <see cref="WorkflowOptions.AttemptLimit"/>.</para>
+/// no answer, and it gives up after <see cref="EntityOptions.EffectTimeout"/>.</para>
 /// <para>A wait holds nothing: a fact from outside is decided at once. It can last months and it never gives
 /// up. A timer is decided when it is due and the workflow is at rest. One that comes due while work is in flight
 /// is decided when the work settles, if the workflow is still in that state. A timer belongs to its state: once

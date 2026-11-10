@@ -84,8 +84,13 @@ public sealed record GraceOver : ICampaignProtocol;
 [AkkaSerializable(Manifest = "campaign-paid-v1", AllowEmpty = true)]
 public sealed record Paid : ICampaignProtocol;
 
+/// <summary>Someone asked to stop the campaign.</summary>
+/// <param name="Reason">Why the campaign should stop.</param>
+/// <param name="By">Who or what asked: an id, not a person's name.</param>
 [AkkaSerializable(Manifest = "campaign-stop-requested-v1")]
-public sealed record StopRequested([property: AkkaField(0)] string Reason) : ICampaignProtocol;
+public sealed record StopRequested(
+    [property: AkkaField(0)] string Reason,
+    [property: AkkaField(1)] string By) : ICampaignProtocol;
 
 /// <summary>The customer says they paid.</summary>
 [AkkaSerializable(Manifest = "campaign-payment-claimed-v1", AllowEmpty = true)]
@@ -141,8 +146,7 @@ public static class Campaign
             Start: _ => new Waiting(),
             Work,
             Decide,
-            Kind,
-            Cancel: request => new StopRequested(request.Reason),
+            Cancel: request => new StopRequested(request.Reason, request.By),
             GaveUp: failure => new WorkFailed(failure.What, failure.Reason));
 
     /// <summary>What each state needs: a wait, work, or both.</summary>
@@ -205,14 +209,6 @@ public static class Campaign
             (Waiting or Reminding or Pausing or Escalating, NotYetPaid or CheckOverdue) => ctx.Unexpected(),
             (Verifying, DueDateReached or SendNow or ReminderSent or PauseOver or CollectionsNotified or CollectionsDeclined
                 or GraceOver) => ctx.Unexpected(),
-        };
-
-    public static OutcomeKind Kind(CampaignOutcome outcome) =>
-        outcome switch
-        {
-            PaidInFull => OutcomeKind.Succeeded,
-            SentToCollections => OutcomeKind.Failed,
-            CampaignStopped => OutcomeKind.Cancelled,
         };
 }
 

@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Durable.TestKit;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace Akka.Durable.Tests;
@@ -27,7 +29,7 @@ public class WorkflowEngineSpecs
     private static WfEvent Recorded(CheckoutFact fact, int? answered, WfStep step, bool fromHeld = false) =>
         new WfFactRecorded(fact, answered, Now, step, fromHeld);
 
-    private static WfEvent Held(CheckoutFact fact) => new WfHeld(fact, Now);
+    private static WfEvent Held(CheckoutFact fact) => new WfHeld(fact);
 
     private static WfStep MovedTo(CheckoutState next) => new WfMoved(next);
 
@@ -35,7 +37,7 @@ public class WorkflowEngineSpecs
 
     private static WfStep Unexpected() => new WfUnexpected();
 
-    private static WfStep Ended(CheckoutOutcome outcome, OutcomeKind kind) => new WfEnded(outcome, kind);
+    private static WfStep Ended(CheckoutOutcome outcome) => new WfEnded(outcome);
 
     /// <summary>Reserving, then reserved: the workflow is in Charging, entry 2, with its work in flight.</summary>
     private static WfEvent[] InCharging() =>
@@ -61,7 +63,7 @@ public class WorkflowEngineSpecs
     private static WfEvent[] Finished() =>
     [
         Started(),
-        Recorded(new OutOfStock(), 0, Ended(new OrderFailed("out of stock"), OutcomeKind.Failed)),
+        Recorded(new OutOfStock(), 0, Ended(new OrderFailed("out of stock"))),
     ];
 
     private static WfCommand Answer(int entry, int index, CheckoutFact fact) => new WfAnswer(entry, index, fact);
@@ -86,7 +88,7 @@ public class WorkflowEngineSpecs
                 var running = RunningState(state);
                 Assert.Equal(2, running.Entry);
                 Assert.Equal<int>([0], running.Settled);
-                Assert.Empty(running.HeldFacts);
+                Assert.Empty(running.Held);
             });
 
         Assert.Empty(IssuedWork(outcome));
@@ -105,7 +107,7 @@ public class WorkflowEngineSpecs
                 Assert.Equal<CheckoutState>(new Reserving(), (CheckoutState)running.State);
                 Assert.Equal(1, running.Entry);
                 Assert.Empty(running.Settled);
-                Assert.Equal(new WfHeldFact((CheckoutFact)new Charged("c1"), Now), Assert.Single(running.HeldFacts));
+                Assert.Equal<object>((CheckoutFact)new Charged("c1"), Assert.Single(running.Held));
             });
 
         // The only effect is the reminder, for the deadline of the work that is still in flight.
@@ -139,17 +141,16 @@ public class WorkflowEngineSpecs
         var outcome = Scenario()
             .Given([
                 .. InCharging(),
-                Held(new CancelRequested("changed my mind")),
+                Held(new CancelRequested("changed my mind", "user-17")),
                 Held(new OperatorSaidRetry()),
             ])
             .When(Answer(entry: 2, index: 0, new Charged("c1")))
             .ThenPersisted(Recorded(
-                new Charged("c1"), answered: 0, Ended(new OrderPlaced("c1"), OutcomeKind.Succeeded)))
+                new Charged("c1"), answered: 0, Ended(new OrderPlaced("c1"))))
             .ThenState(state =>
             {
                 var finished = Assert.IsType<WfFinished>(state.Value);
                 Assert.Equal<CheckoutOutcome>(new OrderPlaced("c1"), (CheckoutOutcome)finished.Outcome);
-                Assert.Equal(OutcomeKind.Succeeded, finished.Kind);
             });
 
         Assert.Empty(IssuedWork(outcome));
@@ -159,13 +160,13 @@ public class WorkflowEngineSpecs
     public void A_state_the_workflow_passes_through_does_not_get_its_work_issued()
     {
         var outcome = Scenario()
-            .Given(Started(), Held(new CancelRequested("changed my mind")))
+            .Given(Started(), Held(new CancelRequested("changed my mind", "user-17")))
             .When(Answer(entry: 1, index: 0, new Reserved("r1")))
             .ThenPersisted(
                 // The reservation moves the workflow to Charging, whose work is never issued ...
                 Recorded(new Reserved("r1"), answered: 0, MovedTo(new Charging("r1"))),
                 // ... because the held cancel is decided next and moves it on to Undoing.
-                Recorded(new CancelRequested("changed my mind"), answered: null,
+                Recorded(new CancelRequested("changed my mind", "user-17"), answered: null,
                     MovedTo(new Undoing(new OrderCancelled("changed my mind"))), fromHeld: true))
             .ThenState(state =>
             {
@@ -173,7 +174,7 @@ public class WorkflowEngineSpecs
                 Assert.Equal<CheckoutState>(
                     new Undoing(new OrderCancelled("changed my mind")), (CheckoutState)running.State);
                 Assert.Equal(3, running.Entry);
-                Assert.Empty(running.HeldFacts);
+                Assert.Empty(running.Held);
             });
 
         // Only the work of the state the workflow ends in. ChargeCard is not among it.
@@ -196,6 +197,30 @@ public class WorkflowEngineSpecs
             });
 
         Assert.Equal<object>([new UndoOrder("o1")], IssuedWork(outcome).Select(e => e.Effect));
+    }
+
+    // ---- Cancel ----
+
+    public static TheoryData<bool> WorkInFlight => [true, false];
+
+    [Theory]
+    [MemberData(nameof(WorkInFlight))]
+    public async Task A_cancel_carries_who_asked_and_is_logged_whether_it_is_held_or_decided(bool workInFlight)
+    {
+        var cancel = new CancelRequested("changed my mind", "user-17");
+        var outcome = Scenario()
+            .Given(workInFlight ? [Started()] : WaitingForAPerson())
+            .When(new WfCancel("changed my mind", By: "user-17"))
+            .ThenPersisted(workInFlight ? Held(cancel) : Recorded(cancel, answered: null, Kept()));
+
+        var loggers = new RecordingLoggers();
+        using var services = new ServiceCollection().AddSingleton<ILoggerFactory>(loggers).BuildServiceProvider();
+        var log = Assert.Single(outcome.Effects.Select(e => e.Value).OfType<RunEffect>());
+        await log.ExecuteAsync(services, TestContext.Current.CancellationToken);
+
+        var (level, message) = Assert.Single(loggers.Lines);
+        Assert.Equal(LogLevel.Information, level);
+        Assert.Equal("Workflow [checkouts/test-entity] was asked to cancel by user-17. Reason: changed my mind", message);
     }
 
     // ---- Recovery ----
@@ -292,6 +317,30 @@ public class WorkflowEngineSpecs
     }
 }
 
+/// <summary>An <see cref="ILoggerFactory"/> whose loggers record every line.</summary>
+internal sealed class RecordingLoggers : ILoggerFactory, ILogger
+{
+    public List<(LogLevel Level, string Message)> Lines { get; } = [];
+
+    public ILogger CreateLogger(string categoryName) => this;
+
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Lines.Add((logLevel, formatter(state, exception)));
+}
+
 /// <summary>A workflow whose first state has two pieces of work, for what a checkout state cannot show.</summary>
 internal static class PairedWork
 {
@@ -302,7 +351,6 @@ internal static class PairedWork
         Start: _ => "pair",
         Work: (_, ctx) => ctx.All(ctx.Execute(new Step("first")), ctx.Execute(new Step("second"))),
         Decide: (_, _, ctx) => ctx.Stay(),
-        Kind: _ => OutcomeKind.Succeeded,
         Cancel: _ => "cancel",
         GaveUp: failure => $"gave up on {failure.What}");
 }

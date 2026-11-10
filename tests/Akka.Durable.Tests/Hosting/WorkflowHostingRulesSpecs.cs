@@ -9,7 +9,7 @@ using Xunit;
 namespace Akka.Durable.Tests.Hosting;
 
 /// <summary>
-/// What <c>WithDurableWorkflow</c> refuses: a second workflow type for the same input and outcome types,
+/// What <c>WithDurableWorkflow</c> refuses: a second workflow type for the same input, fact and outcome types,
 /// and a workflow whose own types have no serializer.
 /// </summary>
 public class WorkflowHostingRulesSpecs
@@ -22,7 +22,7 @@ public class WorkflowHostingRulesSpecs
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void Two_workflow_types_cannot_share_their_input_and_outcome_types(bool sharded)
+    public void Two_workflow_types_cannot_share_their_input_fact_and_outcome_types(bool sharded)
     {
         var builder = Builder().WithDurableWorkflow(Checkout.Definition, sharded ? new ShardedHosting() : null);
 
@@ -32,6 +32,8 @@ public class WorkflowHostingRulesSpecs
         Assert.Contains("[checkouts]", ex.Message);
         Assert.Contains("[checkouts-two]", ex.Message);
         Assert.Contains(typeof(PlaceOrder).FullName!, ex.Message);
+        Assert.Contains(typeof(CheckoutFact).FullName!, ex.Message);
+        Assert.Contains(typeof(CheckoutOutcome).FullName!, ex.Message);
     }
 
     [Fact]
@@ -64,7 +66,6 @@ public class WorkflowHostingRulesSpecs
         Start: _ => new PlainState(),
         Work: (_, ctx) => ctx.Execute(new PlainWork()),
         Decide: (_, _, ctx) => ctx.Finish(new PlainOutcome()),
-        Kind: _ => OutcomeKind.Succeeded,
         Cancel: _ => new PlainFact(),
         GaveUp: _ => new PlainFact());
 

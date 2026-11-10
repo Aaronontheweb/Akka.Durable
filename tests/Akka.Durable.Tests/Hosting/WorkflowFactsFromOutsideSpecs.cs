@@ -56,12 +56,12 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         var checkout = CheckoutWithFacts("f2");
         await checkout.Start(new PlaceOrder("f2", 100), AskCancellation());
 
-        Assert.IsType<Held>((await checkout.Cancel("customer asked", AskCancellation())).Value);
+        Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
         reserved.SetResult(new Reserved("res-f2"));
 
         Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
         var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.Status(AskCancellation())).Value);
-        Assert.Equal(OutcomeKind.Cancelled, finished.Kind);
+        Assert.Equal(new OrderCancelled("customer asked"), finished.Outcome.Value);
 
         // The reservation moved the checkout to Charging, but the cancel was decided before the charge was issued.
         Assert.Equal([new ReserveStock("f2"), new UndoOrder("f2")], Services.Issued);
@@ -75,8 +75,8 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         var checkout = CheckoutWithFacts("f3");
         await checkout.Start(new PlaceOrder("f3", 100), AskCancellation());
 
-        Assert.IsType<Held>((await checkout.Cancel("first", AskCancellation())).Value);
-        Assert.IsType<Held>((await checkout.Cancel("second", AskCancellation())).Value);
+        Assert.IsType<Held>((await checkout.Cancel("first", "user-17", AskCancellation())).Value);
+        Assert.IsType<Held>((await checkout.Cancel("second", "user-17", AskCancellation())).Value);
         reserved.SetResult(new Reserved("res-f3"));
 
         Assert.Equal(new OrderCancelled("first"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
@@ -90,7 +90,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         var before = await HostedState("f4");
         var issuedBefore = Services.Issued;
 
-        Assert.IsType<Delivered>((await CheckoutWithFacts("f4").Cancel("customer asked", AskCancellation())).Value);
+        Assert.IsType<Delivered>((await CheckoutWithFacts("f4").Cancel("customer asked", "user-17", AskCancellation())).Value);
 
         var after = await HostedState("f4");
         Assert.Equal(before.SequenceNr + 1, after.SequenceNr);
@@ -104,7 +104,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         var checkout = CheckoutWithFacts("f5");
 
         Assert.IsType<WorkflowNotStarted>((await checkout.Notify(new OperatorSaidRetry(), AskCancellation())).Value);
-        Assert.IsType<WorkflowNotStarted>((await checkout.Cancel("customer asked", AskCancellation())).Value);
+        Assert.IsType<WorkflowNotStarted>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
 
         var state = await HostedState("f5");
         Assert.Equal(0, state.SequenceNr);
@@ -122,7 +122,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         var notified = Assert.IsType<AlreadyFinished<CheckoutOutcome>>(
             (await checkout.Notify(new OperatorSaidRetry(), AskCancellation())).Value);
         var cancelled = Assert.IsType<AlreadyFinished<CheckoutOutcome>>(
-            (await checkout.Cancel("customer asked", AskCancellation())).Value);
+            (await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
 
         Assert.Equal(new OrderPlaced("charge-f6"), notified.Outcome.Value);
         Assert.Equal(new OrderPlaced("charge-f6"), cancelled.Outcome.Value);
@@ -137,7 +137,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         await checkout.Start(new PlaceOrder("f7", 100), AskCancellation());
         await AwaitRunning("f7", running => Assert.IsType<Charging>(((CheckoutState)running.State).Value));
 
-        Assert.IsType<Held>((await checkout.Cancel("customer asked", AskCancellation())).Value);
+        Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
         await AwaitRunning("f7", running => Assert.Single(running.Held));
 
         await RestartWorkflow("f7");
@@ -159,7 +159,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
     public async Task A_message_the_workflow_accepts_is_decided_as_the_fact_it_maps_to()
     {
         await WaitingForAPerson("f8");
-        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutOutcome>>>().ActorRef;
+        var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutFact, CheckoutOutcome>>>().ActorRef;
 
         // An operator tool sends its own message type to the workflow's address.
         region.Tell(new ShardingEnvelope("f8", new OperatorDecision(Retry: false)), TestActor);
