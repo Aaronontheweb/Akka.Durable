@@ -106,8 +106,8 @@ public sealed record WorkflowOptions
 /// <para>A state can also wait for a point in time with <c>ctx.Timer</c>. A wait is not work: it holds nothing,
 /// it never gives up, and it can last months. One durable reminder for each workflow wakes it when a timer is
 /// due, and also when work was interrupted by a crash, so the give-up fact arrives without another message.
-/// The reminder is stored before the decision is journaled. When it cannot be stored, the workflow does
-/// nothing: no fact is journaled and no work is issued.</para>
+/// The decision is journaled first; the reminder is stored next, before any work is issued or reply sent.
+/// When it cannot be stored, no work is issued; recovery stores it again.</para>
 /// <para>The workflow is hosted as a durable entity. All four types need a serializer, like an entity's
 /// state, command and event types.</para>
 /// </remarks>

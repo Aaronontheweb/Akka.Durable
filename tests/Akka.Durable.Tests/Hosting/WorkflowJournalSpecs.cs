@@ -270,9 +270,11 @@ public sealed class WorkflowWireSerializationSpecs(ITestOutputHelper output) : C
     [Fact]
     public void Sharding_envelope_and_reminder_envelope_carry_a_wake()
     {
-        WfCommand wake = new WfWake();
+        WfCommand wake = new WfWake(At);
+        WfCommand wakeWithoutTime = new WfWake();
 
         Assert.Equal(wake, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", wake))).Message);
+        Assert.Equal(wakeWithoutTime, ((ShardingEnvelope)RoundTrip(new ShardingEnvelope("o1", wakeWithoutTime))).Message);
 
         // How the workflow's reminder travels from reminder storage to the workflow.
         var sent = new ReminderEnvelope(new ReminderEntity("checkouts", "o1"), new ReminderKey(WorkflowWake.Key), At,

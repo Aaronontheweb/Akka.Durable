@@ -66,14 +66,12 @@ public abstract class WorkflowTimerSpecs(ITestOutputHelper output) : CampaignWor
         await AwaitRunning("t3", running => Assert.Equal(new Pausing(1), StateOf(running)), TimerFires);
         var before = await HostedState("t3");
 
-        // The wake for the grace period arrives. Pausing has no such timer, so the wake journals nothing and only
-        // stores the reminder again, for the pause.
-        await AwaitAssertAsync(async () =>
-        {
-            var reminder = Assert.Single(await RemindersOf("t3"));
-            Assert.True(reminder.DueTimeUtc > DateTimeOffset.UtcNow + Long / 2);
-        }, TimerFires, cancellationToken: TestCancellation);
+        // The reminder now waits for the pause: nothing will wake the workflow for the grace period.
+        var reminder = Assert.Single(await RemindersOf("t3"));
+        Assert.True(reminder.DueTimeUtc > DateTimeOffset.UtcNow + Long / 2);
 
+        // A wake that comes anyway, as late as the grace period's end, finds no such timer in Pausing.
+        Wake("t3", DateTimeOffset.UtcNow + Short * 2);
         Assert.Equal(before, await HostedState("t3"));
         Assert.Equal([new SendReminder("t3", 1), new NotifyCollections("t3")], Services.Issued);
     }

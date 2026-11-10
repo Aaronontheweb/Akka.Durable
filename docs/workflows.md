@@ -236,9 +236,19 @@ Work and a wait are different. An `Execute` is work: it expects an answer within
 
 Each workflow has one durable reminder, stored through Akka.Reminders. It is due at the earliest time the workflow needs to do something: the next timer, or the time by which work in flight must have answered. So a workflow hosts only with Akka.Reminders configured.
 
-The reminder is stored before the decision is journaled. If it cannot be stored, the decision fails: nothing is journaled and no work is issued. A workflow is never left in a state that needs a wake-up without a reminder that will deliver one.
+A workflow that waits only for facts from outside has no reminder. Nothing wakes it until a fact arrives.
+
+The journal write comes first. Then, before any work is issued and before any reply is sent, the reminder is stored for the state the workflow is now in. Storing it again replaces the old one, so the old reminder stays in place until the journal has the new state.
+
+When a process dies after the journal write and before the reminder is stored, recovery fixes it: whatever activates the workflow next makes it store the reminder for the state it recovered.
 
 The reminder also wakes a workflow whose process died in the middle of a call. Nobody has to send it a message. The workflow recovers, the interrupted work gives up, and the table decides.
+
+A reminder can arrive a little early: Akka.Reminders fetches reminders that are due within its `MaxSlippage` (5 seconds by default). A timer due by the time the reminder was stored for is then decided at once. So a timer can fire up to `MaxSlippage` early, never more, and one timer wakes the workflow once.
+
+When the reminder cannot be stored, because the reminder store is down, the fact is already journaled, but nothing after it happens: no work is issued and the caller gets no reply. The workflow restarts and tries again each time it recovers. When the store is back, the reminder is stored, and the work that was never issued gives up as interrupted. The workflow cannot tell work that was not issued from work that was issued and lost, so the table decides, as for any interrupted work. A caller that got no reply can send the fact again.
+
+While the store is down, a workflow that hit this restarts at once, again and again, until the store is back. Each restart replays the journal and logs an error.
 
 ## Facts from outside
 
