@@ -12,7 +12,7 @@ public class ShardedHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(
 {
     private static readonly TimeSpan ClusterFormation = TimeSpan.FromSeconds(30);
 
-    protected override ShardOptions? Sharding => new();
+    protected override ShardedHosting? Sharding => new();
 
     protected override void ConfigureCluster(AkkaConfigurationBuilder builder) => ConfigureSingleNodeCluster(builder);
 

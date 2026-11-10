@@ -31,7 +31,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
             });
 
         builder.WithCustomSerializer(RailwaySerializer.CreateSerializerDetails)
-            .WithDurableEntity(Railway.Definition, Sharded ? new ShardOptions() : null);
+            .WithDurableEntity(Railway.Definition, Sharded ? new ShardedHosting() : null);
     }
 
     private Calculator Calculator => Host.Services.GetRequiredService<Calculator>();

@@ -11,7 +11,7 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
 {
     private int _initializations;
 
-    protected override ShardOptions? Sharding => null;
+    protected override ShardedHosting? Sharding => null;
 
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
     {

@@ -18,7 +18,7 @@ public abstract class CounterHostingSpec(ITestOutputHelper output) : DurableEnti
     protected static readonly TimeSpan NoMsgWindow = TimeSpan.FromMilliseconds(300);
 
     /// <summary>Shard options for sharded hosting; <c>null</c> hosts locally.</summary>
-    protected abstract ShardOptions? Sharding { get; }
+    protected abstract ShardedHosting? Sharding { get; }
 
     /// <summary>The Counter definition to host; override to vary its options.</summary>
     protected virtual EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition => Counter.Definition;

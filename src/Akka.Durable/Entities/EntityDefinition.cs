@@ -131,12 +131,10 @@ public sealed record EntityOptions
     /// </summary>
     /// <remarks>
     /// <para>Set to <see cref="TimeSpan.Zero"/> to disable idle passivation; any non-positive value
-    /// disables it. This mirrors Akka.Cluster.Sharding, which represents "off" as
-    /// <see cref="TimeSpan.Zero"/> and only passivates idle entities when the timeout is positive, so
-    /// the value maps one-to-one onto <c>ShardOptions.PassivateIdleEntityAfter</c>.</para>
-    /// <para>Applies in both hosting modes. In sharded mode an explicit
-    /// <c>ShardOptions.PassivateIdleEntityAfter</c> takes precedence, and sharding never passivates
-    /// idle entities while remember-entities is enabled.</para>
+    /// disables it.</para>
+    /// <para>Applies in both hosting modes, and it is the only setting for idle passivation. In sharded
+    /// mode it becomes the idle timeout of the shard region. Sharding never passivates idle entities
+    /// while remember-entities is enabled.</para>
     /// </remarks>
     public TimeSpan PassivateIdleAfter { get; init; } = TimeSpan.FromMinutes(2);
 

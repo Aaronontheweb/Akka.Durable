@@ -43,12 +43,12 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
 
         builder
             .WithCustomSerializer(CheckoutSerializer.CreateSerializerDetails)
-            .WithDurableWorkflow(Definition, ShardOptions());
+            .WithDurableWorkflow(Definition, Sharding());
 
         ConfigureMore(builder);
     }
 
-    protected ShardOptions? ShardOptions() => Sharded ? new ShardOptions() : null;
+    protected ShardedHosting? Sharding() => Sharded ? new ShardedHosting() : null;
 
     protected CheckoutServices Services => Host.Services.GetRequiredService<CheckoutServices>();
 

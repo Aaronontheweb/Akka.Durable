@@ -11,7 +11,7 @@ namespace Akka.Durable.Tests.Hosting;
 /// </summary>
 public class LocalHostingSpecs(ITestOutputHelper output) : CounterHostingSpec(output)
 {
-    protected override ShardOptions? Sharding => null;
+    protected override ShardedHosting? Sharding => null;
 
     [Fact]
     public async Task Ask_through_an_entity_ref_works_from_outside_an_actor()

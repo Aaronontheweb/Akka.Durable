@@ -22,7 +22,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     protected override void ConfigureMore(AkkaConfigurationBuilder builder) =>
         builder
             .WithCustomSerializer(EchoSerializer.CreateSerializerDetails)
-            .WithDurableWorkflow(Echo.Definition, ShardOptions());
+            .WithDurableWorkflow(Echo.Definition, Sharding());
 
     [Fact]
     public async Task A_workflow_runs_its_work_in_order_and_ends_with_its_outcome()

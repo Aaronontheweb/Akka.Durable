@@ -54,17 +54,17 @@ public static class DurableEntityHostingExtensions
     }
 
     /// <summary>
-    /// Hosts a durable entity type: in a shard region when <paramref name="shardOptions"/> is given,
+    /// Hosts a durable entity type: in a shard region when <paramref name="sharding"/> is given,
     /// otherwise in a local host actor in this process.
     /// </summary>
     public static AkkaConfigurationBuilder WithDurableEntity<TState, TCommand, TEvent>(
         this AkkaConfigurationBuilder builder,
         EntityDefinition<TState, TCommand, TEvent> definition,
-        ShardOptions? shardOptions = null)
+        ShardedHosting? sharding = null)
     {
         EnsureOwnCommandType(builder, definition.TypeName, typeof(TCommand));
 
-        return builder.HostEntity<TState, TCommand, TEvent, EntityRegion<TCommand>>(definition, shardOptions,
+        return builder.HostEntity<TState, TCommand, TEvent, EntityRegion<TCommand>>(definition, sharding,
             (registry, region) => registry.Register<EntityRegion<TCommand, TState, TEvent>>(region));
     }
 
@@ -76,7 +76,7 @@ public static class DurableEntityHostingExtensions
     internal static AkkaConfigurationBuilder HostEntity<TState, TCommand, TEvent, TRegion>(
         this AkkaConfigurationBuilder builder,
         EntityDefinition<TState, TCommand, TEvent> definition,
-        ShardOptions? shardOptions,
+        ShardedHosting? sharding,
         Action<IActorRegistry, IActorRef>? alsoRegister = null)
     {
         Func<string, Props> EntityProps(ActorSystem system, IDependencyResolver resolver)
@@ -98,25 +98,18 @@ public static class DurableEntityHostingExtensions
         builder.WithActors((system, _) => EnsureSerializable(system, "Durable entity", definition.TypeName,
             typeof(TState), typeof(TCommand), typeof(TEvent)));
 
-        if (shardOptions is not null)
+        if (sharding is not null)
         {
             if (options.NumberOfShards <= 0)
                 throw new ArgumentOutOfRangeException(nameof(definition), options.NumberOfShards,
                     $"EntityOptions.NumberOfShards for [{definition.TypeName.Value}] must be positive.");
-
-            // Hand-off uses the same stop message as passivation, so persistent entities stop cleanly.
-            shardOptions.HandOffStopMessage ??= stopMessage;
-
-            // An explicit sharding value wins. Zero is sharding's own "off", so non-positive maps to it.
-            shardOptions.PassivateIdleEntityAfter ??=
-                passivateIdleAfter > TimeSpan.Zero ? passivateIdleAfter : TimeSpan.Zero;
 
             // Entity refs and reminders send ShardingEnvelopes, which sharding routes on its own.
             builder.WithShardRegion<TRegion>(
                 definition.TypeName.Value,
                 (system, _, resolver) => EntityProps(system, resolver),
                 HashCodeMessageExtractor.Create(options.NumberOfShards, _ => null),
-                shardOptions);
+                ToShardOptions(sharding, options, stopMessage));
 
             return alsoRegister is null
                 ? builder
@@ -133,6 +126,26 @@ public static class DurableEntityHostingExtensions
             alsoRegister?.Invoke(registry, host);
         });
     }
+
+    /// <summary>
+    /// The sharding settings for one entity type. The application chooses where the entities run and how
+    /// sharding stores its state. The stop message and idle passivation are always the library's.
+    /// </summary>
+    internal static ShardOptions ToShardOptions(ShardedHosting sharding, EntityOptions options, object stopMessage) =>
+        new()
+        {
+            Role = sharding.Role,
+            StateStoreMode = sharding.StateStoreMode,
+            RememberEntities = sharding.RememberEntities,
+            RememberEntitiesStore = sharding.RememberEntitiesStore,
+
+            // Hand-off uses the same stop message as passivation, so persistent entities stop cleanly.
+            HandOffStopMessage = stopMessage,
+
+            // Zero is the value sharding reads as off, so a timeout that is not positive maps to it.
+            PassivateIdleEntityAfter =
+                options.PassivateIdleAfter > TimeSpan.Zero ? options.PassivateIdleAfter : TimeSpan.Zero,
+        };
 
     private static readonly ConditionalWeakTable<AkkaConfigurationBuilder, Dictionary<Type, EntityTypeName>> RegionKeyOwners = [];
 
