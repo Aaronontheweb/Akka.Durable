@@ -107,8 +107,11 @@ internal sealed record WfEnded([property: AkkaField(0)] object Outcome) : IDurab
 [AkkaSerializable(Manifest = "durable-wf-kept-v1", AllowEmpty = true)]
 internal sealed record WfKept : IDurableEntityProtocol;
 
+/// <param name="Until">
+/// Null: the state's work is issued again at once. Otherwise it is issued at this time (<c>Again(after:)</c>).
+/// </param>
 [AkkaSerializable(Manifest = "durable-wf-repeated-v1", AllowEmpty = true)]
-internal sealed record WfRepeated : IDurableEntityProtocol;
+internal sealed record WfRepeated([property: AkkaField(0)] DateTimeOffset? Until = null) : IDurableEntityProtocol;
 
 [AkkaSerializable(Manifest = "durable-wf-unexpected-v1", AllowEmpty = true)]
 internal sealed record WfUnexpected : IDurableEntityProtocol;
@@ -703,9 +706,11 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
                         (next.State, entry + 1, ctx.UtcNow, Progress.Fresh(ctx.UtcNow, delayed: null), false);
                     break;
 
-                case AgainTransition:
-                    Record(new WfRepeated());
-                    (entry, progress, issued) = (entry + 1, Progress.Fresh(ctx.UtcNow, delayed: null), false);
+                case AgainTransition again:
+                    // A delayed repeat: the work of the new entry is issued once the delay has passed.
+                    var until = again.After is { } after ? ctx.UtcNow + after : (DateTimeOffset?)null;
+                    Record(new WfRepeated(until));
+                    (entry, progress, issued) = (entry + 1, Progress.Fresh(ctx.UtcNow, until), false);
                     break;
 
                 case FinishTransition<TOutcome> finish:
@@ -1080,9 +1085,9 @@ internal static class WorkflowEvolve
                 State = moved.Next, Entry = running.Entry + 1, EnteredAt = recorded.At, Settled = [],
                 IssuedAt = recorded.At, Attempts = [], Delayed = null,
             },
-            WfRepeated => running with
+            WfRepeated repeated => running with
             {
-                Entry = running.Entry + 1, Settled = [], IssuedAt = recorded.At, Attempts = [], Delayed = null,
+                Entry = running.Entry + 1, Settled = [], IssuedAt = recorded.At, Attempts = [], Delayed = repeated.Until,
             },
             WfEnded ended => new WfFinished(running.Input, ended.Outcome, recorded.At),
             WfKept or WfUnexpected => recorded.Answered is { } index

@@ -362,6 +362,25 @@ public readonly record struct DecideContext<TInput, TState, TOutcome>(
     public Transition<TState, TOutcome> Again() => new AgainTransition();
 
     /// <summary>
+    /// Keep the state and issue its work again once <paramref name="after"/> has passed. The wait is a date in the
+    /// workflow's reminder, so it survives a restart, and a passivated workflow is woken for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>Until the work is issued, nothing is in flight: a fact from outside, a cancel or a timer is decided at
+    /// once, and a move to another state drops the repeat. The state's timers do not move: they are still counted
+    /// from when the state was entered.</para>
+    /// <para>Use it to ask a service again that is not ready yet. A schedule of your domain, such as a reminder after
+    /// 7 days and another after 14, belongs in states and timers.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="after"/> is not positive.</exception>
+    public Transition<TState, TOutcome> Again(TimeSpan after)
+    {
+        if (after <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(after), after, "The delay of Again must be positive.");
+        return new AgainTransition(after);
+    }
+
+    /// <summary>
     /// For a pair of state and fact that should not happen. The fact is journaled and a warning is logged;
     /// the state does not change.
     /// </summary>
@@ -371,7 +390,8 @@ public readonly record struct DecideContext<TInput, TState, TOutcome>(
 public sealed record NextTransition<TState>(TState State);
 public sealed record FinishTransition<TOutcome>(TOutcome Outcome);
 public sealed record StayTransition;
-public sealed record AgainTransition;
+/// <param name="After">Null: the work is issued again at once. Otherwise it is issued again after this delay.</param>
+public sealed record AgainTransition(TimeSpan? After = null);
 public sealed record UnexpectedTransition;
 
 /// <summary>What a decision does to the workflow. Build one with <see cref="DecideContext{TInput,TState,TOutcome}"/>.</summary>
