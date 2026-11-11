@@ -9,7 +9,7 @@ var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddDurableEntities();
 builder.Services.AddScoped<IInvoiceMailer, SmtpInvoiceMailer>();
-builder.Services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
+builder.Services.AddEffectHandler<VerifyRecipient, InvoiceCommand, VerifyRecipientHandler>();
 
 builder.Services.AddAkka("billing", (akka, sp) =>
 {

@@ -111,6 +111,15 @@ public readonly union PaymentReply(
     PaymentAccepted,
     InvoiceRejected) : IInvoiceProtocol;
 
+// Effects. Journaled with the decision that issues them. Each says which command its give-up becomes.
+
+[AkkaSerializable(Manifest = "verify-recipient-v1")]
+public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient)
+    : IInvoiceProtocol, IEffect<InvoiceCommand>
+{
+    public InvoiceCommand GaveUp(WorkGaveUp g) => new RecipientRejected($"directory: {g.Reason}");
+}
+
 [AkkaSerializer<IInvoiceProtocol>("invoices", 120100)]
 public sealed partial class InvoiceSerializer : AkkaSerializer
 {
@@ -120,12 +129,12 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 
 - **Events first, then effects.** Effects run only after the events are committed, in the order they're declared.
 - **Typed replies.** `Reply(command, reply)` takes the command that declared the reply type, so a wrong reply is a compile error. The command fixes the type and is not sent anywhere: it can be the command being handled, or one kept in state from earlier.
-- **`Execute` for work whose result matters.** The decider issues a plain effect record; its `IEffectHandler` runs it; the result comes back as one of the entity's commands. See [Effects with outcomes](effects-with-outcomes.md).
-- **`Run` for work whose result doesn't.** A notification, a cache invalidation. It takes a lambda against one service, runs in a fresh DI scope and is awaited in place, so later effects and later commands wait for it. A failure or timeout is logged and the decision continues; nothing records that it ran. See [Run or Execute](run-or-execute.md).
+- **`Execute` for outside work.** The decider issues an effect record. It is journaled in the same write as the decision's events. Its handler runs it once, and the answer, or the effect's give-up, comes back as one of the entity's commands. See [Effects](effects.md) and [Effects with outcomes](effects-with-outcomes.md).
+- **`Run` for cheap work you can lose.** `Run` is not recorded: no journal row, no answer for `Decide`, and it is lost in a crash. A notification, a cache invalidation. It takes a lambda against one service, runs in a fresh DI scope and is awaited in place, so later effects and later commands wait for it. A failure or timeout is logged and the decision continues. See [Effects](effects.md).
 - **`Schedule` uses Akka.Reminders.** The reminder is stored durably and delivered back to the entity at least once, so `Decide` must tolerate duplicates. Its message must be a `TCommand`.
 - **`Send` talks to another entity.** Its reply arrives as one of this entity's commands. See [Talking to other entities](talking-to-other-entities.md).
 - **Other outcomes.** `ctx.Ignore()`, `ctx.Unhandled()` and `ctx.Stash()` cover commands you aren't handling now. `.UnstashAll()` releases stashed commands after this decision completes. `.Stop()` must be the last effect; it passivates without deleting the entity.
 
 ---
 
-Next: [Effects with outcomes](effects-with-outcomes.md)
+Next: [Effects](effects.md)

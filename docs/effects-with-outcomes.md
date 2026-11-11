@@ -27,13 +27,13 @@ The [invoice in the README](../README.md#define-its-behavior) does this for reci
 
 ## The handler returns a command
 
-The second type argument of the handler's registration is the entity's command type. The result goes through `Decide` like any other command, so `Decide` can decline it, retry, or ignore it. Exactly one handler is registered per effect type. An effect with no handler is a deployment mistake: an error is logged that names the effect type and the `IEffectHandler` to register, and the entity restarts under its supervisor. `VerifyRecipientHandler` is one:
+The second type argument of the handler is the entity's command type. The answer goes through `Decide` like any other command, so `Decide` can decline it, ask again, or ignore it. Register exactly one handler per effect type with `AddEffectHandler`. A second registration fails at startup. An effect with no handler is a deployment mistake: it is refused before anything is written, an error is logged that names the `AddEffectHandler<...>` call to add, and the entity restarts under its supervisor. `VerifyRecipientHandler` is one:
 
 ```csharp
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
-    : IEffectHandler<VerifyRecipient, InvoiceCommand>       // the outcome is a command
+    : IEffectHandler<VerifyRecipient, InvoiceCommand>       // the answer is a command
 {
-    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, CancellationToken ct) =>
+    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, EffectDelivery delivery, CancellationToken ct) =>
         await directory.LookupAsync(effect.Recipient, ct) switch
         {
             Known => new RecipientVerified(),
@@ -41,8 +41,10 @@ public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
         };
 }
 
-services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
+services.AddEffectHandler<VerifyRecipient, InvoiceCommand, VerifyRecipientHandler>();
 ```
+
+`VerifyRecipient` itself is journaled in the same write as `VerificationStarted`, so it has a manifest, and it implements `IEffect<InvoiceCommand>` to say what its give-up means (see [the declarations](state-commands-events-and-replies.md)). `delivery` holds the effect's id, the same on every read and after a restart.
 
 To record a fact from the outside world, have the handler return a command that carries it. `Decide` persists the event, in the states that can accept it, and ignores it in the others.
 
@@ -94,25 +96,29 @@ Expected failures are outcomes. A directory that does not know the recipient has
 Unknown u => new RecipientRejected(u.Reason),   // a decline is a result, not an exception
 ```
 
-An exception from `HandleAsync`, or a handler that runs longer than `EntityOptions.EffectTimeout` (30 seconds by default), is logged as a warning and dropped (`EffectTimeout` must be positive; registering an entity or workflow with zero or a negative value throws `ArgumentOutOfRangeException`). No outcome arrives and the state is unchanged: the invoice stays `Verifying`. To try again, arm a recurring timer in the first half, re-issue the effect from it, and cancel it from the outcome arms:
+When the handler gets no answer, `Decide` gets the effect's give-up command instead. `GaveUp` on the effect builds it from a `WorkGaveUp`, whose `Reason` says why:
+
+- `Failed`: `HandleAsync` threw, or answered with nothing.
+- `TimedOut`: it ran longer than `EntityOptions.EffectTimeout` (30 seconds by default; zero or a negative value is refused at startup).
+- `Interrupted`: the process stopped, or the entity restarted, after the effect was journaled and before its answer was. The next incarnation decides it before any other command.
+
+The library never runs the effect again. A give-up does not mean the directory was not asked. `Decide` chooses what to do. The invoice turns every give-up into a rejection, so a caller can try again. An entity that wants to ask again issues the effect again from its arm:
 
 ```csharp
-(Draft, IssueInvoice c) when c.Total > 0 =>
-    ctx.Persist(new VerificationStarted(c))
-        .Execute(new VerifyRecipient(c.Recipient))
-        .Schedule("verify-retry", TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1), new RetryVerification()),
+public sealed record VerificationGaveUp(GaveUpReason Reason) : IInvoiceProtocol;   // a command case
 
-// Still waiting: ask again. Resume already lists what is pending for this state.
-(Verifying, RetryVerification) => Resume(state, ctx),
-(_, RetryVerification) => ctx.Ignore(),
+// on VerifyRecipient
+public InvoiceCommand GaveUp(WorkGaveUp g) => new VerificationGaveUp(g.Reason);
 
-(Verifying v, RecipientRejected r) =>
-    ctx.Persist(new VerificationFailed(r.Reason))
-        .CancelTimer("verify-retry")
-        .Reply(v.Request, new InvoiceRejected(r.Reason)),
+// Ask once more after a crash; reject on any other give-up.
+(Verifying v, VerificationGaveUp { Reason: GaveUpReason.Interrupted }) =>
+    ctx.None().Execute(new VerifyRecipient(v.Request.Recipient)),
+(Verifying v, VerificationGaveUp g) =>
+    ctx.Persist(new VerificationFailed($"directory: {g.Reason}")).Reply(v.Request, new InvoiceRejected("directory unavailable")),
+(_, VerificationGaveUp) => ctx.Ignore(),
 ```
 
-The `RecipientVerified` arm cancels the timer the same way. A retried effect can produce two answers; the second finds the invoice no longer `Verifying` and is ignored by the `(_, RecipientVerified or RecipientRejected)` arm.
+Each `Execute` is a new effect with a new id. Answers and give-ups are matched to the effect they belong to, so a late answer of an effect that already gave up is dropped.
 
 The timeout is set per entity type:
 
@@ -120,10 +126,6 @@ The timeout is set per entity type:
 Invoice.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(5) } }
 ```
 
-A missing handler registration is a configuration error. It restarts the entity instead of being logged.
-
-Nothing about the effect is journaled. What survives a crash is the state, and [`Resume`](resuming-after-a-restart.md) turns that state back into the pending effect.
-
 ---
 
-Next: [Run or Execute](run-or-execute.md)
+Next: [Resuming after a restart](resuming-after-a-restart.md)

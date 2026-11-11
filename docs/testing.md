@@ -17,7 +17,7 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .ThenState(s => Assert.True(s is Paid));
 ```
 
-Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value; `Resumed()` runs `Resume` against the recovered state:
+Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value. `WhenGaveUp` decides the command the effect's own `GaveUp` returns, so each way an effect can end is a pure test too:
 
 ```csharp
 var command = new IssueInvoice(250m, "billing@example.com");
@@ -34,11 +34,14 @@ DeciderScenario.For(Invoice.Definition)
     .ThenReplied(command, new InvoiceRejected("unknown recipient"))
     .ThenState(s => Assert.True(s is Draft));
 
+// The process stopped after VerifyRecipient was journaled and before its answer was.
 DeciderScenario.For(Invoice.Definition)
     .Given(new VerificationStarted(command))
-    .Resumed()
-    .ThenExecuted(new VerifyRecipient("billing@example.com"));
+    .WhenGaveUp(new VerifyRecipient("billing@example.com"), GaveUpReason.Interrupted)
+    .ThenPersisted(new VerificationFailed("directory: Interrupted"));
 ```
+
+A handler is a plain class. `EffectDelivery` has a public constructor, so a test can call a handler twice with the same delivery and check that the second call changes nothing.
 
 Calls to a workflow are effects too. `ThenStarted`, `ThenNotified` and `ThenCancelled` compare them by value, after `When` and after `Resumed()`. They name the workflow by its definition, like the decision does. `ThenStarted` matches a start with or without `then`:
 
@@ -64,7 +67,9 @@ DeciderScenario.For(Invoice.Definition)
 
 The answer of a call is an ordinary command, so you test what it means with `When`, like any other command.
 
-For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite. `DurableEntityTestKit` can also run with `akka.actor.serialize-messages = on`: override `VerifyMessageSerialization` to return `true`, and every message, including union events, is serialized and read back as if it crossed the network.
+For the full runtime, `DurableEntityTestKit` hosts entities with a test journal (supports failure injection), in-memory reminders and DI. Register effect handlers in `ConfigureTestServices`, with real or fake services behind them. The test journal keeps objects in memory and never serializes them; to check that your types round-trip, run a spec against a real journal plugin. Akka.Durable's own tests use Akka.Persistence.Sql with SQLite. `DurableEntityTestKit` can also run with `akka.actor.serialize-messages = on`: override `VerifyMessageSerialization` to return `true`, and every message, including union events, is serialized and read back as if it crossed the network. The startup check still finds an effect type with no serializer, because it does not depend on the journal.
+
+`PendingEffects<TCommand>(id)` returns the effects an entity has issued and not yet had answered or given up, in the order they were issued. It is for tests only. Asking starts the entity, and a started entity first gives up any effect it finds pending in its journal, so the list holds only effects of the running incarnation.
 
 ```csharp
 public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(output)
@@ -72,7 +77,7 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services
             .AddScoped<IInvoiceMailer, FakeInvoiceMailer>()
-            .AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>()
+            .AddEffectHandler<VerifyRecipient, InvoiceCommand, VerifyRecipientHandler>()
             .AddSingleton<IRecipientDirectory, FakeDirectory>();
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider) =>

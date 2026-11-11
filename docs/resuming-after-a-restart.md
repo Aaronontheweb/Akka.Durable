@@ -2,27 +2,24 @@
 
 Part of the [Akka.Durable guide](../README.md#guide).
 
-An entity that is waiting for an outcome when its process dies recovers into the state that says so: the invoice comes back as `Verifying`, with no verification in flight. `Resume` is the optional function that lists the effects still pending for a state. It runs once after recovery, before the first command, through the same effect path as a decision.
+An `Execute` that was in flight when the process stopped comes back by itself. Its effect is journaled with the decision that issued it, so the next incarnation finds it with no answer and decides its give-up with the reason `Interrupted`, before any other command. It is not run again. To ask again after a crash, issue the `Execute` again from the `Decide` arm for that give-up. See [Effects with outcomes](effects-with-outcomes.md#when-the-handler-fails).
+
+`Resume` is the optional function that lists other work still pending for a recovered state: a `Send` or a `Tell` that must go out again. It runs once after recovery, after the interrupted give-ups, through the same effect path as a decision. It may not return events or an `Execute`.
 
 ```csharp
-public static Handled<InvoiceCommand, InvoiceEvent> Resume(InvoiceState state, InvoiceContext ctx) =>
+public static Handled<CheckoutCommand, CheckoutEvent> Resume(CheckoutState state, CheckoutContext ctx) =>
     state switch
     {
-        Verifying v => ctx.None().Execute(new VerifyRecipient(v.Request.Recipient)),
+        AwaitingInvoice a => ctx.None().Send<InvoiceCommand>(a.Invoice, new GetInvoiceStatus()),
         _ => ctx.None(),
     };
-
-public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
-    new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve) { Resume = Resume };
 ```
 
-Two rules make it safe, and the runtime enforces the first: `Resume` may not return events, because nothing was decided, and everything it returns must follow from state alone, so running it twice is harmless. Give effects idempotency keys, and prefer re-sending a query to re-sending a change. The same function serves a retry timer: `(var s, RetryVerification) => Resume(s, ctx)`.
+Everything it returns must follow from state alone, so running it twice is harmless: prefer re-sending a query to re-sending a change. Replies issued by resumed work go to dead letters: the asker belongs to the previous incarnation.
 
-Replies issued by resumed work go to dead letters: the asker belongs to the previous incarnation. Its retry gets the answer from an arm that handles the repeated request, such as `(Issued, IssueInvoice c) => ctx.None().Reply(c, new InvoiceAccepted(ctx.EntityId))`. A repeated command should return the same reply it returned the first time; callers will retry.
+A workflow start needs no `Resume`. `Start` keeps a durable reminder until the workflow answers. See [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
 
-A workflow start needs no `Resume`. `Start` keeps a durable reminder until the workflow answers, and the next incarnation sends a start that was not answered again on its own. This is the one call the library repeats, because a start is addressed by id and a repeat starts nothing new. `Notify` and `Cancel` are not repeated: an entity that must send a fact again after a restart keeps that in its state and sends it from `Resume`. The `then` and `gaveUp` functions of a call belong to the incarnation that issued it; to receive the answer of a start after a restart, issue the same `Start` from `Resume`. See [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
-
-Entities whose effects never wait for an outcome do not need `Resume`. Timers re-arm themselves through Akka.Reminders, and `Run` work is best effort by definition. To retry a reminder-driven effect without restarting the entity, re-arm the same key from the outcome: the old delivery's acknowledgement includes its original due time, so it leaves the new reminder intact.
+Timers re-arm themselves through Akka.Reminders, and `Run` work is best effort by definition.
 
 ---
 
