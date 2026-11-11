@@ -14,7 +14,7 @@ Each rule is one sentence. The reason follows it. The page [Workflows](workflows
 
 **Return an expected failure as a fact.** A declined card is not an error. A handler that throws gives the workflow the give-up fact, which says only that there is no answer. A handler that returns `Declined` lets the table decide with full knowledge.
 
-**Put a stable key in an effect whose service supports idempotency keys.** Work is issued once, but no answer does not mean the work did not happen. A key lets you ask again without doing the work twice.
+**Put a stable key in an effect whose service supports idempotency keys.** No answer does not mean the work did not happen. A key lets you ask again without doing the work twice. For work whose handler has a retry policy, give the service `delivery.Id.Value`: it is the same on every attempt.
 
 **When a result is unknown, choose one of four moves in the table.** The give-up fact means a result is unknown. The four moves are:
 
@@ -23,7 +23,7 @@ Each rule is one sentence. The reason follows it. The page [Workflows](workflows
 - Wait for the service to report it.
 - Ask a person.
 
-The library does not choose for you, and it does not issue the work again on its own. The checkout asks a person.
+The library does not choose for you, and it does not issue the work again on its own, unless its handler was registered with a retry policy. The checkout asks a person.
 
 **Choose the workflow id from something durable.** Use a domain key, such as the order number. Add an attempt number when the same work can run more than once. A retried `Start` then reaches the same workflow. An id is used once: a finished workflow is closed and cannot start again.
 

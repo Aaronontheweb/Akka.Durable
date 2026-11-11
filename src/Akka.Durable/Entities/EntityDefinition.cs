@@ -22,6 +22,12 @@ public readonly record struct DecisionContext<TState, TCommand, TEvent>(
     EntityTypeName EntityType,
     DateTimeOffset UtcNow)
 {
+    /// <summary>
+    /// The effect handlers registered with <c>AddEffectHandler</c>, with their retry policies. Set by the host. The
+    /// workflow host reads a piece of work's policy here. Null outside a host: no work has a policy.
+    /// </summary>
+    internal EffectRoutes? Routes { get; init; }
+
     public Handled<TCommand, TEvent> Persist(params TEvent[] events) =>
         Decisions.Persist<TCommand, TEvent>(events);
 

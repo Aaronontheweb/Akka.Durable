@@ -50,7 +50,7 @@ public enum GaveUpReason
 /// <param name="Attempts">How many attempts were made: 1 without a retry policy.</param>
 /// <remarks>
 /// No answer does not mean the work did not happen: a charge can go through and its reply be lost. Work is
-/// not issued again on its own, so <c>Decide</c> chooses: ask again with the same key, look the result up, wait
+/// not issued again on its own, unless its handler has a retry policy, so <c>Decide</c> chooses: ask again with the same key, look the result up, wait
 /// for the service to report it, or ask a person.
 /// </remarks>
 public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error = null, int Attempts = 1)
@@ -98,6 +98,11 @@ public sealed record CancelRequest(string Reason, string By);
 /// <para>Work is issued once. When a piece of work gets no answer, because its handler failed, ran out of
 /// time, or the workflow restarted in the middle, the library does not issue it again. It sends the fact
 /// that <paramref name="GaveUp"/> names and the table decides.</para>
+/// <para>Work whose handler was registered with a retry policy (<c>AddEffectHandler&lt;…&gt;(Retry.Backoff(…))</c>) is
+/// attempted again after a failure, a time-out or a restart, on the policy's schedule. Each attempt after the first is
+/// journaled before it runs, and the wait is a date in the workflow's reminder. Between two attempts nothing is in
+/// flight. A move to another state ends the retries. When a limited policy runs out, the workflow receives the give-up
+/// fact with <see cref="GaveUpReason.RetriesExhausted"/>.</para>
 /// <para>Facts can also come from outside: a ref's <c>Notify</c> and <c>Cancel</c>, or a message of a type
 /// named by <see cref="Accepts{TMessage}"/>. A fact from outside is journaled before the caller gets its
 /// reply. While the work of the current state is in flight, it is held. When the work settles, the work's
@@ -180,6 +185,9 @@ public sealed record ExecuteWork<TFact> : Work<TFact>
     // Bound when the work is built, where TEffect is known, so no reflection is needed to find the handler.
     internal Func<IServiceProvider, EffectDelivery, Func<CancellationToken, Task<TFact>>>? Resolve { get; init; }
 
+    // The effect type the handler is registered for, which finds its retry policy. Null for a send to an entity.
+    internal Type? EffectType { get; init; }
+
     public bool Equals(ExecuteWork<TFact>? other) => other is not null && Equals(Effect, other.Effect);
 
     public override int GetHashCode() => Effect.GetHashCode();
@@ -249,7 +257,9 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
     /// with the workflow's fact type as its outcome. Build the effect from the state and the input only.
     /// </summary>
     /// <remarks>
-    /// Work holds facts from outside while it has no answer. They are decided after the work's own fact.
+    /// <para>Work holds facts from outside while it has no answer. They are decided after the work's own fact.</para>
+    /// <para>The handler's registration decides how often it is attempted: once without a retry policy, on the
+    /// policy's schedule with one. The handler gets the same <see cref="EffectDelivery.Id"/> on every attempt.</para>
     /// </remarks>
     public ExecuteWork<TFact> Execute<TEffect>(TEffect effect) where TEffect : notnull
     {
@@ -257,6 +267,7 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
         return new ExecuteWork<TFact>(effect)
         {
             Resolve = (services, delivery) => WorkHandlers.Resolve<TEffect, TFact>(services, effect, delivery),
+            EffectType = typeof(TEffect),
         };
     }
 
@@ -347,8 +358,27 @@ public readonly record struct DecideContext<TInput, TState, TOutcome>(
     /// <summary>Nothing changes. For a duplicate, or a fact that no longer matters.</summary>
     public Transition<TState, TOutcome> Stay() => new StayTransition();
 
-    /// <summary>Keep the state and issue its work again. The deliberate way to repeat work.</summary>
+    /// <summary>Keep the state and issue its work again at once. The deliberate way to repeat work.</summary>
     public Transition<TState, TOutcome> Again() => new AgainTransition();
+
+    /// <summary>
+    /// Keep the state and issue its work again once <paramref name="after"/> has passed. The wait is a date in the
+    /// workflow's reminder, so it survives a restart, and a passivated workflow is woken for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>Until the work is issued, nothing is in flight: a fact from outside, a cancel or a timer is decided at
+    /// once, and a move to another state drops the repeat. The state's timers do not move: they are still counted
+    /// from when the state was entered.</para>
+    /// <para>Use it to ask a service again that is not ready yet. A schedule of your domain, such as a reminder after
+    /// 7 days and another after 14, belongs in states and timers.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="after"/> is not positive.</exception>
+    public Transition<TState, TOutcome> Again(TimeSpan after)
+    {
+        if (after <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(after), after, "The delay of Again must be positive.");
+        return new AgainTransition(after);
+    }
 
     /// <summary>
     /// For a pair of state and fact that should not happen. The fact is journaled and a warning is logged;
@@ -360,7 +390,8 @@ public readonly record struct DecideContext<TInput, TState, TOutcome>(
 public sealed record NextTransition<TState>(TState State);
 public sealed record FinishTransition<TOutcome>(TOutcome Outcome);
 public sealed record StayTransition;
-public sealed record AgainTransition;
+/// <param name="After">Null: the work is issued again at once. Otherwise it is issued again after this delay.</param>
+public sealed record AgainTransition(TimeSpan? After = null);
 public sealed record UnexpectedTransition;
 
 /// <summary>What a decision does to the workflow. Build one with <see cref="DecideContext{TInput,TState,TOutcome}"/>.</summary>

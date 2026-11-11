@@ -110,7 +110,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         _reminderClient ??= Context.ReminderClient().CreateClient(EntityType.Value, _entityId.Value);
 
     private DecisionContext<TState, TCommand, TEvent> NewContext() =>
-        new(_entityId, EntityType, _timeProvider.Now);
+        new(_entityId, EntityType, _timeProvider.Now) { Routes = _routes };
 
     #region Recovery
 

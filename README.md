@@ -137,7 +137,7 @@ public sealed class PublishPaymentHandler(IBus bus) : IEffectHandler<PublishPaym
 
 `PublishPayment` is recorded in the same journal write as `PaymentRecorded`, and its handler runs at least once, after a crash too, until it returns without throwing; it can run more than once, so it must be safe to repeat.
 
-See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) for the other retry policies, and for `Execute` without a policy, which is attempted once and tells `Decide` how it ended.
+See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) for the other retry policies, and for `Execute` without a policy, which is attempted once and tells `Decide` how it ended. A workflow's work takes the same policies from the same registration: see [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md#retry-policies-on-work).
 
 ## Getting started
 
@@ -171,7 +171,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Hosting](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/hosting.md) | Local and sharded hosting, passivation and shard count. |
 | [Sending commands](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/sending-commands.md) | Entity refs, `Ask` and `Tell`, and entity IDs inside messages. |
 | [Reading state](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md) | State-aware refs, and what a state read sees. |
-| [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, the fact table, and workflow refs. |
+| [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, retry policies on work, the fact table, and workflow refs. |
 | [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
 | [Status and direction](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/status.md) | What works today and what is not done yet. |

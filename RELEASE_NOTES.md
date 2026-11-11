@@ -1,3 +1,18 @@
+#### 0.1.0-alpha.5 November 11th 2026 ####
+
+Fifth alpha release of Akka.Durable. A workflow's work can now be retried by a policy, as an entity's effects are, and `Again` can wait before it repeats the work. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **Retry policies on workflow work.** Register the handler with a policy, for example `AddEffectHandler<ChargeCard, CheckoutFact, ChargeCardHandler>(Retry.Backoff(first, max, attempts))`. These are the same `Retry.Every`, `Retry.Backoff` and `Retry.UntilAcknowledged` as for entities, written once for each effect type. `ctx.Execute` takes no policy. A handler registered with a policy must be safe to repeat.
+* **What a policy does.** A failed or timed-out attempt is attempted again after the policy's wait. Each attempt after the first is journaled before it runs, and the wait is a date in the workflow's reminder, so a restart keeps both, and a passivated workflow is woken. After a restart, an attempt that had no answer is attempted again. Between two attempts nothing is in flight, so facts from outside, cancels and timers are decided at once. A move to another state ends the retries, and a late answer of an earlier attempt is dropped.
+* **`RetriesExhausted` for workflows.** When a limited policy runs out, the definition's `GaveUp` receives `GaveUpReason.RetriesExhausted`, with the number of attempts in `WorkGaveUp.Attempts` and the last failure in `Error`. `Retry.UntilAcknowledged` never gives up.
+* **The idempotency key.** `EffectDelivery.Id` is the same on every attempt of one piece of work, and `Attempt` counts them. Give `delivery.Id.Value` to the other system as the idempotency key.
+* **`ctx.Again(after)`.** Keeps the state and issues its work again after the delay. The delay survives a restart and wakes a passivated workflow. It shares the workflow's one reminder with the state's timers and the pending retries, and it does not move the timers. `ctx.Again()` is unchanged.
+* **`IDurableJournalRecord`.** Every record that the library writes to a journal implements this public marker: the records of an entity's `Execute`, a workflow's events, and the snapshot envelope. A projection skips them with one type test.
+
+**What you change from 0.1.0-alpha.4:** nothing. Work whose handler has no policy behaves as before: one attempt, then the give-up fact. A projection that reads the journal can replace its own list of the library's record types with a test for `IDurableJournalRecord`. A journal written by this release cannot be read by 0.1.0-alpha.4 once a workflow has retried work or used `Again(after)`.
+
+Not yet implemented: delivery of a workflow's outcome to the entity or workflow that started it, child workflows, a scenario test kit for workflows, state and event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests.
+
 #### 0.1.0-alpha.4 November 11th 2026 ####
 
 Fourth alpha release of Akka.Durable. An entity's `Execute` is now recorded with its decision, and a retry policy makes the library redeliver it, which gives entities a built-in outbox. An entity can also start, notify and cancel a workflow from a decision. This release changes parts of the 0.1.0-alpha.3 API. Akka.Durable is still a proof of concept, not an official Akka.NET project.

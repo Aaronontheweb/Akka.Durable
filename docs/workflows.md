@@ -170,13 +170,14 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
 - `ctx.Finish(outcome)` ends the workflow with an outcome.
 - `ctx.Stay()` changes nothing. Use it for a duplicate, or for a fact that no longer matters.
 - `ctx.Again()` keeps the state and issues its work again. It is the deliberate way to repeat work.
+- `ctx.Again(after)` keeps the state and issues its work again once `after` has passed. See [Again after a delay](#again-after-a-delay).
 - `ctx.Unexpected()` is for a pair of state and fact that should not happen. The fact is journaled and a warning is logged. The state does not change.
 
 The journal records every fact, including those answered with `Stay` or `Unexpected`.
 
 ## Work is issued once
 
-When a workflow enters a state, the library issues that state's work one time. It does not issue it again on its own.
+When a workflow enters a state, the library issues that state's work one time. It does not issue it again on its own, unless the handler was registered with a retry policy: see [Retry policies on work](#retry-policies-on-work).
 
 Sometimes work gets no answer. The workflow then receives the give-up fact: the fact that your `GaveUp` function returns. The fact table decides what it means. This happens in these cases:
 
@@ -200,6 +201,78 @@ To set the time one attempt may take, pass options to the definition:
 ```csharp
 Checkout.Definition with { Options = EntityOptions.Default with { EffectTimeout = TimeSpan.FromSeconds(10) } }
 ```
+
+## Retry policies on work
+
+A handler registered with a retry policy is attempted again when an attempt fails. The policy is the same as for an entity's effects (see [Effects](effects.md#retry-policies-the-outbox)), and it is written in the same place, once for each effect type, where the handler is registered:
+
+```csharp
+// at startup
+services.AddEffectHandler<ChargeCard, CheckoutFact, ChargeCardHandler>(
+    Retry.Backoff(first: TimeSpan.FromSeconds(2), max: TimeSpan.FromMinutes(1), attempts: 6));
+
+// in Work: nothing about delivery
+Charging => ctx.Execute(new ChargeCard(ctx.Input.Order, ctx.Input.Total)),
+```
+
+Registering a handler with a policy is your statement that the handler is safe to repeat. An attempt can do its work and lose its answer, so the handler can run more than once for one piece of work. `ctx.Execute` takes no policy. A handler registered without one is attempted once, as described above. A `Send` to an entity and a timer have no policy.
+
+**The idempotency key.** The handler gets an `EffectDelivery`. `delivery.Id` is the same on every attempt of one piece of work, also after a restart: `"{workflow type}/{workflow id}/{entry}.{position}"`, for example `"checkouts/c-9/3.0"`. Give `delivery.Id.Value` to the other system as the idempotency key, so that a repeated attempt does not charge twice. `delivery.Attempt` counts from 1.
+
+```csharp
+public sealed class ChargeCardHandler(IPaymentGateway gateway) : IEffectHandler<ChargeCard, CheckoutFact>
+{
+    public async Task<CheckoutFact> HandleAsync(ChargeCard effect, EffectDelivery delivery, CancellationToken ct)
+    {
+        var result = await gateway.ChargeAsync(effect.Order, effect.Total, idempotencyKey: delivery.Id.Value, ct);
+        return result.Approved ? new Charged(result.ChargeId) : new Declined(result.Reason);
+    }
+}
+```
+
+What the library does with a policy:
+
+- **A failed attempt** is an exception, a time-out, or an answer with no fact in it. A fact is never retried: `Declined` is an answer. To ask for another attempt, throw.
+- **The next attempt** is due at the time of the failure plus the policy's wait. That date is journaled with the failure, and it is a date in the workflow's reminder. So a restart keeps it, and a passivated workflow is woken for it.
+- **Each attempt after the first is journaled before it runs.** A restart does not reset the count.
+- **Between two attempts nothing is in flight.** A fact from outside, a cancel or a timer of the state is decided at once, not held.
+- **A move to another state ends the retries** of the work it leaves behind: a timer, a fact from outside or a cancel that moves the workflow on, or finishes it. A pending attempt never runs, and a late answer of that work, from any attempt, is dropped. `Decide` gets one answer or one give-up for each piece of work.
+- **After a restart**, an attempt that had no answer counts as an attempt. With a policy, the work is issued again when the next attempt is due: the attempt's start, plus `EffectTimeout`, plus the policy's wait. Without a policy, the workflow gets `Interrupted`, as before.
+- **When a limited policy runs out**, the workflow receives the give-up fact with `GaveUpReason.RetriesExhausted`. `WorkGaveUp.Attempts` says how many attempts were made, and `Error` holds the last failure. `Retry.UntilAcknowledged` never gives up.
+- **`Again` starts the count again.** It is a new entry, so it also has a new id.
+
+### A business schedule is not a retry policy
+
+A retry policy is for a call that failed for a technical reason and is safe to repeat: the gateway was down. It has no meaning for the business, and the table does not see the attempts. A schedule that the business decides, such as payment reminders after 7, 14 and 30 days, is not a retry policy. Write it as states and timers, so each step is a fact in the journal and the table decides what happens next:
+
+```csharp
+// A technical retry: the same call again, until the gateway answers.
+services.AddEffectHandler<SendReminder, CampaignFact, SendReminderHandler>(
+    Retry.Backoff(first: TimeSpan.FromSeconds(5), max: TimeSpan.FromMinutes(5), attempts: 5));
+
+// A business schedule: the dunning ladder, in states and timers.
+public static WorkList<CampaignFact> Work(CampaignState state, WorkContext<Invoice, CampaignFact> ctx) =>
+    state switch
+    {
+        Waiting w => ctx.Timer(ctx.Input.DueAt.AddDays(w.Step switch { 1 => 7, 2 => 14, _ => 30 }), new ReminderDue()),
+        Reminding r => ctx.Execute(new SendReminder(ctx.Input.Id, r.Step)),
+        // ...
+    };
+```
+
+## Again after a delay
+
+`ctx.Again(after)` keeps the state and issues its work again once `after` has passed. Use it to ask a service again that is not ready yet: the answer `NotReadyYet` is a fact, so the table decides to ask again in a minute.
+
+```csharp
+(Provisioning, NotReadyYet) => ctx.Again(after: TimeSpan.FromMinutes(1)),
+```
+
+- The time is journaled with the decision, and it is a date in the workflow's reminder. So it survives a restart, and a passivated workflow is woken for it.
+- Until the work is issued, nothing is in flight. A fact from outside, a cancel or a timer is decided at once. A move to another state drops the repeat.
+- The state's timers do not move. A timer is counted from when the workflow entered the state, as always.
+- `after` must be positive. `ctx.Again()` with no delay issues the work at once, as before.
+- `Again(after)` is for a deliberate repeat that the table decides. For a call that failed, use a retry policy on its handler.
 
 ## Sending a command to an entity
 
@@ -261,7 +334,7 @@ Work and a wait are different. An `Execute` or a `Send` is work: it expects an a
 
 ### The reminder
 
-Each workflow has one durable reminder, stored through Akka.Reminders. It is due at the earliest time the workflow needs to do something: the next timer, or the time by which work in flight must have answered. So a workflow hosts only with Akka.Reminders configured.
+Each workflow has one durable reminder, stored through Akka.Reminders. It is due at the earliest time the workflow needs to do something: the next timer, the next attempt of work with a retry policy, the end of an `Again(after)`, or the time by which work in flight must have answered. While work is in flight, its timers do not count, because a timer is decided only once the work settles. So a workflow hosts only with Akka.Reminders configured.
 
 A workflow that waits only for facts from outside has no reminder. Nothing wakes it until a fact arrives.
 
@@ -271,7 +344,7 @@ The journal write comes first. Then, before any work is issued and before any re
 
 When a process dies after the journal write and before the reminder is stored, recovery fixes it: whatever activates the workflow next makes it store the reminder for the state it recovered.
 
-The reminder also wakes a workflow whose process died in the middle of a call. Nobody has to send it a message. The workflow recovers, the interrupted work gives up, and the table decides.
+The reminder also wakes a workflow whose process died in the middle of a call. Nobody has to send it a message. The workflow recovers, the interrupted work gives up, and the table decides. Work with a retry policy is attempted again instead.
 
 A reminder can arrive a little early: Akka.Reminders fetches reminders that are due within its `MaxSlippage` (5 seconds by default). A timer due by the time the reminder was stored for is then decided at once. So a timer can fire up to `MaxSlippage` early, never more, and one timer wakes the workflow once.
 
@@ -306,7 +379,7 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
 
 A fact is journaled before the caller gets its reply. A fact that is held survives a restart.
 
-Work is in flight when a piece of the current state's work has no answer yet. A fact that arrives then is held. When the work settles, the library decides facts in this order:
+Work is in flight when an attempt at a piece of the current state's work has no answer yet. Work that waits for its next attempt, or for the end of an `Again(after)`, is not in flight. A fact that arrives while work is in flight is held. When the work settles, the library decides facts in this order:
 
 1. The work's own fact.
 2. Each held fact, in the order it arrived.
@@ -437,8 +510,6 @@ Mark each type with `[AkkaSerializable(Manifest = "...")]`, and each union as we
 
 These are not in Akka.Durable today:
 
-- Retry policies. To repeat work, the table uses `Again`, or moves to a state with the same work.
-- `Again` with a delay. `Again` issues the work at once. A table that answers a timer's own fact with `Again` loops, because the timer is still due.
 - A workflow that starts another workflow. An entity can start one: see [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
 - The outcome of a workflow delivered to the entity that started it. The workflow does not record who started it.
 - A scenario test kit for workflows, like `DeciderScenario` for entities. Test a workflow through the hosted `DurableEntityTestKit`. You can test `Decide` and `Work` as plain functions too.
