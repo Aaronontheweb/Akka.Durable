@@ -1,3 +1,25 @@
+#### 0.1.0-alpha.4 November 11th 2026 ####
+
+Fourth alpha release of Akka.Durable. An entity's `Execute` is now recorded with its decision, and a retry policy makes the library redeliver it, which gives entities a built-in outbox. An entity can also start, notify and cancel a workflow from a decision. This release changes parts of the 0.1.0-alpha.3 API. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **Every `Execute` is recorded.** The effect is journaled in the same atomic write as the events of the decision that issued it. It is attempted once, and `Decide` always gets its answer or a give-up: `Failed`, `TimedOut`, or `Interrupted` after a crash. A handler that throws is no longer logged and dropped.
+* **A built-in outbox.** Register a handler with a retry policy, for example `AddEffectHandler<TEffect, THandler>(Retry.UntilAcknowledged(first, max))`, and the library redelivers the effect until the handler acknowledges it, after a crash, a passivation or a shard move too. `Retry.Every` and `Retry.Backoff` stop after a number of attempts and give up with `RetriesExhausted`. Delivery is at least once, so a handler that is registered with a policy must be safe to repeat.
+* **`AddEffectHandler` registers a handler and its route.** A recovered effect finds its handler through the route. An entity effect whose handler has no route is refused at its first `Execute`. Two handlers for one effect type fail at startup.
+* **`IEffect<TCommand>`.** An entity effect type implements it to turn a give-up into one of the entity's commands, and `Execute` requires it. Entity effect types are journaled, so they need a serializer; the host checks this at startup.
+* **`EffectDelivery`.** Every handler receives a stable effect id and the attempt number, so its work can be made safe to repeat. `IEffectHandler<TEffect>` is the form with no answer for `Decide`.
+* **An entity starts, notifies and cancels a workflow.** Declare the workflow with `Uses(definition)` on the entity definition, then call `Start`, `Notify` or `Cancel` on a decision. A start is recorded and delivered until the workflow answers. `Notify` and `Cancel` are recorded and attempted once; their answer and their give-up become commands through `Uses(definition, told:, gaveUp:)`. A workflow that is not hosted fails the host at startup.
+* **`Resume` is removed.** A recorded effect comes back by itself. "Ask again after a crash" is an arm in `Decide` on the `Interrupted` give-up.
+* **Akka.Reminders is required** for an entity that has effect handlers or uses a workflow; the host refuses to start without it. Timer keys that start with `durable-` are reserved for the library.
+* **A finished workflow cancels its wake reminder.**
+* **`VerifyMessageSerialization` works with C# union events** on Akka.NET 1.6.0-beta7. It stays off by default.
+* **TestKit.** `DeciderScenario` adds `WhenGaveUp`, `ThenStarted`, `ThenNotified` and `ThenCancelled`, and loses `Resumed()`. `DurableEntityTestKit` adds `PendingEffects`.
+* **`Run`, `Tell` and `Send` are unchanged.** They are light and not recorded. If delivery must be guaranteed, write an effect handler and use `Execute`.
+* **The repository builds with the stable .NET 11 SDK.**
+
+Not yet implemented: retry policies on workflow work, `Again` with a delay, delivery of a workflow's outcome to the entity or workflow that started it, child workflows, a scenario test kit for workflows, state and event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests.
+
+Known issues: an entity that fails right after recovery is restarted with no delay, so a failure that repeats on every recovery restarts it in a loop. A reader of the journal now sees the library's own records between an entity's events, and `StateSnapshot.SequenceNr` counts them. A snapshot written by this release cannot be read by 0.1.0-alpha.3.
+
 #### 0.1.0-alpha.3 November 10th 2026 ####
 
 Third alpha release of Akka.Durable. It makes a workflow read typed, moves to Akka.NET 1.6.0-beta7, refuses an effect time limit that is not positive, and logs a missing effect handler as an error. Akka.Durable is still a proof of concept, not an official Akka.NET project.
