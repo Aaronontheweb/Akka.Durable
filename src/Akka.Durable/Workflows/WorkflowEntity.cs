@@ -38,7 +38,8 @@ internal sealed record WfNotStarted : IDurableEntityProtocol;
 /// <param name="Attempts">
 /// One <see cref="WfAttempt"/> for each position whose attempts are counted: work with a retry policy that failed or
 /// started again, and work whose first attempt waited for a delayed <c>Again</c>. A position without one is at attempt
-/// 1, started at <paramref name="IssuedAt"/>, unless <paramref name="Delayed"/> is set. Empty in a new entry.
+/// 1, started at <paramref name="IssuedAt"/>, unless <paramref name="Delayed"/> is set. Empty in a new entry. Null in a
+/// state written before this field existed: the field is nullable so that such a state can still be read.
 /// </param>
 /// <param name="Delayed">
 /// Set by <c>Again(after:)</c>: the work of this entry is first issued at this time. Until then nothing is in flight.
@@ -52,7 +53,7 @@ internal sealed record WfRunning(
     [property: AkkaField(4)] ImmutableArray<int> Settled,
     [property: AkkaField(5)] ImmutableArray<object> Held,
     [property: AkkaField(6)] DateTimeOffset IssuedAt = default,
-    [property: AkkaField(7)] ImmutableArray<object> Attempts = default,
+    [property: AkkaField(7)] ImmutableArray<object>? Attempts = null,
     [property: AkkaField(8)] DateTimeOffset? Delayed = null) : IDurableEntityProtocol
 {
     // ImmutableArray compares by reference; compare its contents so records with equal data are equal.
@@ -1011,9 +1012,10 @@ internal readonly record struct Progress(
 internal static class WorkAttempts
 {
     /// <summary>The list, empty when it was not written: a state journaled before work had attempts.</summary>
-    public static ImmutableArray<object> Of(ImmutableArray<object> attempts) => attempts.IsDefault ? [] : attempts;
+    public static ImmutableArray<object> Of(ImmutableArray<object>? attempts) =>
+        attempts is { IsDefault: false } list ? list : [];
 
-    public static WfAttempt? Find(ImmutableArray<object> attempts, int index)
+    public static WfAttempt? Find(ImmutableArray<object>? attempts, int index)
     {
         foreach (var item in Of(attempts))
             if (item is WfAttempt attempt && attempt.Index == index)
@@ -1022,7 +1024,7 @@ internal static class WorkAttempts
         return null;
     }
 
-    public static ImmutableArray<object> Set(ImmutableArray<object> attempts, WfAttempt attempt)
+    public static ImmutableArray<object> Set(ImmutableArray<object>? attempts, WfAttempt attempt)
     {
         var list = Of(attempts);
         for (var i = 0; i < list.Length; i++)
