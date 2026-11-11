@@ -76,13 +76,13 @@ public class WorkflowEngineSpecs
     // ---- Answers that are not for the current entry ----
 
     [Fact]
-    public void A_late_answer_with_nothing_in_flight_is_decided_at_once_and_settles_nothing()
+    public async Task A_late_answer_with_nothing_in_flight_is_dropped_and_logged_at_debug_level()
     {
         var outcome = Scenario()
             .Given(WaitingForAPerson())
             // The reserve work of entry 1 answers late. Entry 2 has no work in flight.
             .When(Answer(entry: 1, index: 0, new Charged("c1")))
-            .ThenPersisted(Recorded(new Charged("c1"), answered: null, Unexpected()))
+            .ThenNothingPersisted()
             .ThenState(state =>
             {
                 var running = RunningState(state);
@@ -92,27 +92,36 @@ public class WorkflowEngineSpecs
             });
 
         Assert.Empty(IssuedWork(outcome));
+
+        var loggers = new RecordingLoggers();
+        using var services = new ServiceCollection().AddSingleton<ILoggerFactory>(loggers).BuildServiceProvider();
+        var log = Assert.Single(outcome.Effects.Select(e => e.Value).OfType<RunEffect>());
+        await log.ExecuteAsync(services, TestContext.Current.CancellationToken);
+
+        var (level, message) = Assert.Single(loggers.Lines);
+        Assert.Equal(LogLevel.Debug, level);
+        Assert.Contains("entry 1", message);
     }
 
     [Fact]
-    public void A_late_answer_while_work_is_in_flight_is_held_and_decides_nothing()
+    public void A_late_answer_while_work_is_in_flight_is_dropped_and_not_held()
     {
         var outcome = Scenario()
             .Given(Started())
             .When(Answer(entry: 0, index: 0, new Charged("c1")))
-            .ThenPersisted(Held(new Charged("c1")))
+            .ThenNothingPersisted()
             .ThenState(state =>
             {
                 var running = RunningState(state);
                 Assert.Equal<CheckoutState>(new Reserving(), (CheckoutState)running.State);
                 Assert.Equal(1, running.Entry);
                 Assert.Empty(running.Settled);
-                Assert.Equal<object>((CheckoutFact)new Charged("c1"), Assert.Single(running.Held));
+                Assert.Empty(running.Held);
             });
 
-        // The only effect is the reminder, for the deadline of the work that is still in flight.
+        // The only effect is the debug log line.
         Assert.Empty(IssuedWork(outcome));
-        Assert.IsType<ScheduleEffect>(Assert.Single(outcome.Effects).Value);
+        Assert.IsType<RunEffect>(Assert.Single(outcome.Effects).Value);
     }
 
     [Fact]
@@ -136,7 +145,7 @@ public class WorkflowEngineSpecs
     // ---- What a fact leads to ----
 
     [Fact]
-    public void Held_facts_that_remain_when_the_workflow_finishes_are_not_decided()
+    public void A_held_fact_that_moves_the_workflow_on_replaces_the_finish_of_the_answer()
     {
         var outcome = Scenario()
             .Given([
@@ -145,15 +154,22 @@ public class WorkflowEngineSpecs
                 Held(new OperatorSaidRetry()),
             ])
             .When(Answer(entry: 2, index: 0, new Charged("c1")))
-            .ThenPersisted(Recorded(
-                new Charged("c1"), answered: 0, Ended(new OrderPlaced("c1"))))
+            .ThenPersisted(
+                Recorded(new Charged("c1"), answered: 0, new WfFinishing((CheckoutOutcome)new OrderPlaced("c1"))),
+                Recorded(new CancelRequested("changed my mind", "user-17"), answered: null,
+                    MovedTo(new Undoing(new OrderCancelled("changed my mind"))), fromHeld: true),
+                // The undo has not been issued yet, so the second held fact is decided in the new state, as before.
+                Recorded(new OperatorSaidRetry(), answered: null, Unexpected(), fromHeld: true))
             .ThenState(state =>
             {
-                var finished = Assert.IsType<WfFinished>(state.Value);
-                Assert.Equal<CheckoutOutcome>(new OrderPlaced("c1"), (CheckoutOutcome)finished.Outcome);
+                // The cancel moved the workflow on; the first finish did not happen.
+                var running = RunningState(state);
+                Assert.Equal<CheckoutState>(new Undoing(new OrderCancelled("changed my mind")), (CheckoutState)running.State);
+                Assert.Equal(3, running.Entry);
+                Assert.Empty(running.Held);
             });
 
-        Assert.Empty(IssuedWork(outcome));
+        Assert.Equal(new UndoOrder("o1"), Assert.Single(IssuedWork(outcome)).Effect);
     }
 
     [Fact]

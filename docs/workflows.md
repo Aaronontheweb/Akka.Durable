@@ -379,6 +379,8 @@ public static readonly WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFac
 
 A fact is journaled before the caller gets its reply. A fact that is held survives a restart.
 
+### Facts that arrive while work is in flight
+
 Work is in flight when an attempt at a piece of the current state's work has no answer yet. Work that waits for its next attempt, or for the end of an `Again(after)`, is not in flight. A fact that arrives while work is in flight is held. When the work settles, the library decides facts in this order:
 
 1. The work's own fact.
@@ -387,7 +389,20 @@ Work is in flight when an attempt at a piece of the current state's work has no 
 
 The work of a state that the workflow passes through on the way is not issued. Only the state where the decisions end gets its work issued.
 
-For example, a cancel that arrives while the card is being charged is held. The charge's fact is decided first. The held cancel is decided next. The work of the state that follows is issued last.
+**A finish waits for the held facts.** When the work's fact leads to `Finish` and facts are held, the finish does not take effect yet. The work is settled, and `Decide` gets each held fact first, in the order it arrived, in the state the workflow is in:
+
+- If a held fact moves the workflow on (`Next`, `Again`, or its own `Finish`), that transition is taken. The first finish does not happen.
+- If no held fact moves it (each one is `Stay` or `Unexpected`), the workflow finishes with the outcome of the work's fact. An `Unexpected` fact is logged at warning level, as always.
+- A held cancel is a held fact like the others: it reaches `Decide` through your `Cancel` function.
+- Other work of the same state that is still in flight does not delay this. The finish ends that work, so the held facts are decided at once. If a held fact keeps the state, the workflow still finishes, and the answer of the other work is dropped.
+
+All of this is one journal write, after the held facts. A restart before it keeps the held facts; a restart after it does not decide them again.
+
+**A late answer is dropped.** An answer to work of a state the workflow has left, or of an entry that `Again` replaced, is not decided and not held. `Decide` never gets it, so a fact type that several pieces of work share (a plain "done") is not taken as the answer to the current work. The library logs it at debug level.
+
+The sender of a held fact gets `Held`. A fact that arrives after the finish gets `AlreadyFinished<TOutcome>`, and nothing is journaled.
+
+For example, the state "report the final failure" has a report in flight. The payment processor sends a late success. It is held, and the processor gets `Held`. The report is acknowledged, and the table decides `Finish(FailedForGood)` for it. Before that finish takes effect, `Decide` gets the held success in the same state. If the table moves on for it, for example to "refund the failure fee", the workflow runs on and does not finish as failed. If the table keeps the state, the workflow finishes as `FailedForGood`. A success that arrives after that gets `AlreadyFinished`, and the processor knows it must go another way.
 
 ## Hosting and calling
 
@@ -455,7 +470,7 @@ Getting a ref is cheap. It does not start or activate the workflow.
 
 The read is queued behind commands the workflow has already received. It is answered after their facts are journaled. It does not wait for the workflow's work, so it can return while work is in flight.
 
-`SequenceNr` is the sequence number of the journal of the entity that hosts the workflow. It grows with each event the workflow journals: the start, each decided fact and each held fact. Compare it with an earlier read to see whether anything changed. It is not a count of state changes: a fact that keeps the state also adds one.
+`SequenceNr` is the sequence number of the journal of the entity that hosts the workflow. It grows with each event the workflow journals: the start, each decided fact, each held fact, and the finish that waited for held facts. Compare it with an earlier read to see whether anything changed. It is not a count of state changes: a fact that keeps the state also adds one.
 
 `WorkflowRunning<TState>.State` has your state type, as you typed it in the definition. When the state type is a C# union, `State` is the union value, not the case it holds. So a `switch` expression over it is checked by the compiler, as the fact table is. Write no catch-all arm. Then the compiler reports a state that you add later, until the reader handles it:
 

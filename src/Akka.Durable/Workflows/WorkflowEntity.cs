@@ -117,8 +117,16 @@ internal sealed record WfRepeated([property: AkkaField(0)] DateTimeOffset? Until
 [AkkaSerializable(Manifest = "durable-wf-unexpected-v1", AllowEmpty = true)]
 internal sealed record WfUnexpected : IDurableEntityProtocol;
 
+/// <summary>
+/// The table decided <c>Finish</c> while facts were held. The finish waits: the held facts are decided first, in the
+/// same write. A held fact that moves the workflow on replaces it. Otherwise a <see cref="WfFinishTaken"/> follows.
+/// </summary>
+/// <param name="Outcome">The outcome the table decided.</param>
+[AkkaSerializable(Manifest = "durable-wf-finishing-v1")]
+internal sealed record WfFinishing([property: AkkaField(0)] object Outcome) : IDurableEntityProtocol;
+
 [AkkaSerializable(Manifest = "durable-wf-step-v1")]
-internal readonly union WfStep(WfMoved, WfEnded, WfKept, WfRepeated, WfUnexpected) : IDurableEntityProtocol;
+internal readonly union WfStep(WfMoved, WfEnded, WfKept, WfRepeated, WfUnexpected, WfFinishing) : IDurableEntityProtocol;
 
 /// <param name="Fact">The author's fact.</param>
 /// <param name="Answered">The position, in the work list of the entry it arrived in, of the work this fact answered.</param>
@@ -168,8 +176,19 @@ internal sealed record WfAttemptFailed(
     [property: AkkaField(2)] int Attempt,
     [property: AkkaField(3)] DateTimeOffset NextAt) : IDurableEntityProtocol, IDurableJournalRecord;
 
+/// <summary>
+/// A finish that waited for the held facts takes effect: none of them moved the workflow on. It follows, in the same
+/// write, the <see cref="WfFinishing"/> step and the decisions of the held facts.
+/// </summary>
+/// <param name="Outcome">The outcome of the <see cref="WfFinishing"/> step that waited.</param>
+/// <param name="At">When the workflow finished.</param>
+[AkkaSerializable(Manifest = "durable-wf-finish-taken-v1")]
+internal sealed record WfFinishTaken(
+    [property: AkkaField(0)] object Outcome,
+    [property: AkkaField(1)] DateTimeOffset At) : IDurableEntityProtocol, IDurableJournalRecord;
+
 [AkkaSerializable(Manifest = "durable-wf-event-v1")]
-internal readonly union WfEvent(WfStarted, WfFactRecorded, WfHeld, WfAttemptStarted, WfAttemptFailed)
+internal readonly union WfEvent(WfStarted, WfFactRecorded, WfHeld, WfAttemptStarted, WfAttemptFailed, WfFinishTaken)
     : IDurableEntityProtocol, IDurableJournalRecord;
 
 // ---- Commands and replies ----
@@ -441,13 +460,18 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             return Advance(running, [(answer.Fact, answer.Index)], reached, ctx, ctx.None());
         }
 
-        // A late answer of work with a retry policy, for a state the workflow has left: the move ended its retries.
-        if (answer.Attempt > 0) return ctx.Ignore();
-
-        // A late answer, to work of an earlier entry. It settles nothing, so it is treated like a fact from outside.
-        return InFlight(running, ctx)
-            ? ctx.Persist(new WfHeld(answer.Fact))
-            : Advance(running, [(answer.Fact, null)], reached, ctx, ctx.None());
+        // A late answer, to work of an entry the workflow has left: the move or the repeat ended that work and its
+        // retries. It is dropped, not decided and not held, so that a fact type several pieces of work share is not
+        // taken as the answer to the current work.
+        var (type, id, current) = (definition.TypeName.Value, ctx.EntityId.Value, running.Entry);
+        return ctx.None().Run<ILoggerFactory>((loggers, _) =>
+        {
+            loggers.CreateLogger("Akka.Durable.Workflow").LogDebug(
+                "Workflow [{WorkflowType}/{WorkflowId}] dropped the answer {Fact} to work {Index} of entry {Entry}: " +
+                "it is in entry {Current}, so that work has ended.", type, id, answer.Fact, answer.Index, answer.Entry,
+                current);
+            return Task.CompletedTask;
+        });
     }
 
     /// <summary>A fact from outside: held while work is in flight, otherwise decided at once.</summary>
@@ -668,6 +692,13 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
     /// workflow started in, and journals them all in one write. The work of the state the workflow ends in is issued
     /// last, once.
     /// </summary>
+    /// <remarks>
+    /// A <c>Finish</c> decided while facts are held waits: it is journaled as <see cref="WfFinishing"/>, and the held
+    /// facts are decided first, in arrival order, in the state the workflow is in, whether or not other work of that
+    /// state is still in flight: the finish ends that work. The first held fact that moves the workflow on (a move, a
+    /// repeat or its own finish) replaces the finish. When none does, <see cref="WfFinishTaken"/> ends the workflow with
+    /// the outcome that waited.
+    /// </remarks>
     /// <param name="facts">
     /// The facts to decide, each with the position of the work it answers when it answers current work. Empty for
     /// a wake, which decides only timers and starts due attempts.
@@ -688,6 +719,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         var held = running.Held;
         var issued = true;
         var finished = false;
+        object? finishing = null;
         var events = new List<WfEvent>();
         var unexpected = new List<(TFact Fact, TState State)>();
 
@@ -703,6 +735,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             {
                 case NextTransition<TState> next:
                     Record(new WfMoved(next.State));
+                    finishing = null;
                     (state, entry, enteredAt, progress, issued) =
                         (next.State, entry + 1, ctx.UtcNow, Progress.Fresh(ctx.UtcNow, delayed: null), false);
                     break;
@@ -711,12 +744,20 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
                     // A delayed repeat: the work of the new entry is issued once the delay has passed.
                     var until = again.After is { } after ? ctx.UtcNow + after : (DateTimeOffset?)null;
                     Record(new WfRepeated(until));
+                    finishing = null;
                     (entry, progress, issued) = (entry + 1, Progress.Fresh(ctx.UtcNow, until), false);
+                    break;
+
+                case FinishTransition<TOutcome> finish when !held.IsEmpty:
+                    // Facts are held: they are decided before the finish takes effect.
+                    Record(new WfFinishing(finish.Outcome));
+                    if (position is { } answered) progress = progress.Settle(answered);
+                    finishing = finish.Outcome;
                     break;
 
                 case FinishTransition<TOutcome> finish:
                     Record(new WfEnded(finish.Outcome));
-                    finished = true;
+                    (finished, finishing) = (true, null);
                     break;
 
                 case StayTransition:
@@ -743,11 +784,18 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         foreach (var (fact, answered) in facts)
             Step(fact, answered, fromHeld: false);
 
-        while (!finished && !held.IsEmpty && !WorkInFlight())
+        // A finish that waits for the held facts does not wait for other work of the state: it ends that work.
+        while (!finished && !held.IsEmpty && (finishing is not null || !WorkInFlight()))
         {
             var next = held[0];
             held = held.RemoveAt(0);
             Step(next, position: null, fromHeld: true);
+        }
+
+        if (finishing is not null)
+        {
+            events.Add(new WfFinishTaken(finishing, ctx.UtcNow));
+            finished = true;
         }
 
         // One pass over the timers of the position reached, if it is at rest. A timer that moves the workflow on
@@ -1050,6 +1098,7 @@ internal static class WorkflowEvolve
             (WfRunning running, WfFactRecorded recorded) => Apply(running, recorded),
             (WfRunning running, WfAttemptStarted started) => Apply(running, started),
             (WfRunning running, WfAttemptFailed failed) => Apply(running, failed),
+            (WfRunning running, WfFinishTaken taken) => new WfFinished(running.Input, taken.Outcome, taken.At),
             _ => throw new InvalidOperationException(
                 $"The journal holds the workflow event {@event.Value} for a workflow in the state {state.Value}. " +
                 "That event cannot follow that state, so the journal is not one this workflow wrote."),
@@ -1092,7 +1141,9 @@ internal static class WorkflowEvolve
                 Entry = running.Entry + 1, Settled = [], IssuedAt = recorded.At, Attempts = [], Delayed = repeated.Until,
             },
             WfEnded ended => new WfFinished(running.Input, ended.Outcome, recorded.At),
-            WfKept or WfUnexpected => recorded.Answered is { } index
+            // A finish that waits for held facts settles its work like a stay. The workflow finishes at the
+            // WfFinishTaken that follows, unless a held fact moves it on first.
+            WfKept or WfUnexpected or WfFinishing => recorded.Answered is { } index
                 ? running with { Settled = running.Settled.Add(index) }
                 : running,
         };
