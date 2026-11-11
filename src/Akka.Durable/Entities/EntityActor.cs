@@ -54,6 +54,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // effect pending, and removed once nothing is pending.
     private bool _wakeStored;
 
+    // When the stored wake is due. A write that leaves an effect pending with an earlier next attempt stores it again.
+    private DateTimeOffset _wakeDue = DateTimeOffset.MaxValue;
+
     // Created lazily so entities that never touch reminders don't require them to be configured.
     private IReminderClient? _reminderClient;
 
@@ -212,6 +215,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// </remarks>
     private void ContinuePendingEffects()
     {
+        // The previous incarnation stored a wake when it left these effects pending. It is removed once nothing is
+        // pending, and stored again after recovery while something still is.
+        if (_pending.Count > 0)
+        {
+            _wakeStored = true;
+            _wakeDue = DateTimeOffset.MaxValue;
+        }
+
         var giveUps = new List<(PendingEffect Pending, GaveUpReason Reason)>();
         foreach (var pending in _pending.Values)
         {
@@ -252,7 +263,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         if (_pending.Count > 0)
             DeferStashing(async () =>
             {
-                await TryStoreWakeAsync();
+                await TryStoreWakeAsync(TimeSpan.Zero);
                 RunAfterRecovery();
             });
         else
@@ -631,11 +642,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             if (effect is ExecuteEffect { Recorded: true } execute)
                 issued.Add(Issue(execute, now));
 
-        if (issued.Any(effect => effect.Record is not null) && !_wakeStored)
+        var earliestIssued = issued.Where(effect => effect.Record is not null).Select(effect => effect.Record!.NextAt)
+            .DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
+        if (earliestIssued != DateTimeOffset.MaxValue && (!_wakeStored || earliestIssued < _wakeDue))
         {
             // The wake is stored before the write, so no crash can leave an effect with nothing to wake the entity.
             // Inside a stashing defer, so no other command is decided in between.
-            var due = issued.Where(effect => effect.Record is not null).Min(effect => effect.Record!.NextAt);
+            var others = NextWake(TimeSpan.Zero);
+            var due = earliestIssued < others ? earliestIssued : others;
             DeferStashing(async () =>
             {
                 try
@@ -803,7 +817,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         DeferStashing(async () =>
         {
-            await TryStoreWakeAsync();
+            await TryStoreWakeAsync(TimeSpan.Zero);
             StopIfRequested();
         });
     }
@@ -975,16 +989,24 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private void HandleWake(ReminderEnvelope envelope)
     {
         _wakeStored = false;
+        _wakeDue = DateTimeOffset.MaxValue;
         DeferStashing(async () =>
         {
-            if (_pending.Count > 0) await TryStoreWakeAsync();
+            if (_pending.Count > 0) await TryStoreWakeAsync(WakeMargin);
             AckReminder(envelope);
             StopIfRequested();
         });
     }
 
-    /// <summary>When the wake must fire: when the earliest pending effect needs its next attempt or its give-up.</summary>
-    private DateTimeOffset NextWake()
+    /// <summary>
+    /// When the wake must fire: when the earliest pending effect needs its next attempt or its give-up, and not before
+    /// <paramref name="floor"/> from now.
+    /// </summary>
+    /// <param name="floor">
+    /// Zero when the wake is stored for a stop or a write. <see cref="WakeMargin"/> when the wake fired on an entity
+    /// that is running: its effects are on their timers, so a wake that is already due would only fire again at once.
+    /// </param>
+    private DateTimeOffset NextWake(TimeSpan floor)
     {
         var earliest = DateTimeOffset.MaxValue;
         foreach (var pending in _pending.Values)
@@ -993,7 +1015,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             if (due < earliest) earliest = due;
         }
 
-        var soonest = _timeProvider.Now + WakeMargin;
+        var soonest = _timeProvider.Now + floor;
         return earliest > soonest ? earliest : soonest;
     }
 
@@ -1002,14 +1024,15 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
             new ReminderKey(EffectsWake.Key), due, new EffectsWake(due), ct: _lifetime.Token));
         _wakeStored = true;
+        _wakeDue = due;
     }
 
     /// <summary>Stores the wake for the pending effects. A failure is logged: the effects are on their timers anyway.</summary>
-    private async Task TryStoreWakeAsync()
+    private async Task TryStoreWakeAsync(TimeSpan floor)
     {
         try
         {
-            await StoreWakeAsync(NextWake());
+            await StoreWakeAsync(NextWake(floor));
         }
         catch (Exception error) when (!_lifetime.IsCancellationRequested)
         {
@@ -1022,6 +1045,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private async Task RemoveWakeAsync()
     {
         _wakeStored = false;
+        _wakeDue = DateTimeOffset.MaxValue;
         try
         {
             var cancelled = await Reminders.CancelReminderAsync(new ReminderKey(EffectsWake.Key), _lifetime.Token);
