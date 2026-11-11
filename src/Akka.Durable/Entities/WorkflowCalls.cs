@@ -1,4 +1,3 @@
-using Akka.Serialization.V2;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Akka.Durable;
@@ -9,14 +8,16 @@ namespace Akka.Durable;
 /// <see cref="ExecuteEffect"/>.
 /// </summary>
 /// <remarks>
-/// The library completes the start: until the workflow answers, it stores a durable reminder that issues the start
-/// again, also after a restart. A start is addressed by id, so a repeat is answered "already running" or
-/// "already finished".
+/// The start is journaled in the same write as the decision's events, and the library delivers it until the workflow
+/// answers, also after a restart. A start is addressed by id, so a repeat is answered "already running" or "already
+/// finished".
 /// </remarks>
 public sealed record StartWorkflow(WorkflowTypeName Workflow, WorkflowId Id, object Input) : IWorkflowCall
 {
     Type IWorkflowCall.RegionKey => RegionKey;
     internal Type RegionKey { get; init; } = typeof(object);
+
+    object IWorkflowCall.Recorded => new RecordedStart(Workflow.Value, Id.Value, Input);
 
     public bool Equals(StartWorkflow? other) =>
         other is not null && Workflow == other.Workflow && Id == other.Id && Equals(Input, other.Input);
@@ -26,12 +27,15 @@ public sealed record StartWorkflow(WorkflowTypeName Workflow, WorkflowId Id, obj
 
 /// <summary>
 /// The effect of <c>Notify</c> on a decision: send <see cref="Fact"/> to the workflow <see cref="Id"/> of the workflow
-/// type <see cref="Workflow"/>. Sent once. It is the <see cref="ExecuteEffect.Effect"/> of an <see cref="ExecuteEffect"/>.
+/// type <see cref="Workflow"/>. Journaled with the decision, attempted once. It is the <see cref="ExecuteEffect.Effect"/>
+/// of an <see cref="ExecuteEffect"/>.
 /// </summary>
 public sealed record NotifyWorkflow(WorkflowTypeName Workflow, WorkflowId Id, object Fact) : IWorkflowCall
 {
     Type IWorkflowCall.RegionKey => RegionKey;
     internal Type RegionKey { get; init; } = typeof(object);
+
+    object IWorkflowCall.Recorded => new RecordedNotify(Workflow.Value, Id.Value, Fact);
 
     public bool Equals(NotifyWorkflow? other) =>
         other is not null && Workflow == other.Workflow && Id == other.Id && Equals(Fact, other.Fact);
@@ -41,12 +45,15 @@ public sealed record NotifyWorkflow(WorkflowTypeName Workflow, WorkflowId Id, ob
 
 /// <summary>
 /// The effect of <c>Cancel</c> on a decision: ask the workflow <see cref="Id"/> of the workflow type
-/// <see cref="Workflow"/> to stop. Sent once. It is the <see cref="ExecuteEffect.Effect"/> of an <see cref="ExecuteEffect"/>.
+/// <see cref="Workflow"/> to stop. Journaled with the decision, attempted once. It is the
+/// <see cref="ExecuteEffect.Effect"/> of an <see cref="ExecuteEffect"/>.
 /// </summary>
 public sealed record CancelWorkflow(WorkflowTypeName Workflow, WorkflowId Id, string Reason, string By) : IWorkflowCall
 {
     Type IWorkflowCall.RegionKey => RegionKey;
     internal Type RegionKey { get; init; } = typeof(object);
+
+    object IWorkflowCall.Recorded => new RecordedCancel(Workflow.Value, Id.Value, Reason, By);
 
     public bool Equals(CancelWorkflow? other) =>
         other is not null && Workflow == other.Workflow && Id == other.Id && Reason == other.Reason && By == other.By;
@@ -62,118 +69,59 @@ internal interface IWorkflowCall
 
     /// <summary>The <see cref="WorkflowRegion{TInput,TState,TFact,TOutcome}"/> type of the workflow's definition.</summary>
     Type RegionKey { get; }
-}
 
-/// <summary>A workflow type an entity may call: declared with <c>Uses</c>.</summary>
-/// <param name="Workflow">The workflow type's name.</param>
-/// <param name="RegionKey">The <see cref="WorkflowRegion{TInput,TState,TFact,TOutcome}"/> type it is hosted under.</param>
-/// <param name="Restart">
-/// Builds the start again from a <see cref="PendingStart"/>, with no answer to deliver. Null when the stored input is
-/// not of the workflow's input type.
-/// </param>
-internal sealed record WorkflowUse(WorkflowTypeName Workflow, Type RegionKey, Func<WorkflowId, object, ExecuteEffect?> Restart)
-{
-    public static WorkflowUse Of<TInput, TState, TFact, TOutcome>(WorkflowDefinition<TInput, TState, TFact, TOutcome> definition)
-        where TInput : notnull
-        where TState : notnull
-        where TFact : notnull
-        where TOutcome : notnull =>
-        new(definition.TypeName, typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>),
-            (id, input) => input is TInput typed
-                ? WorkflowCalls.Start<TInput, TState, TFact, TOutcome>(definition.TypeName, id, typed, then: null, gaveUp: null)
-                : null);
-
-    public bool Matches(IWorkflowCall call) => call.Workflow == Workflow && call.RegionKey == RegionKey;
+    /// <summary>The call as it is journaled.</summary>
+    object Recorded { get; }
 }
 
 /// <summary>
-/// The payload of the reminder that keeps a start the workflow has not answered yet. When it fires, the entity
-/// issues the start again.
+/// A workflow type an entity may call: declared with <c>Uses</c>. It holds, bound to the workflow's types, how to
+/// deliver each call, and how the answer and the give-up of a <c>Notify</c> or <c>Cancel</c> become the entity's
+/// commands. It lives on the definition, so it is there after a restart.
 /// </summary>
 /// <param name="Workflow">The workflow type's name.</param>
-/// <param name="Id">The workflow's id.</param>
-/// <param name="Input">The author's input, written with the serializer bound to its type.</param>
-[AkkaSerializable(Manifest = "durable-pending-start-v1")]
-internal sealed record PendingStart(
-    [property: AkkaField(0)] string Workflow,
-    [property: AkkaField(1)] string Id,
-    [property: AkkaField(2)] object Input) : IDurableEntityProtocol
+/// <param name="RegionKey">The <see cref="WorkflowRegion{TInput,TState,TFact,TOutcome}"/> type it is hosted under.</param>
+/// <param name="InputType">The workflow's input type.</param>
+/// <param name="Start">Sends a start.</param>
+/// <param name="Notify">Sends a fact and returns the command its answer becomes. Null without <c>told</c>.</param>
+/// <param name="Cancel">Sends a cancel and returns the command its answer becomes. Null without <c>told</c>.</param>
+/// <param name="GaveUp">The command a notify or cancel with no answer becomes. Null without <c>gaveUp</c>.</param>
+internal sealed record WorkflowUse(
+    WorkflowTypeName Workflow,
+    Type RegionKey,
+    Type InputType,
+    Func<IServiceProvider, WorkflowId, object, CancellationToken, Task> Start,
+    Func<IServiceProvider, WorkflowId, object, CancellationToken, Task<object?>>? Notify,
+    Func<IServiceProvider, WorkflowId, string, string, CancellationToken, Task<object?>>? Cancel,
+    Func<WorkGaveUp, object?>? GaveUp)
 {
-    /// <summary>
-    /// The reminder's key. One per workflow an entity starts, so a second start of the same workflow replaces it.
-    /// </summary>
-    public static string KeyOf(WorkflowTypeName workflow, WorkflowId id) => $"durable-start:{workflow.Value}:{id.Value}";
+    /// <summary>The policy of every start: it is delivered until the workflow answers.</summary>
+    public static readonly RetryPolicy StartPolicy = Retry.UntilAcknowledged(TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(1));
 
-    public string Key => KeyOf(new WorkflowTypeName(Workflow), new WorkflowId(Id));
-}
-
-/// <summary>A decision calls a workflow type that the entity's definition does not name with <c>Uses</c>.</summary>
-internal sealed class UndeclaredWorkflowException(EntityTypeName entity, WorkflowTypeName workflow) : InvalidOperationException(
-    $"Entity type [{entity.Value}] called workflow type [{workflow.Value}], which its definition does not name. " +
-    $"Declare it with .Uses(...) on the entity definition, passing the definition of [{workflow.Value}].");
-
-internal static class WorkflowCalls
-{
-    /// <summary>
-    /// A start. With <paramref name="then"/> the answer becomes one of the entity's commands; without it the answer
-    /// only ends the repeats.
-    /// </summary>
-    public static ExecuteEffect Start<TInput, TState, TFact, TOutcome>(
-        WorkflowTypeName workflow, WorkflowId id, TInput input,
-        Func<StartResult<TOutcome>, object?>? then, Func<WorkGaveUp, object?>? gaveUp)
+    public static WorkflowUse Of<TCommand, TInput, TState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> definition,
+        Func<DeliveryResult<TOutcome>, TCommand>? told,
+        Func<WorkGaveUp, TCommand>? gaveUp)
         where TInput : notnull
         where TState : notnull
         where TFact : notnull
         where TOutcome : notnull
     {
-        var effect = new StartWorkflow(workflow, id, input) { RegionKey = typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>) };
-        return new ExecuteEffect(effect)
-        {
-            Resolve = services => async ct =>
-            {
-                var answer = await Refs<TInput, TState, TFact, TOutcome>(services, workflow).Get(id).Start(input, ct);
-                return then?.Invoke(answer);
-            },
-            Failed = gaveUp is null ? null : failure => gaveUp(GaveUp(effect, failure)),
-        };
+        var name = definition.TypeName;
+        return new WorkflowUse(name, typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>), typeof(TInput),
+            Start: async (services, id, input, ct) =>
+                await Refs<TInput, TState, TFact, TOutcome>(services, name).Get(id).Start((TInput)input, ct),
+            Notify: told is null ? null : async (services, id, fact, ct) =>
+                told(await Refs<TInput, TState, TFact, TOutcome>(services, name).Get(id).Notify((TFact)fact, ct)),
+            Cancel: told is null ? null : async (services, id, reason, by, ct) =>
+                told(await Refs<TInput, TState, TFact, TOutcome>(services, name).Get(id).Cancel(reason, by, ct)),
+            GaveUp: gaveUp is null ? null : failure => gaveUp(failure));
     }
 
-    public static ExecuteEffect Notify<TInput, TState, TFact, TOutcome>(
-        WorkflowTypeName workflow, WorkflowId id, TFact fact,
-        Func<DeliveryResult<TOutcome>, object?> then, Func<WorkGaveUp, object?> gaveUp)
-        where TInput : notnull
-        where TState : notnull
-        where TFact : notnull
-        where TOutcome : notnull
-    {
-        var effect = new NotifyWorkflow(workflow, id, fact) { RegionKey = typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>) };
-        return new ExecuteEffect(effect)
-        {
-            Resolve = services => async ct =>
-                then(await Refs<TInput, TState, TFact, TOutcome>(services, workflow).Get(id).Notify(fact, ct)),
-            Failed = failure => gaveUp(GaveUp(effect, failure)),
-        };
-    }
+    public bool Matches(IWorkflowCall call) => call.Workflow == Workflow && call.RegionKey == RegionKey;
 
-    public static ExecuteEffect Cancel<TInput, TState, TFact, TOutcome>(
-        WorkflowTypeName workflow, WorkflowId id, string reason, string by,
-        Func<DeliveryResult<TOutcome>, object?> then, Func<WorkGaveUp, object?> gaveUp)
-        where TInput : notnull
-        where TState : notnull
-        where TFact : notnull
-        where TOutcome : notnull
-    {
-        var effect = new CancelWorkflow(workflow, id, reason, by) { RegionKey = typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>) };
-        return new ExecuteEffect(effect)
-        {
-            Resolve = services => async ct =>
-                then(await Refs<TInput, TState, TFact, TOutcome>(services, workflow).Get(id).Cancel(reason, by, ct)),
-            Failed = failure => gaveUp(GaveUp(effect, failure)),
-        };
-    }
-
-    private static WorkGaveUp GaveUp(object effect, Exception failure) =>
-        new(effect, failure is TimeoutException ? GaveUpReason.TimedOut : GaveUpReason.Failed, failure.Message);
+    /// <summary>True when the entity is told the answer of a notify or cancel, and its give-up.</summary>
+    public bool Answers => Notify is not null && GaveUp is not null;
 
     /// <summary>Resolved when the call runs, so a missing registration fails the call instead of the entity.</summary>
     private static IWorkflowRefs<TInput, TState, TFact, TOutcome> Refs<TInput, TState, TFact, TOutcome>(
@@ -183,4 +131,38 @@ internal static class WorkflowCalls
         ?? throw new InvalidOperationException(
             $"No workflow refs are registered, so workflow [{workflow.Value}] cannot be called. " +
             "Call AddDurableEntities() on the service collection.");
+}
+
+internal static class WorkflowCalls
+{
+    public static ExecuteEffect Start<TInput, TState, TFact, TOutcome>(WorkflowTypeName workflow, WorkflowId id, TInput input)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull =>
+        new(new StartWorkflow(workflow, id, input) { RegionKey = typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>) })
+        {
+            Recorded = true,
+        };
+
+    public static ExecuteEffect Notify<TInput, TState, TFact, TOutcome>(WorkflowTypeName workflow, WorkflowId id, TFact fact)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull =>
+        new(new NotifyWorkflow(workflow, id, fact) { RegionKey = typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>) })
+        {
+            Recorded = true,
+        };
+
+    public static ExecuteEffect Cancel<TInput, TState, TFact, TOutcome>(
+        WorkflowTypeName workflow, WorkflowId id, string reason, string by)
+        where TInput : notnull
+        where TState : notnull
+        where TFact : notnull
+        where TOutcome : notnull =>
+        new(new CancelWorkflow(workflow, id, reason, by) { RegionKey = typeof(WorkflowRegion<TInput, TState, TFact, TOutcome>) })
+        {
+            Recorded = true,
+        };
 }

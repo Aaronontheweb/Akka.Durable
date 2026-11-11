@@ -85,33 +85,6 @@ public sealed class TallyWorkflowSpecs(ITestOutputHelper output) : DurableEntity
     }
 
     [Fact]
-    public async Task A_restarted_workflow_resumes_by_asking_the_counter_again()
-    {
-        // Lock the counter so the increment is stashed and the tally stays mid-flight.
-        var counter = CounterRef("c3");
-        await counter.Ask(new LockCounter(), AskCancellation());
-
-        var tally = TallyRef("t3");
-        tally.Tell(new StartTally("c3", 4));
-        await AwaitAssertAsync(async () =>
-            Assert.NotNull((await tally.GetStateAsync(AskCancellation())).State.Pending), cancellationToken: TestCancellation);
-
-        var incarnation = await Sys.ActorSelection($"/user/durable-tally/t3").ResolveOne(TimeSpan.FromSeconds(5), TestCancellation);
-        Watch(incarnation);
-        incarnation.Tell(PoisonPill.Instance);
-        await ExpectTerminatedAsync(incarnation, cancellationToken: TestCancellation);
-
-        // Reactivation runs Resume: the tally asks the still-locked counter for its count (0) and finishes.
-        await AwaitAssertAsync(async () =>
-            Assert.Equal(new TallyState(null, 0), (await tally.GetStateAsync(AskCancellation())).State), cancellationToken: TestCancellation);
-
-        // The stashed increment is still applied once the counter unlocks; its reply goes to the old incarnation's ask.
-        await counter.Ask(new UnlockCounter(), AskCancellation());
-        await AwaitAssertAsync(async () =>
-            Assert.Equal(4, (await counter.Ask(new GetCount(), AskCancellation())).Count), cancellationToken: TestCancellation);
-    }
-
-    [Fact]
     public void Decisions_of_the_workflow_are_data()
     {
         var request = new StartTally("c9", 2);
@@ -127,10 +100,5 @@ public sealed class TallyWorkflowSpecs(ITestOutputHelper output) : DurableEntity
             .ThenPersisted(new TallyFinished(7))
             .ThenReplied(request, new TallyDone(7))
             .ThenEffects(typeof(ReplyEffect), typeof(StopEffect));
-
-        DeciderScenario.For(Tally.Definition)
-            .Given(new TallyStarted(request))
-            .Resumed()
-            .ThenSent<CounterCommand>(new EntityId("c9"), new GetCount());
     }
 }

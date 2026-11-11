@@ -252,7 +252,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             WorkflowEvolve.Evolve,
             _options)
         {
-            Resume = Resume,
+            AfterRecovery = Resume,
             Accepted = accepted,
         };
     }

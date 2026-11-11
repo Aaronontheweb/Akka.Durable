@@ -1,3 +1,6 @@
+using Akka.Hosting;
+using Akka.Reminders;
+using Akka.Reminders.Storage;
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures;
@@ -20,6 +23,15 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
     private static readonly TimeSpan NoMessageWindow = TimeSpan.FromMilliseconds(150);
     private Calculator Calculator => Host.Services.GetRequiredService<Calculator>();
     private EffectRecorder Recorder => Host.Services.GetRequiredService<EffectRecorder>();
+
+    // An Execute stores the wake reminder before its write.
+    protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
+    {
+        base.ConfigureAkka(builder, provider);
+        builder.WithLocalReminders(reminders => reminders
+            .WithStorage(_ => new InMemoryReminderStorage())
+            .WithResolver(system => new DirectEntityReminderResolver(system)));
+    }
 
     protected override void ConfigureServices(HostBuilderContext context, IServiceCollection services)
     {

@@ -4,7 +4,7 @@ using Xunit;
 namespace Akka.Durable.TestKit;
 
 /// <summary>
-/// Given / When / Then harness for pure Decide, Evolve and Resume tests. No ActorSystem involved.
+/// Given / When / Then harness for pure Decide and Evolve tests. No ActorSystem involved.
 /// </summary>
 /// <example>
 /// DeciderScenario.For(Counter.Definition)
@@ -73,39 +73,26 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
         return When(effect.GaveUp(new WorkGaveUp(effect, reason, Error: null, attempts)));
     }
 
-    /// <summary>
-    /// Recovers the entity from the given history and runs its <c>Resume</c>: the effects still pending for
-    /// that state. A definition without <c>Resume</c> has none. Fails the test when <c>Resume</c> calls a workflow
-    /// type that the definition does not name with <c>Uses</c>, or returns an <c>Execute</c>, which the entity refuses.
-    /// </summary>
-    public DeciderOutcome<TState, TCommand, TEvent> Resumed()
-    {
-        var (state, context) = Recover();
-        Decision<TCommand, TEvent> pending = definition.Resume is { } resume
-            ? resume(state, context)
-            : Decisions.None<TCommand, TEvent>();
-
-        if (pending is Handled<TCommand, TEvent> { Effects: { IsDefault: false } effects })
-            foreach (var effect in effects)
-                if (effect.Value is ExecuteEffect { Recorded: true } execute)
-                    throw new Xunit.Sdk.XunitException(
-                        new ExecuteFromResumeException(definition.TypeName, _entityId, execute.Effect).Message);
-
-        return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, EnsureDeclared(pending));
-    }
-
-    /// <summary>A call to an undeclared workflow fails at run time, so the scenario fails here.</summary>
+    /// <summary>A call to a workflow the entity cannot make fails at run time, so the scenario fails here.</summary>
     private Decision<TCommand, TEvent> EnsureDeclared(Decision<TCommand, TEvent> decision)
     {
         if (decision is not Handled<TCommand, TEvent> { Effects: { IsDefault: false } effects }) return decision;
 
         foreach (var effect in effects)
         {
-            if (effect.Value is ExecuteEffect { Effect: IWorkflowCall call } && !definition.Declares(call))
+            if (effect.Value is not ExecuteEffect { Effect: IWorkflowCall call }) continue;
+
+            if (!definition.Declares(call))
                 throw new Xunit.Sdk.XunitException(
                     $"The decision calls workflow type [{call.Workflow.Value}] (workflow [{call.Id.Value}]), but " +
                     $"entity type [{definition.TypeName.Value}] does not declare it. Add .Uses(...) with the " +
                     $"definition of [{call.Workflow.Value}] to the entity definition.");
+
+            if (call is not StartWorkflow && !definition.Used[call.Workflow].Answers)
+                throw new Xunit.Sdk.XunitException(
+                    $"The decision notifies or cancels workflow [{call.Workflow.Value}/{call.Id.Value}], but entity type " +
+                    $"[{definition.TypeName.Value}] uses workflow type [{call.Workflow.Value}] without told and gaveUp. " +
+                    "Declare it with .Uses(definition, told: ..., gaveUp: ...), so the answer and the give-up reach Decide.");
         }
 
         return decision;
@@ -173,7 +160,7 @@ public sealed class DeciderOutcome<TState, TCommand, TEvent>(
 
     /// <summary>
     /// Asserts that the decision starts the workflow <paramref name="id"/> of the type <paramref name="workflow"/> with
-    /// <paramref name="input"/>, with or without <c>then</c>. Nothing is started.
+    /// <paramref name="input"/>. Nothing is started.
     /// </summary>
     public DeciderOutcome<TState, TCommand, TEvent> ThenStarted<TInput, TWorkflowState, TFact, TOutcome>(
         WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow, WorkflowId id, TInput input)

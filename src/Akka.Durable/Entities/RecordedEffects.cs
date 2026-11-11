@@ -15,12 +15,29 @@ namespace Akka.Durable;
 /// An effect was issued by the decision whose events are in the same write. Its id is this record's journal sequence
 /// number. It counts as attempt 1.
 /// </summary>
-/// <param name="Effect">The author's effect.</param>
+/// <param name="Effect">The author's effect, or the library's own for a call to a workflow.</param>
 /// <param name="IssuedAt">When the decision issued it.</param>
+/// <param name="Policy">The retry policy of the effect's handler when it was issued. Null: one attempt.</param>
+/// <param name="NextAt">
+/// When the next attempt is due if attempt 1 gets no answer: its start, plus the time limit, plus the policy's wait.
+/// Without a policy: when the attempt counts as interrupted.
+/// </param>
 [AkkaSerializable(Manifest = "durable-effect-issued-v1")]
 internal sealed record EffectIssued(
     [property: AkkaField(0)] object Effect,
-    [property: AkkaField(1)] DateTimeOffset IssuedAt) : IDurableEntityProtocol;
+    [property: AkkaField(1)] DateTimeOffset IssuedAt,
+    [property: AkkaField(2)] StoredPolicy? Policy = null,
+    [property: AkkaField(3)] DateTimeOffset NextAt = default) : IDurableEntityProtocol;
+
+/// <summary>Attempt <paramref name="Attempt"/> of the effect <paramref name="Id"/> starts. Journaled before it runs.</summary>
+/// <param name="Id">The sequence number of the effect's <see cref="EffectIssued"/>.</param>
+/// <param name="Attempt">The number of the attempt that starts: 2 or more.</param>
+/// <param name="NextAt">When the attempt after it is due if this one gets no answer.</param>
+[AkkaSerializable(Manifest = "durable-effect-retried-v1")]
+internal sealed record EffectRetried(
+    [property: AkkaField(0)] long Id,
+    [property: AkkaField(1)] int Attempt,
+    [property: AkkaField(2)] DateTimeOffset NextAt) : IDurableEntityProtocol;
 
 /// <summary>
 /// The effect <paramref name="Id"/> was answered. Written with the decision on the answer, or alone for a handler with
@@ -45,15 +62,73 @@ internal sealed record EffectGaveUp(
     }
 }
 
+/// <summary>A <see cref="RetryPolicy"/> as it is journaled.</summary>
+/// <param name="First">The wait before attempt 2.</param>
+/// <param name="Max">The longest wait.</param>
+/// <param name="Attempts">How many attempts in all. 0: until one is acknowledged.</param>
+[AkkaSerializable(Manifest = "durable-retry-policy-v1")]
+internal sealed record StoredPolicy(
+    [property: AkkaField(0)] TimeSpan First,
+    [property: AkkaField(1)] TimeSpan Max,
+    [property: AkkaField(2)] int Attempts) : IDurableEntityProtocol
+{
+    public static StoredPolicy? Of(RetryPolicy? policy) =>
+        policy is null ? null : new StoredPolicy(policy.First, policy.Max, policy.Attempts ?? 0);
+
+    public RetryPolicy ToPolicy() => new(First, Max, Attempts == 0 ? null : Attempts);
+}
+
 /// <summary>An effect that was issued and has no acknowledgement or give-up yet.</summary>
 /// <param name="Sequence">The sequence number of its <see cref="EffectIssued"/>: the effect's id.</param>
-/// <param name="Effect">The author's effect.</param>
+/// <param name="Effect">The author's effect, or the library's own.</param>
 /// <param name="IssuedAt">When the decision issued it.</param>
+/// <param name="Policy">The retry policy it was issued with. Null: one attempt.</param>
+/// <param name="Attempt">The number of the last attempt that started.</param>
+/// <param name="NextAt">When the next attempt is due if the last one gets no answer.</param>
 [AkkaSerializable(Manifest = "durable-pending-effect-v1")]
 internal sealed record PendingEffect(
     [property: AkkaField(0)] long Sequence,
     [property: AkkaField(1)] object Effect,
-    [property: AkkaField(2)] DateTimeOffset IssuedAt) : IDurableEntityProtocol;
+    [property: AkkaField(2)] DateTimeOffset IssuedAt,
+    [property: AkkaField(3)] StoredPolicy? Policy = null,
+    [property: AkkaField(4)] int Attempt = 1,
+    [property: AkkaField(5)] DateTimeOffset NextAt = default) : IDurableEntityProtocol;
+
+/// <summary>
+/// The payload of the entity's one reminder for its pending effects. It wakes the entity after a crash, a passivation
+/// or a shard move, so its pending effects are attempted again or given up.
+/// </summary>
+/// <param name="At">The time the reminder was stored for.</param>
+[AkkaSerializable(Manifest = "durable-effects-wake-v1", AllowEmpty = true)]
+internal sealed record EffectsWake([property: AkkaField(0)] DateTimeOffset? At = null) : IDurableEntityProtocol
+{
+    /// <summary>The reminder's key. Storing it again replaces it, so an entity has at most one.</summary>
+    public const string Key = "durable-effects-wake";
+}
+
+// The library's own effects: a call to a workflow from a decision, as it is journaled.
+
+/// <summary>Start the workflow <paramref name="Id"/>. Delivered until the workflow answers.</summary>
+[AkkaSerializable(Manifest = "durable-start-workflow-v1")]
+internal sealed record RecordedStart(
+    [property: AkkaField(0)] string Workflow,
+    [property: AkkaField(1)] string Id,
+    [property: AkkaField(2)] object Input) : IDurableEntityProtocol;
+
+/// <summary>Send a fact to the workflow <paramref name="Id"/>. Attempted once.</summary>
+[AkkaSerializable(Manifest = "durable-notify-workflow-v1")]
+internal sealed record RecordedNotify(
+    [property: AkkaField(0)] string Workflow,
+    [property: AkkaField(1)] string Id,
+    [property: AkkaField(2)] object Fact) : IDurableEntityProtocol;
+
+/// <summary>Ask the workflow <paramref name="Id"/> to stop. Attempted once.</summary>
+[AkkaSerializable(Manifest = "durable-cancel-workflow-v1")]
+internal sealed record RecordedCancel(
+    [property: AkkaField(0)] string Workflow,
+    [property: AkkaField(1)] string Id,
+    [property: AkkaField(2)] string Reason,
+    [property: AkkaField(3)] string By) : IDurableEntityProtocol;
 
 /// <summary>
 /// An entity's snapshot: its state and the effects pending when it was taken. With events deleted on snapshot, the
@@ -89,20 +164,22 @@ internal sealed record PendingEffectsReply([property: AkkaField(0)] ImmutableArr
 /// <param name="Invoke">
 /// Runs the handler from a DI scope. Returns the answer boxed, or null for a handler with no answer.
 /// </param>
+/// <param name="Policy">The retry policy given at registration. Null: one attempt.</param>
 internal sealed record EffectRoute(
     Type EffectType,
     Type? OutcomeType,
     Type HandlerType,
-    Func<IServiceProvider, object, EffectDelivery, CancellationToken, Task<object?>> Invoke)
+    Func<IServiceProvider, object, EffectDelivery, CancellationToken, Task<object?>> Invoke,
+    RetryPolicy? Policy = null)
 {
-    public static EffectRoute WithAnswer<TEffect, TOutcome, THandler>()
+    public static EffectRoute WithAnswer<TEffect, TOutcome, THandler>(RetryPolicy? policy)
         where TEffect : notnull
         where THandler : class, IEffectHandler<TEffect, TOutcome> =>
         new(typeof(TEffect), typeof(TOutcome), typeof(THandler), async (services, effect, delivery, ct) =>
             await services.GetRequiredService<IEffectHandler<TEffect, TOutcome>>()
-                .HandleAsync((TEffect)effect, delivery, ct).ConfigureAwait(false));
+                .HandleAsync((TEffect)effect, delivery, ct).ConfigureAwait(false), policy);
 
-    public static EffectRoute WithoutAnswer<TEffect, THandler>()
+    public static EffectRoute WithoutAnswer<TEffect, THandler>(RetryPolicy? policy)
         where TEffect : notnull
         where THandler : class, IEffectHandler<TEffect> =>
         new(typeof(TEffect), null, typeof(THandler), async (services, effect, delivery, ct) =>
@@ -110,7 +187,7 @@ internal sealed record EffectRoute(
             await services.GetRequiredService<IEffectHandler<TEffect>>()
                 .HandleAsync((TEffect)effect, delivery, ct).ConfigureAwait(false);
             return null;
-        });
+        }, policy);
 
     /// <summary>The registration call, as the author wrote it.</summary>
     public string Registration => OutcomeType is null
@@ -171,9 +248,3 @@ internal sealed class MissingEffectRouteException(Type effectType, Type commandT
     private static string WithoutAnswer(Type effect) => $"AddEffectHandler<{effect.Name}, YourHandler>()";
 }
 
-/// <summary>An <c>Execute</c> returned from <c>Resume</c>: refused, because it would record a new effect on every restart.</summary>
-internal sealed class ExecuteFromResumeException(EntityTypeName entity, EntityId id, object effect) : InvalidOperationException(
-    $"{entity.Value}.Resume returned Execute({effect.GetType().Name}) for entity [{id.Value}]. Resume may not issue an " +
-    "Execute, because it runs after every restart and would record a new effect each time. A pending Execute comes " +
-    "back by itself: as its answer, or as its give-up with GaveUpReason.Interrupted. To ask again after a restart, " +
-    "issue the Execute from the Decide arm for that give-up.");

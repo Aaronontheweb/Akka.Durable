@@ -27,9 +27,16 @@ public enum GaveUpReason
 
     /// <summary>
     /// The process stopped, or the workflow or entity restarted, after the work was issued and before its answer
-    /// was journaled. The work may have run, may have run in part, or may not have run. It is not run again.
+    /// was journaled. The work may have run, may have run in part, or may not have run. Without a retry policy it is
+    /// not run again.
     /// </summary>
     Interrupted = 2,
+
+    /// <summary>
+    /// The handler's retry policy ran out before an attempt was acknowledged. <see cref="WorkGaveUp.Error"/> holds the
+    /// last failure, and <see cref="WorkGaveUp.Attempts"/> the number of attempts.
+    /// </summary>
+    RetriesExhausted = 3,
 }
 
 /// <summary>
@@ -40,7 +47,7 @@ public enum GaveUpReason
 /// <param name="Work">The effect record that was issued.</param>
 /// <param name="Reason">Why there is no answer.</param>
 /// <param name="Error">The failure's message, when there was one.</param>
-/// <param name="Attempts">How many attempts were made. Always 1 today: work is attempted once.</param>
+/// <param name="Attempts">How many attempts were made: 1 without a retry policy.</param>
 /// <remarks>
 /// No answer does not mean the work did not happen: a charge can go through and its reply be lost. Work is
 /// not issued again on its own, so <c>Decide</c> chooses: ask again with the same key, look the result up, wait

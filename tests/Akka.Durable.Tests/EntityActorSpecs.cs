@@ -1,3 +1,5 @@
+using Akka.Reminders;
+using Akka.Reminders.Storage;
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures;
@@ -31,6 +33,10 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         base.ConfigureAkka(builder, provider);
+        // An Execute stores the wake reminder before its write.
+        builder.WithLocalReminders(reminders => reminders
+            .WithStorage(_ => new InMemoryReminderStorage())
+            .WithResolver(system => new DirectEntityReminderResolver(system)));
     }
 
     private EffectRecorder Recorder => Host.Services.GetRequiredService<EffectRecorder>();
@@ -367,7 +373,7 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
 
     #endregion
 
-    #region Interrupted effects and Resume
+    #region Interrupted effects
 
     private async Task<CounterState> StateOf(IActorRef entity)
     {
@@ -427,45 +433,6 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         Assert.Equal("compute:Interrupted", state.LastGaveUp);
         Assert.Equal(1, state.Count);
         Assert.Equal(1, Recorder.Entries.Count(e => e == "compute:2"));
-    }
-
-    [Fact]
-    public async Task Resume_may_not_issue_an_Execute()
-    {
-        var definition = Counter.Definition with
-        {
-            Resume = (_, ctx) => ctx.None().Execute(new Compute(new IncrementViaService(1, Wait: false))),
-        };
-        var probe = CreateTestProbe();
-        var props = EntityProps("r4", definition);
-
-        await EventFilter.Exception<InvalidOperationException>(contains: "Resume returned Execute(Compute)").ExpectOneAsync(() =>
-        {
-            Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref, true)));
-            return Task.CompletedTask;
-        }, Ct);
-
-        await probe.ExpectMsgAsync<EntityStopped>(cancellationToken: Ct);
-        Assert.Empty(Recorder.Entries);
-    }
-
-    [Fact]
-    public async Task Resume_may_not_persist_events()
-    {
-        var definition = Counter.Definition with
-        {
-            Resume = (_, ctx) => ctx.Persist(new Incremented(1)),
-        };
-        var probe = CreateTestProbe();
-        var props = EntityProps("r2", definition);
-
-        await EventFilter.Exception<InvalidOperationException>(contains: "Resume returned events").ExpectOneAsync(() =>
-        {
-            Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref, true)));
-            return Task.CompletedTask;
-        }, Ct);
-
-        await probe.ExpectMsgAsync<EntityStopped>(cancellationToken: Ct);
     }
 
     #endregion

@@ -2,6 +2,7 @@ using Akka.Durable.Tests.Fixtures;
 using Akka.Durable.Tests.Fixtures.Checkouts;
 using Akka.Hosting;
 using Akka.Persistence.Sql.Hosting;
+using Akka.Reminders;
 using LinqToDB;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -151,6 +152,7 @@ public sealed class RecordedExecuteSqlSpecs : IDisposable
                 services.AddSingleton<EffectRecorder>().AddSingleton<Gate>().AddScoped<ScopedRecorder>().AddCounterHandlers();
                 services.AddAkka("recorded-execute-sql", builder => builder
                     .WithSqlPersistence(connectionString: $"Data Source={_databasePath}", providerName: ProviderName.SQLiteMS)
+                    .WithLocalReminders(reminders => reminders.WithResolver(system => new DurableEntityReminderResolver(system)))
                     .WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
                     .WithDurableEntity(definition));
             })

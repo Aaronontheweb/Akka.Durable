@@ -5,7 +5,7 @@ using Xunit;
 namespace Akka.Durable.Tests;
 
 /// <summary>
-/// Pure decision tests: Decide / Evolve / Resume only, no ActorSystem.
+/// Pure decision tests: Decide / Evolve only, no ActorSystem.
 /// </summary>
 public class CounterDeciderSpecs
 {
@@ -120,32 +120,6 @@ public class CounterDeciderSpecs
                 Assert.Equal(1, s.Count);
                 Assert.Null(s.Pending);
             });
-    }
-
-    [Fact]
-    public void Resumed_fails_the_test_when_Resume_returns_an_Execute()
-    {
-        var request = new IncrementViaService(2, Wait: false);
-        var definition = Counter.Definition with
-        {
-            Resume = (state, ctx) => state.Pending is { } pending ? ctx.None().Execute(new Compute(pending)) : ctx.None(),
-        };
-
-        var failure = Assert.ThrowsAny<Exception>(() => DeciderScenario.For(definition)
-            .Given(new ServiceIncrementStarted(request))
-            .Resumed());
-
-        Assert.Contains("Resume returned Execute(Compute)", failure.Message);
-        Assert.Contains("GaveUpReason.Interrupted", failure.Message);
-    }
-
-    [Fact]
-    public void A_definition_without_Resume_resumes_nothing()
-    {
-        DeciderScenario.For(Counter.Definition)
-            .Given(new ServiceIncrementStarted(new IncrementViaService(2, Wait: false)))
-            .Resumed()
-            .ThenEffects();
     }
 
     [Fact]

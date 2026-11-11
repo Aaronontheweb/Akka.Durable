@@ -17,8 +17,14 @@ namespace Akka.Durable;
 /// <remarks>
 /// Runs unchanged under a local entity host or a Cluster.Sharding shard region.
 /// </remarks>
-internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentActor
+internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentActor, IWithTimers
 {
+    /// <summary>
+    /// How long after its time limit an attempt without a policy counts as interrupted, and the least time before the
+    /// wake when it is stored again. A live attempt has its answer or its give-up by then.
+    /// </summary>
+    internal static readonly TimeSpan WakeMargin = TimeSpan.FromSeconds(5);
+
     private readonly EntityId _entityId;
     private readonly EntityDefinition<TState, TCommand, TEvent> _definition;
     private readonly EntityOptions _options;
@@ -27,7 +33,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private readonly ILoggingAdapter _log;
 
     // Cancelled when this incarnation stops. In-flight Run and Execute work is asked to stop, and an outcome that arrives
-    // afterwards is dropped: the next incarnation gives a recorded effect up as interrupted.
+    // afterwards is dropped: the next incarnation attempts a recorded effect again or gives it up.
     private readonly CancellationTokenSource _lifetime = new();
 
     // Where each effect type is handled. Registered with AddEffectHandler.
@@ -37,26 +43,30 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // and rebuilt in recovery from the journal records and the snapshot.
     private readonly SortedDictionary<long, PendingEffect> _pending = [];
 
+    // Who the answer of a pending effect replies to: the sender of the command that issued it. Dead letters after a
+    // restart. Kept in memory only.
+    private readonly Dictionary<long, IActorRef> _origins = [];
+
+    // When the next attempt of a pending effect that waits between attempts is due, in this incarnation.
+    private readonly Dictionary<long, DateTimeOffset> _retryAt = [];
+
+    // True while this incarnation knows the wake reminder is stored. It is stored before the first write that leaves an
+    // effect pending, and removed once nothing is pending.
+    private bool _wakeStored;
+
     // Created lazily so entities that never touch reminders don't require them to be configured.
     private IReminderClient? _reminderClient;
 
     private long _lastSnapshotSequenceNr;
 
     // Execute handlers this incarnation started whose outcome it has not received yet. Send is not counted:
-    // a send has no time limit. Run is awaited in place, so a stop waits for it anyway.
+    // a send has no time limit. Run is awaited in place, so a stop waits for it anyway. Waiting between two attempts
+    // does not count.
     private int _executesInFlight;
 
     // The host asked this entity to stop while an Execute handler was in flight. It stops at the end of the
     // first decision that leaves nothing in flight.
     private bool _stopRequested;
-
-    // Starts of workflows this incarnation has issued and not had answered, by the key of the reminder that keeps
-    // them. While one is in flight, that reminder does not issue the start again.
-    private readonly Dictionary<string, int> _startsInFlight = [];
-
-    // Starts whose reminder this incarnation removed, after an answer or a give-up. A delivery of that reminder that
-    // was already on its way is stale: it must not issue the start again.
-    private readonly HashSet<string> _startsSettled = [];
 
     public EntityActor(
         EntityId entityId,
@@ -88,6 +98,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     public override string PersistenceId { get; }
 
     public TState State { get; private set; }
+
+    public ITimerScheduler Timers { get; set; } = null!;
 
     private EntityTypeName EntityType => _definition.TypeName;
 
@@ -135,8 +147,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         // The library's records rebuild the pending effects. Registered before TEvent, so they never reach Evolve.
         // Akka.Persistence sets LastSequenceNr to an entry's number before its handler runs: it is the effect's id.
-        Recover<EffectIssued>(issued =>
-            _pending[LastSequenceNr] = new PendingEffect(LastSequenceNr, issued.Effect, issued.IssuedAt));
+        Recover<EffectIssued>(issued => Track(issued, LastSequenceNr));
+        Recover<EffectRetried>(Track);
         Recover<EffectAcknowledged>(acknowledged => _pending.Remove(acknowledged.Id));
         Recover<EffectGaveUp>(gaveUp => _pending.Remove(gaveUp.Id));
 
@@ -148,7 +160,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Recover<RecoveryCompleted>(_ =>
         {
             _log.Debug("Recovery completed at SeqNr {0}", LastSequenceNr);
-            GiveUpInterruptedEffects();
+            ContinuePendingEffects();
         });
 
         // Catch-all, registered last (handlers match in registration order). An unmatched journal entry
@@ -177,79 +189,83 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void Apply(TEvent @event) => State = _definition.Evolve(State, @event);
 
+    private void Track(EffectIssued issued, long sequence) =>
+        _pending[sequence] = new PendingEffect(sequence, issued.Effect, issued.IssuedAt, issued.Policy, 1, issued.NextAt);
+
+    private void Track(EffectRetried retried)
+    {
+        if (_pending.TryGetValue(retried.Id, out var pending))
+            _pending[retried.Id] = pending with { Attempt = retried.Attempt, NextAt = retried.NextAt };
+    }
+
     /// <summary>
-    /// After recovery, every recorded effect that is still pending was interrupted: the previous incarnation stopped
-    /// before its answer or give-up was journaled. It is not run again. Its give-up with
-    /// <see cref="GaveUpReason.Interrupted"/> is decided, one effect after the other in the order they were issued, each
-    /// with its record in the decision's write. Then <c>Resume</c> runs.
+    /// After recovery, every recorded effect that is still pending had its last attempt cut off: the previous
+    /// incarnation stopped before the attempt's answer or give-up was journaled. An effect without a retry policy is
+    /// not run again: its give-up with <see cref="GaveUpReason.Interrupted"/> is decided. An effect whose policy has run
+    /// out gives up with <see cref="GaveUpReason.RetriesExhausted"/>. These are decided one after the other, in the
+    /// order the effects were issued, each with its record in the decision's write. Every other effect gets its next
+    /// attempt when it is due. Then the wake is stored again, and the library's own work after recovery runs.
     /// </summary>
     /// <remarks>
     /// This all happens before the internal stash is released, so before any command that arrived during recovery.
     /// Each decision is persisted inside the completion of the one before, so each sees the state the one before left.
     /// </remarks>
-    private void GiveUpInterruptedEffects()
+    private void ContinuePendingEffects()
     {
-        if (_pending.Count == 0)
+        var giveUps = new List<(PendingEffect Pending, GaveUpReason Reason)>();
+        foreach (var pending in _pending.Values)
         {
-            ResumePendingEffects();
-            return;
+            var policy = pending.Policy?.ToPolicy();
+            if (policy is null)
+                giveUps.Add((pending, GaveUpReason.Interrupted));
+            else if (!policy.Allows(pending.Attempt + 1))
+                giveUps.Add((pending, GaveUpReason.RetriesExhausted));
+            else
+                ScheduleRetry(pending.Sequence, pending.Attempt + 1, pending.NextAt);
         }
 
-        _log.Info("{0} effects of entity [{1}/{2}] were interrupted by a restart. Each gives up as Interrupted; none is run again.",
-            _pending.Count, EntityType.Value, _entityId.Value);
-        GiveUpInterrupted([.. _pending.Values], 0);
+        if (giveUps.Count > 0)
+            _log.Info("{0} effects of entity [{1}/{2}] were cut off by a restart and give up; {3} are attempted again.",
+                giveUps.Count, EntityType.Value, _entityId.Value, _pending.Count - giveUps.Count);
+
+        GiveUpAfterRecovery(giveUps, 0);
     }
 
-    private void GiveUpInterrupted(List<PendingEffect> interrupted, int index)
+    private void GiveUpAfterRecovery(List<(PendingEffect Pending, GaveUpReason Reason)> giveUps, int index)
     {
-        if (index == interrupted.Count)
+        if (index == giveUps.Count)
         {
-            ResumePendingEffects();
+            AfterRecovery();
             return;
         }
 
-        var pending = interrupted[index];
-        var record = new EffectGaveUp(pending.Sequence, 1, GaveUpReason.Interrupted);
-        Action next = () => GiveUpInterrupted(interrupted, index + 1);
-
-        // The asker of the request that issued the effect belongs to the previous incarnation.
-        var origin = Context.System.DeadLetters;
-        if (pending.Effect is not IEffect<TCommand> effect)
-        {
-            // The effect's type changed since it was journaled. Decide cannot get its give-up, so it is only closed.
-            _log.Error("Entity [{0}/{1}] has the interrupted effect {2} (id {3}), which is not an IEffect<{4}>. Decide " +
-                       "cannot get its give-up. It is closed as interrupted.",
-                EntityType.Value, _entityId.Value, pending.Effect.GetType().Name, pending.Sequence, typeof(TCommand).Name);
-            Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [record], next);
-            return;
-        }
-
-        var command = effect.GaveUp(new WorkGaveUp(pending.Effect, GaveUpReason.Interrupted));
-        HandleCommand(command, origin, reminder: null, settlement: new Settlement(pending.Sequence, record, next));
+        var (pending, reason) = giveUps[index];
+        GiveUp(pending, reason, error: null, Context.System.DeadLetters, then: () => GiveUpAfterRecovery(giveUps, index + 1));
     }
 
     /// <summary>
-    /// Re-issues the effects the recovered state says are still pending. Committing here, before the
-    /// internal stash is released, makes them run before any command that arrived during recovery.
+    /// The end of recovery: the wake is stored again while effects are pending, so a crash in this incarnation is
+    /// covered too. Then the library's own work for the recovered state runs, for a workflow host.
     /// </summary>
-    private void ResumePendingEffects()
+    private void AfterRecovery()
     {
-        if (_definition.Resume is null) return;
+        if (_pending.Count > 0)
+            DeferStashing(async () =>
+            {
+                await TryStoreWakeAsync();
+                RunAfterRecovery();
+            });
+        else
+            RunAfterRecovery();
+    }
 
-        var pending = _definition.Resume(State, NewContext());
-        if (!pending.Events.IsDefaultOrEmpty)
-            throw new InvalidOperationException(
-                $"{EntityType.Value}.Resume returned events for entity [{_entityId.Value}]. Resume lists the effects " +
-                "that are still pending for the recovered state; it decides nothing, so it cannot persist. " +
-                "Return the events from Decide instead.");
+    private void RunAfterRecovery()
+    {
+        if (_definition.AfterRecovery is null) return;
 
-        if (pending.Effects.IsDefaultOrEmpty) return;
+        var pending = _definition.AfterRecovery(State, NewContext());
+        if (pending.Effects.IsDefaultOrEmpty && pending.Events.IsDefaultOrEmpty) return;
 
-        foreach (var effect in pending.Effects)
-            if (effect is ExecuteEffect { Recorded: true } execute)
-                throw new ExecuteFromResumeException(EntityType, _entityId, execute.Effect);
-
-        _log.Debug("Resuming {0} pending effects", pending.Effects.Length);
         // The asker of the request that started this work belongs to the previous incarnation.
         Commit(pending, Context.System.DeadLetters, reminder: null);
     }
@@ -269,10 +285,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
         Command<GetEntityState>(_ => Sender.Tell(new EntityStateReply(State!, LastSequenceNr)));
         Command<GetPendingEffects>(_ =>
-            Sender.Tell(new PendingEffectsReply([.. _pending.Values.Select(pending => pending.Effect)])));
+            Sender.Tell(new PendingEffectsReply([.. _pending.Values.Select(pending => PublicForm(pending.Effect))])));
 
         Command<TCommand>(command => HandleCommand(command, Sender, reminder: null));
         Command<EffectCompleted>(HandleEffectCompleted);
+        Command<RetryDue>(HandleRetryDue);
         Command<DecideAgain>(HandleDecideAgain);
         Command<ForeignReply>(reply => HandleForeign(reply.Message, reply.Origin));
         Command<StopEntity>(_ => RequestStop());
@@ -298,55 +315,37 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <param name="command">The command.</param>
     /// <param name="origin">Who <c>Reply</c> answers.</param>
     /// <param name="reminder">The reminder delivery that carried the command, acknowledged once it is decided.</param>
-    /// <param name="first">
-    /// An effect of the library's own that runs before the decision's effects, whatever the decision is.
-    /// </param>
     /// <param name="settlement">
     /// For the answer or the give-up of a recorded effect: the record that settles it, written in the same write as the
     /// decision's events, whatever the decision is.
     /// </param>
     private void HandleCommand(
-        TCommand command, IActorRef origin, ReminderEnvelope? reminder, EntityEffect? first = null,
-        Settlement? settlement = null)
+        TCommand command, IActorRef origin, ReminderEnvelope? reminder, Settlement? settlement = null)
     {
         var decision = _definition.Decide(State, command, NewContext());
-        if (first is not null || settlement is not null)
+        if (settlement is not null)
         {
-            ImmutableArray<object> records = settlement is null ? [] : [settlement.Record];
+            ImmutableArray<object> records = [settlement.Record];
             if (decision is Handled<TCommand, TEvent> handled)
             {
-                if (first is { } prefix)
-                    handled = handled with
-                    {
-                        Effects = handled.Effects.IsDefault ? [prefix] : handled.Effects.Insert(0, prefix),
-                    };
-                Commit(handled, origin, reminder, records, settlement?.Then);
+                Commit(handled, origin, reminder, records, settlement.Then);
                 return;
             }
 
-            // The decision runs nothing, but the library's effect must still run, and the settlement must still be
-            // journaled. A stash keeps the current message, so it happens here, before the commit.
+            // The decision runs nothing, but the settlement must still be journaled.
             if (decision is Stashed)
             {
-                if (settlement is null)
-                {
-                    Stash.Stash();
-                }
-                else
-                {
-                    // The current message may not be this command (after recovery it is not). The command is decided
-                    // again when the stash is released, and the settlement is journaled then.
-                    Stash.Prepend([new Envelope(new DecideAgain(settlement.Sequence, command!, settlement.Record, origin), Self)]);
-                    records = [];
-                }
+                // The current message may not be this command (after recovery it is not). The command is decided
+                // again when the stash is released, and the settlement is journaled then.
+                Stash.Prepend([new Envelope(new DecideAgain(settlement.Sequence, command!, settlement.Record, origin), Self)]);
+                records = [];
             }
             else if (decision is NotHandled) Unhandled(command);
             else if (decision is not Ignored)
                 throw new InvalidOperationException(
                     $"{EntityType.Value}.Decide returned an uninitialized Decision for command {command}.");
 
-            var none = Decisions.None<TCommand, TEvent>();
-            Commit(first is { } only ? none.Add(only) : none, origin, reminder, records, settlement?.Then);
+            Commit(Decisions.None<TCommand, TEvent>(), origin, reminder, records, settlement.Then);
             return;
         }
 
@@ -392,9 +391,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     private void HandleReminder(ReminderEnvelope envelope)
     {
-        if (envelope.Message is PendingStart pending)
+        if (envelope.Message is EffectsWake)
         {
-            ReissueStart(pending, envelope);
+            HandleWake(envelope);
             return;
         }
 
@@ -437,6 +436,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Unhandled(message);
     }
 
+    /// <summary>The outcome of an effect that is not recorded: a workflow's own work.</summary>
     private void HandleEffectCompleted(EffectCompleted completed)
     {
         // An outcome sent just before a restart can reach the next incarnation, which never counted it.
@@ -444,21 +444,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         if (completed.Sequence > 0)
         {
-            SettleRecorded(completed);
+            SettleAttempt(completed);
             return;
-        }
-
-        // A start that the workflow answered, or whose give-up the entity decides on, needs its reminder no more.
-        EntityEffect? first = null;
-        if (completed.Effect is StartWorkflow start && completed.Failure is not UndeclaredWorkflowException)
-        {
-            var key = PendingStart.KeyOf(start.Workflow, start.Id);
-            var stillInFlight = Settle(key);
-            if (!stillInFlight && (completed.Failure is null || completed.Failed is not null))
-            {
-                first = new CancelTimerEffect(key);
-                _startsSettled.Add(key);
-            }
         }
 
         var outcome = completed.Outcome;
@@ -466,20 +453,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         {
             if (completed.Failed is null)
             {
-                if (completed.Effect is StartWorkflow unanswered && failure is not UndeclaredWorkflowException)
-                {
-                    // The reminder that keeps the start is still stored, and issues it again.
-                    _log.Error(failure, "Start of workflow [{0}/{1}] by entity [{2}/{3}] got no answer. It is issued " +
-                                        "again within {4}.",
-                        unanswered.Workflow.Value, unanswered.Id.Value, EntityType.Value, _entityId.Value,
-                        StartRetryInterval);
-                    StopIfRequested();
-                    return;
-                }
-
-                // The state already records that the effect was issued. Resume re-derives it on the next
-                // incarnation and a retry arm in Decide can re-issue it sooner. A handler that has to report a
-                // failure to the entity returns it as an outcome instead of throwing.
+                // Nothing tells the entity about the failure: it is logged and dropped.
                 LogFailedEffect(completed.Effect, failure, "State is unchanged.");
                 StopIfRequested();
                 return;
@@ -493,74 +467,113 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         switch (outcome)
         {
             case TCommand command:
-                HandleCommand(command, completed.Origin, reminder: null, first);
-                break;
-
-            case null when first is { } cancel:
-                Commit(Decisions.None<TCommand, TEvent>().Add(cancel), completed.Origin, reminder: null);
+                HandleCommand(command, completed.Origin, reminder: null);
                 break;
 
             case null:
-                _log.Debug("Effect {0} completed with no outcome", completed.Effect);
+                _log.Debug("Effect {0} completed with no outcome", completed.Effect.GetType().Name);
                 StopIfRequested();
                 break;
 
             default:
                 throw new InvalidOperationException(
-                    $"The handler for effect {completed.Effect} returned a {outcome.GetType()}, which is " +
+                    $"The handler for effect {completed.Effect.GetType().Name} returned a {outcome.GetType()}, which is " +
                     $"not a {typeof(TCommand)}. A handler returns one of the entity's commands.");
         }
     }
 
     /// <summary>
-    /// The one attempt of a recorded effect finished. Its answer is decided with an <see cref="EffectAcknowledged"/>
-    /// in the same write; a failure, a time-out or an empty answer becomes the effect's give-up command, decided with
-    /// an <see cref="EffectGaveUp"/>. A handler with no answer is acknowledged in a write of its own.
+    /// An attempt of a recorded effect finished. Its answer is decided with an <see cref="EffectAcknowledged"/> in the
+    /// same write; a handler with no answer is acknowledged in a write of its own. A failure, a time-out or an empty
+    /// answer is a failed attempt: the effect is attempted again if its policy allows, otherwise it gives up and its
+    /// give-up command is decided with an <see cref="EffectGaveUp"/>.
     /// </summary>
-    private void SettleRecorded(EffectCompleted completed)
+    private void SettleAttempt(EffectCompleted completed)
     {
         var sequence = completed.Sequence;
         var effect = completed.Effect;
-        if (!_pending.ContainsKey(sequence))
+        if (!_pending.TryGetValue(sequence, out var pending) || pending.Attempt != completed.Attempt)
         {
-            _log.Debug("Dropping the late answer of effect {0} (id {1}) of entity [{2}/{3}]: it is already settled.",
-                effect.GetType().Name, sequence, EntityType.Value, _entityId.Value);
+            // Settled already, or an answer of an earlier attempt: one answer per effect.
+            _log.Debug("Dropping the late answer of attempt {0} of effect {1} (id {2}) of entity [{3}/{4}].",
+                completed.Attempt, effect.GetType().Name, sequence, EntityType.Value, _entityId.Value);
             StopIfRequested();
             return;
         }
 
+        var delivery = DeliveryOf(pending.Effect);
         var failure = completed.Failure;
-        var withAnswer = _routes.TryGet(effect.GetType(), out var route) && route.OutcomeType is not null;
         TCommand answer = default!;
-        if (failure is null && withAnswer)
+        if (failure is null && delivery is { Answers: true })
         {
             if (completed.Outcome is TCommand command && command is not IUnion { Value: null })
                 answer = command;
             else
                 failure = new InvalidOperationException(completed.Outcome is null or IUnion { Value: null }
-                    ? $"The handler {route.HandlerType.Name} answered with nothing."
-                    : $"The handler {route.HandlerType.Name} answered with a {completed.Outcome.GetType().Name}, " +
+                    ? $"The handler of {delivery.Name} answered with nothing."
+                    : $"The handler of {delivery.Name} answered with a {completed.Outcome.GetType().Name}, " +
                       $"which is not a {typeof(TCommand).Name}.");
         }
 
+        var origin = OriginOf(sequence);
         if (failure is null)
         {
+            Forget(sequence);
             var acknowledged = new EffectAcknowledged(sequence);
-            if (withAnswer)
-                HandleCommand(answer, completed.Origin, reminder: null, settlement: new Settlement(sequence, acknowledged, Then: null));
+            if (delivery is { Answers: true })
+                HandleCommand(answer, origin, reminder: null, new Settlement(sequence, acknowledged, Then: null));
             else
-                Commit(Decisions.None<TCommand, TEvent>(), completed.Origin, reminder: null, [acknowledged]);
+                Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [acknowledged]);
             return;
         }
 
-        var reason = failure is TimeoutException ? GaveUpReason.TimedOut : GaveUpReason.Failed;
-        _log.Warning(failure, "Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}. Decide gets its give-up command.",
-            effect.GetType().Name, sequence, EntityType.Value, _entityId.Value, reason);
+        var policy = pending.Policy?.ToPolicy();
+        if (policy is not null && policy.Allows(pending.Attempt + 1))
+        {
+            var wait = policy.WaitAfter(pending.Attempt);
+            _log.Warning(failure, "Attempt {0} of effect {1} (id {2}) of entity [{3}] failed. Attempt {4} runs in {5}.",
+                pending.Attempt, PublicName(pending.Effect), sequence, $"{EntityType.Value}/{_entityId.Value}",
+                pending.Attempt + 1, wait);
+            ScheduleRetry(sequence, pending.Attempt + 1, _timeProvider.Now + wait);
+            StopIfRequested();
+            return;
+        }
 
-        // Execute only accepts an IEffect<TCommand>, so the effect says what its give-up means to this entity.
-        var gaveUp = ((IEffect<TCommand>)effect).GaveUp(new WorkGaveUp(effect, reason, failure.Message));
-        HandleCommand(gaveUp, completed.Origin, reminder: null,
-            settlement: new Settlement(sequence, new EffectGaveUp(sequence, 1, reason), Then: null));
+        var reason = policy is not null
+            ? GaveUpReason.RetriesExhausted
+            : failure is TimeoutException ? GaveUpReason.TimedOut : GaveUpReason.Failed;
+        _log.Warning(failure, "Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4} after {5} attempts. Decide gets its give-up command.",
+            PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason, pending.Attempt);
+        GiveUp(pending, reason, failure.Message, origin, then: null);
+    }
+
+    /// <summary>
+    /// Decides the give-up of <paramref name="pending"/>: the command its effect maps it to, with an
+    /// <see cref="EffectGaveUp"/> in the same write. A library start has no command; its record is journaled alone.
+    /// </summary>
+    private void GiveUp(PendingEffect pending, GaveUpReason reason, string? error, IActorRef origin, Action? then)
+    {
+        var sequence = pending.Sequence;
+        Forget(sequence);
+        var record = new EffectGaveUp(sequence, pending.Attempt, reason);
+        var gaveUp = new WorkGaveUp(PublicForm(pending.Effect), reason, error, pending.Attempt);
+
+        object? command;
+        if (pending.Effect is IEffect<TCommand> effect)
+            command = effect.GaveUp(gaveUp);
+        else
+            command = DeliveryOf(pending.Effect)?.GaveUp?.Invoke(gaveUp);
+
+        if (command is TCommand decided)
+        {
+            HandleCommand(decided, origin, reminder: null, new Settlement(sequence, record, then));
+            return;
+        }
+
+        // The effect's type changed since it was journaled, or the call has no command for a give-up.
+        _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}, and Decide has no command for it. It is " +
+                   "closed.", PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason);
+        Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [record], then);
     }
 
     /// <summary>The answer or give-up of a recorded effect was stashed by <c>Decide</c>, and the stash was released.</summary>
@@ -573,22 +586,16 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         }
 
         HandleCommand((TCommand)again.Command, again.Origin, reminder: null,
-            settlement: new Settlement(again.Sequence, again.Record, Then: null));
+            new Settlement(again.Sequence, again.Record, Then: null));
     }
 
     private void LogFailedEffect(object effect, Exception failure, string consequence)
     {
         if (failure is MissingEffectHandlerException missing)
             LogMissingHandler(missing);
-        else if (failure is UndeclaredWorkflowException && effect is IWorkflowCall call)
-            // The call's contents may hold personal data, so only the workflow type and id are named.
-            _log.Error("Entity [{0}/{1}] called workflow [{2}/{3}], but its definition does not name workflow type " +
-                       "[{2}] with Uses. The call was not sent. Add .Uses(...) with that workflow's definition to the " +
-                       "entity definition.",
-                EntityType.Value, _entityId.Value, call.Workflow.Value, call.Id.Value);
         else
             _log.Warning(failure, "Effect {0} failed for entity [{1}/{2}]. {3}",
-                effect, EntityType.Value, _entityId.Value, consequence);
+                effect.GetType().Name, EntityType.Value, _entityId.Value, consequence);
     }
 
     // The effect's contents may hold personal data, so only its type is named.
@@ -602,11 +609,15 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <see cref="EffectIssued"/> for each recorded <c>Execute</c> go in one <c>PersistAll</c>, which is one atomic
     /// write: all of them are stored, or none.
     /// </summary>
+    /// <remarks>
+    /// When the write leaves an effect pending and the wake is not stored yet, the wake is stored first. If that fails,
+    /// nothing is written, the command fails, and the decision's other effects do not run.
+    /// </remarks>
     /// <param name="handled">The decision.</param>
     /// <param name="origin">Who <c>Reply</c> answers.</param>
     /// <param name="reminder">The reminder delivery that carried the command, acknowledged once it is decided.</param>
-    /// <param name="records">Library records that settle effects: an acknowledgement or a give-up.</param>
-    /// <param name="then">Runs last, after the effects. Used to decide the next interrupted effect after recovery.</param>
+    /// <param name="records">Library records that settle effects or start an attempt.</param>
+    /// <param name="then">Runs last, after the effects. Used to decide the next give-up after recovery.</param>
     private void Commit(
         Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder,
         ImmutableArray<object> records = default, Action? then = null)
@@ -614,29 +625,53 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         ImmutableArray<TEvent> events = handled.Events.IsDefault ? [] : handled.Events;
         ImmutableArray<EntityEffect> effects = handled.Effects.IsDefault ? [] : handled.Effects;
 
-        // An effect type with no route is refused before the write: a recorded effect must be able to find its handler,
-        // also after a restart. A configuration error, so it goes to supervision.
+        var now = _timeProvider.Now;
         var issued = new List<IssuedEffect>();
         foreach (var effect in effects)
-        {
-            if (effect is not ExecuteEffect { Recorded: true } execute) continue;
-            if (!_routes.TryGet(execute.Effect.GetType(), out _))
-            {
-                var missing = new MissingEffectRouteException(execute.Effect.GetType(), typeof(TCommand));
-                _log.Error("Entity [{0}/{1}] issued the effect {2}, and no handler is registered for it. Register it at " +
-                           "startup with services.{3}. The effect was not journaled and not run.",
-                    EntityType.Value, _entityId.Value, missing.EffectType, missing.Registration);
-                throw missing;
-            }
+            if (effect is ExecuteEffect { Recorded: true } execute)
+                issued.Add(Issue(execute, now));
 
-            issued.Add(new IssuedEffect(execute));
+        if (issued.Any(effect => effect.Record is not null) && !_wakeStored)
+        {
+            // The wake is stored before the write, so no crash can leave an effect with nothing to wake the entity.
+            // Inside a stashing defer, so no other command is decided in between.
+            var due = issued.Where(effect => effect.Record is not null).Min(effect => effect.Record!.NextAt);
+            DeferStashing(async () =>
+            {
+                try
+                {
+                    await StoreWakeAsync(due);
+                }
+                catch (Exception error)
+                {
+                    _log.Error(error, "Entity [{0}/{1}] could not store the reminder that wakes it after a crash, so " +
+                                      "the decision that issues an effect is not journaled and the command fails.",
+                        EntityType.Value, _entityId.Value);
+                    if (!origin.IsNobody() && !origin.Equals(Context.System.DeadLetters))
+                        origin.Tell(new Status.Failure(error), Self);
+                    if (reminder is not null) NackReminder(reminder, "The wake reminder could not be stored");
+                    StopIfRequested();
+                    then?.Invoke();
+                    return;
+                }
+
+                Write(events, effects, issued, records, origin, reminder, then);
+            });
+            return;
         }
 
-        var batch = ImmutableArray.CreateBuilder<object>(events.Length + (records.IsDefault ? 0 : records.Length) + issued.Count);
+        Write(events, effects, issued, records, origin, reminder, then);
+    }
+
+    private void Write(
+        ImmutableArray<TEvent> events, ImmutableArray<EntityEffect> effects, List<IssuedEffect> issued,
+        ImmutableArray<object> records, IActorRef origin, ReminderEnvelope? reminder, Action? then)
+    {
+        var journaled = issued.Where(effect => effect.Record is not null).ToList();
+        var batch = ImmutableArray.CreateBuilder<object>(events.Length + (records.IsDefault ? 0 : records.Length) + journaled.Count);
         foreach (var @event in events) batch.Add(@event!);
         if (!records.IsDefault) batch.AddRange(records);
-        var issuedAt = _timeProvider.Now;
-        foreach (var effect in issued) batch.Add(new EffectIssued(effect.Execute.Effect, issuedAt));
+        foreach (var effect in journaled) batch.Add(effect.Record!);
 
         // The handler runs once for each entry, in batch order, so the n-th EffectIssued belongs to the n-th recorded
         // Execute. Matched by order, not by reference: a journal may hand back a copy of the entry.
@@ -652,8 +687,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 case EffectIssued record:
                     // Akka.Persistence sets LastSequenceNr to this entry's number before it calls the handler.
                     var sequence = LastSequenceNr;
-                    issued[next++].Sequence = sequence;
-                    _pending[sequence] = new PendingEffect(sequence, record.Effect, record.IssuedAt);
+                    journaled[next++].Sequence = sequence;
+                    Track(record, sequence);
+                    _origins[sequence] = origin;
+                    break;
+                case EffectRetried retried:
+                    Track(retried);
                     break;
                 case EffectAcknowledged acknowledged:
                     _pending.Remove(acknowledged.Id);
@@ -667,9 +706,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             }
         }, onCompleteAsync: async () =>
         {
-            if (!events.IsEmpty || !records.IsDefaultOrEmpty || issued.Count > 0) MaybeSnapshot();
+            if (batch.Count > 0) MaybeSnapshot();
             await ExecuteEffectsAsync(effects, origin, issued);
             if (reminder is not null) AckReminder(reminder);
+
+            // Nothing is pending any more: the wake is not needed. Removed best effort, before the next command, so
+            // a new effect stores it again.
+            if (_pending.Count == 0 && _wakeStored) await RemoveWakeAsync();
 
             // The decision is complete. It may have started new Execute effects; then the entity keeps running.
             StopIfRequested();
@@ -678,25 +721,319 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     }
 
     /// <summary>
+    /// Prepares the record of a recorded <c>Execute</c>. A call to a workflow the definition does not declare, or a
+    /// notify or cancel the definition cannot map, is not journaled: it is logged and dropped. An effect type with no
+    /// handler is refused before the write: a configuration error, so it goes to supervision.
+    /// </summary>
+    private IssuedEffect Issue(ExecuteEffect execute, DateTimeOffset now)
+    {
+        object stored;
+        RetryPolicy? policy;
+        if (execute.Effect is IWorkflowCall call)
+        {
+            if (!_definition.Used.TryGetValue(call.Workflow, out var use) || !use.Matches(call))
+            {
+                // The call's contents may hold personal data, so only the workflow type and id are named.
+                _log.Error("Entity [{0}/{1}] called workflow [{2}/{3}], but its definition does not name workflow type " +
+                           "[{2}] with Uses. The call was not sent. Add .Uses(...) with that workflow's definition to the " +
+                           "entity definition.",
+                    EntityType.Value, _entityId.Value, call.Workflow.Value, call.Id.Value);
+                return new IssuedEffect(execute, Record: null);
+            }
+
+            if (call is not StartWorkflow && !use.Answers)
+            {
+                _log.Error("Entity [{0}/{1}] notified or cancelled workflow [{2}/{3}], but its definition uses workflow type " +
+                           "[{2}] without told and gaveUp. The call was not sent. Declare it with .Uses(definition, told: ..., " +
+                           "gaveUp: ...), so the answer and the give-up reach Decide, also after a restart.",
+                    EntityType.Value, _entityId.Value, call.Workflow.Value, call.Id.Value);
+                return new IssuedEffect(execute, Record: null);
+            }
+
+            stored = call.Recorded;
+            policy = call is StartWorkflow ? WorkflowUse.StartPolicy : null;
+        }
+        else
+        {
+            if (!_routes.TryGet(execute.Effect.GetType(), out var route))
+            {
+                var missing = new MissingEffectRouteException(execute.Effect.GetType(), typeof(TCommand));
+                _log.Error("Entity [{0}/{1}] issued the effect {2}, and no handler is registered for it. Register it at " +
+                           "startup with services.{3}. The effect was not journaled and not run.",
+                    EntityType.Value, _entityId.Value, missing.EffectType, missing.Registration);
+                throw missing;
+            }
+
+            stored = execute.Effect;
+            policy = route.Policy;
+        }
+
+        return new IssuedEffect(execute,
+            new EffectIssued(stored, now, StoredPolicy.Of(policy), NextAttemptAt(now, policy, attempt: 1)));
+    }
+
+    /// <summary>
+    /// When the attempt after <paramref name="attempt"/> is due if <paramref name="attempt"/>, started at
+    /// <paramref name="start"/>, gets no answer. Without a policy: when the attempt counts as interrupted.
+    /// </summary>
+    private DateTimeOffset NextAttemptAt(DateTimeOffset start, RetryPolicy? policy, int attempt) =>
+        start + _options.EffectTimeout + (policy?.WaitAfter(attempt) ?? WakeMargin);
+
+    /// <summary>
     /// The host asks the entity to stop. With an <c>Execute</c> handler in flight the entity stops later, once
     /// it has decided on every outcome. The host buffers the entity's messages until then.
     /// </summary>
     /// <remarks>
-    /// The wait is bounded during a rebalance or a node shutdown: the shard stops the entity itself once its
-    /// hand-off timeout has passed.
+    /// <para>While effects are pending, the wake is stored again first, due when the next attempt is, so the entity is
+    /// woken to make it.</para>
+    /// <para>The wait is bounded during a rebalance or a node shutdown: the shard stops the entity itself once its
+    /// hand-off timeout has passed.</para>
     /// </remarks>
     private void RequestStop()
     {
         _stopRequested = true;
         if (_executesInFlight > 0)
             _log.Debug("Stop deferred until {0} Execute effects in flight have completed", _executesInFlight);
-        StopIfRequested();
+
+        if (_pending.Count == 0)
+        {
+            StopIfRequested();
+            return;
+        }
+
+        DeferStashing(async () =>
+        {
+            await TryStoreWakeAsync();
+            StopIfRequested();
+        });
     }
 
     /// <summary>Stops the entity if its host asked it to and no <c>Execute</c> handler is in flight.</summary>
     private void StopIfRequested()
     {
         if (_stopRequested && _executesInFlight == 0) Context.Stop(Self);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> after everything persisted so far, with commands stashed until it has finished.
+    /// It may persist again.
+    /// </summary>
+    private void DeferStashing(Func<Task> action) =>
+        PersistAll(Array.Empty<object>(), _ => { }, onCompleteAsync: action);
+
+    #endregion
+
+    #region Delivery of recorded effects
+
+    /// <summary>How to deliver a recorded effect, found from the effect itself, so also after a restart.</summary>
+    /// <param name="Name">The effect's type name, for logs.</param>
+    /// <param name="Invoke">One attempt. Returns the entity's command, or null when the delivery has no answer.</param>
+    /// <param name="Answers">True when an attempt answers with a command for <c>Decide</c>.</param>
+    /// <param name="GaveUp">The command a give-up becomes, for a library call. Null for the author's effects.</param>
+    private sealed record Delivery(
+        string Name,
+        Func<IServiceProvider, EffectDelivery, CancellationToken, Task<object?>> Invoke,
+        bool Answers,
+        Func<WorkGaveUp, object?>? GaveUp);
+
+    /// <summary>
+    /// The delivery of a stored effect. Null when it cannot be delivered any more: its handler is no longer registered,
+    /// or the definition no longer uses the workflow.
+    /// </summary>
+    private Delivery? DeliveryOf(object stored)
+    {
+        switch (stored)
+        {
+            case RecordedStart start when UseOf(start.Workflow) is { } use:
+                return new Delivery(nameof(StartWorkflow), async (services, _, ct) =>
+                {
+                    await use.Start(services, new WorkflowId(start.Id), start.Input, ct);
+                    return null;
+                }, Answers: false, GaveUp: null);
+
+            case RecordedNotify notify when UseOf(notify.Workflow) is { Notify: { } send } use:
+                return new Delivery(nameof(NotifyWorkflow),
+                    (services, _, ct) => send(services, new WorkflowId(notify.Id), notify.Fact, ct),
+                    Answers: true, use.GaveUp);
+
+            case RecordedCancel cancel when UseOf(cancel.Workflow) is { Cancel: { } send } use:
+                return new Delivery(nameof(CancelWorkflow),
+                    (services, _, ct) => send(services, new WorkflowId(cancel.Id), cancel.Reason, cancel.By, ct),
+                    Answers: true, use.GaveUp);
+
+            case RecordedStart or RecordedNotify or RecordedCancel:
+                return null;
+
+            default:
+                return _routes.TryGet(stored.GetType(), out var route)
+                    ? new Delivery(stored.GetType().Name,
+                        (services, delivery, ct) => route.Invoke(services, stored, delivery, ct),
+                        Answers: route.OutcomeType is not null, GaveUp: null)
+                    : null;
+        }
+    }
+
+    private WorkflowUse? UseOf(string workflow) =>
+        _definition.Used.TryGetValue(new WorkflowTypeName(workflow), out var use) ? use : null;
+
+    /// <summary>The effect as a decision issued it: a call to a workflow is shown as its public record.</summary>
+    private object PublicForm(object stored) =>
+        stored switch
+        {
+            RecordedStart start => new StartWorkflow(new WorkflowTypeName(start.Workflow), new WorkflowId(start.Id), start.Input)
+            {
+                RegionKey = UseOf(start.Workflow)?.RegionKey ?? typeof(object),
+            },
+            RecordedNotify notify => new NotifyWorkflow(new WorkflowTypeName(notify.Workflow), new WorkflowId(notify.Id), notify.Fact)
+            {
+                RegionKey = UseOf(notify.Workflow)?.RegionKey ?? typeof(object),
+            },
+            RecordedCancel cancel => new CancelWorkflow(new WorkflowTypeName(cancel.Workflow), new WorkflowId(cancel.Id),
+                cancel.Reason, cancel.By)
+            {
+                RegionKey = UseOf(cancel.Workflow)?.RegionKey ?? typeof(object),
+            },
+            _ => stored,
+        };
+
+    // The effect's contents may hold personal data, so logs name only its type.
+    private string PublicName(object stored) => PublicForm(stored).GetType().Name;
+
+    private IActorRef OriginOf(long sequence) =>
+        _origins.TryGetValue(sequence, out var origin) ? origin : Context.System.DeadLetters;
+
+    private void Forget(long sequence)
+    {
+        _origins.Remove(sequence);
+        _retryAt.Remove(sequence);
+        Timers.Cancel(RetryKey(sequence));
+    }
+
+    private static string RetryKey(long sequence) => $"durable-retry-{sequence}";
+
+    /// <summary>Attempt <paramref name="attempt"/> of the effect <paramref name="sequence"/> runs at <paramref name="at"/>.</summary>
+    private void ScheduleRetry(long sequence, int attempt, DateTimeOffset at)
+    {
+        var wait = at - _timeProvider.Now;
+        _retryAt[sequence] = at;
+        Timers.StartSingleTimer(RetryKey(sequence), new RetryDue(sequence, attempt), wait > TimeSpan.Zero ? wait : TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// The next attempt of an effect is due. It is journaled as an <see cref="EffectRetried"/> before it runs, so a
+    /// restart does not reset the count. An effect that cannot be delivered any more gives up as failed.
+    /// </summary>
+    private void HandleRetryDue(RetryDue due)
+    {
+        if (!_pending.TryGetValue(due.Sequence, out var pending) || pending.Attempt != due.Attempt - 1)
+            return;
+
+        _retryAt.Remove(due.Sequence);
+        var origin = OriginOf(due.Sequence);
+        if (DeliveryOf(pending.Effect) is null)
+        {
+            _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] has no handler any more, so it cannot be attempted again. " +
+                       "It gives up as Failed.", PublicName(pending.Effect), due.Sequence, EntityType.Value, _entityId.Value);
+            GiveUp(pending, GaveUpReason.Failed, "No handler is registered for the effect.", origin, then: null);
+            return;
+        }
+
+        var policy = pending.Policy?.ToPolicy();
+        var retried = new EffectRetried(due.Sequence, due.Attempt, NextAttemptAt(_timeProvider.Now, policy, due.Attempt));
+        Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [retried],
+            then: () => StartAttempt(due.Sequence, origin));
+    }
+
+    /// <summary>Runs the current attempt of a pending effect. Its outcome comes back as an <see cref="EffectCompleted"/>.</summary>
+    private void StartAttempt(long sequence, IActorRef origin)
+    {
+        if (!_pending.TryGetValue(sequence, out var pending)) return;
+
+        if (DeliveryOf(pending.Effect) is not { } delivery)
+        {
+            GiveUp(pending, GaveUpReason.Failed, "No handler is registered for the effect.", origin, then: null);
+            return;
+        }
+
+        var id = new EffectDelivery(
+            new EffectId($"{EntityType.Value}/{_entityId.Value}/{sequence}", sequence), pending.Attempt);
+        var scope = _services.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        StartHandler(scope, ct => delivery.Invoke(services, id, ct), pending.Effect, origin, failed: null, sequence,
+            pending.Attempt);
+    }
+
+    #endregion
+
+    #region The wake
+
+    /// <summary>
+    /// The wake fired. While effects are pending it is stored again, due when the next of them is, and only then
+    /// acknowledged: the acknowledgement of a delivery leaves a newer reminder with the same key alone. The pending
+    /// effects themselves were already taken up when the entity recovered, or are on their timers.
+    /// </summary>
+    private void HandleWake(ReminderEnvelope envelope)
+    {
+        _wakeStored = false;
+        DeferStashing(async () =>
+        {
+            if (_pending.Count > 0) await TryStoreWakeAsync();
+            AckReminder(envelope);
+            StopIfRequested();
+        });
+    }
+
+    /// <summary>When the wake must fire: when the earliest pending effect needs its next attempt or its give-up.</summary>
+    private DateTimeOffset NextWake()
+    {
+        var earliest = DateTimeOffset.MaxValue;
+        foreach (var pending in _pending.Values)
+        {
+            var due = _retryAt.TryGetValue(pending.Sequence, out var at) ? at : pending.NextAt;
+            if (due < earliest) earliest = due;
+        }
+
+        var soonest = _timeProvider.Now + WakeMargin;
+        return earliest > soonest ? earliest : soonest;
+    }
+
+    private async Task StoreWakeAsync(DateTimeOffset due)
+    {
+        EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
+            new ReminderKey(EffectsWake.Key), due, new EffectsWake(due), ct: _lifetime.Token));
+        _wakeStored = true;
+    }
+
+    /// <summary>Stores the wake for the pending effects. A failure is logged: the effects are on their timers anyway.</summary>
+    private async Task TryStoreWakeAsync()
+    {
+        try
+        {
+            await StoreWakeAsync(NextWake());
+        }
+        catch (Exception error) when (!_lifetime.IsCancellationRequested)
+        {
+            _log.Error(error, "Entity [{0}/{1}] could not store the reminder that wakes it for its {2} pending effects. " +
+                              "They are attempted while it runs; after a crash they wait for its next message.",
+                EntityType.Value, _entityId.Value, _pending.Count);
+        }
+    }
+
+    private async Task RemoveWakeAsync()
+    {
+        _wakeStored = false;
+        try
+        {
+            var cancelled = await Reminders.CancelReminderAsync(new ReminderKey(EffectsWake.Key), _lifetime.Token);
+            if (cancelled.ResponseCode is not (ReminderCancelResponseCode.Success or ReminderCancelResponseCode.NotFound))
+                _log.Warning("Failed to remove the wake of entity [{0}/{1}]: {2} {3}. A wake that fires with nothing " +
+                             "pending does nothing.", EntityType.Value, _entityId.Value, cancelled.ResponseCode, cancelled.Message);
+        }
+        catch (Exception error) when (!_lifetime.IsCancellationRequested)
+        {
+            _log.Warning(error, "Failed to remove the wake of entity [{0}/{1}]. A wake that fires with nothing pending " +
+                                "does nothing.", EntityType.Value, _entityId.Value);
+        }
     }
 
     #endregion
@@ -716,7 +1053,16 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             {
                 case ExecuteEffect { Recorded: true }:
                     // Started at its place among the effects, not awaited: a later Reply leaves at once.
-                    StartRecorded(issued[recorded++], origin);
+                    var current = issued[recorded++];
+                    if (current.Record is null) break; // refused before the write, and logged
+                    if (current.Sequence == 0)
+                    {
+                        _log.Error("The effect {0} of entity [{1}/{2}] was not journaled, so it is not run.",
+                            current.Execute.Effect.GetType().Name, EntityType.Value, _entityId.Value);
+                        break;
+                    }
+
+                    StartAttempt(current.Sequence, origin);
                     break;
 
                 case ReplyEffect reply:
@@ -727,25 +1073,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     tell.Recipient.Tell(tell.Message, Self);
                     break;
 
-                case ExecuteEffect { Effect: IWorkflowCall call } execute when !_definition.Declares(call):
-                    // Not a reason to restart: the call fails, and the entity gets its give-up if it asked for one.
-                    _executesInFlight++;
-                    Self.Tell(new EffectCompleted(execute.Effect, null,
-                        new UndeclaredWorkflowException(EntityType, call.Workflow), origin, execute.Failed), Self);
-                    break;
-
-                case ExecuteEffect { Effect: StartWorkflow start } execute:
-                    // The reminder is stored before the start is sent, so a start lost with the process is issued
-                    // again. If the reminder cannot be stored, the start is not sent.
-                    var key = PendingStart.KeyOf(start.Workflow, start.Id);
-                    await StorePendingStartAsync(key, new PendingStart(start.Workflow.Value, start.Id.Value, start.Input));
-                    _startsInFlight[key] = _startsInFlight.GetValueOrDefault(key) + 1;
-                    _startsSettled.Remove(key);
-                    await StartExecuteAsync(execute, origin);
-                    break;
-
                 case ExecuteEffect execute:
-                    // Started, not awaited: the outcome returns as an EffectCompleted message.
+                    // A workflow's own work. Started, not awaited: the outcome returns as an EffectCompleted message.
                     await StartExecuteAsync(execute, origin);
                     break;
 
@@ -837,40 +1166,17 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             throw;
         }
 
-        StartHandler(scope, invoke, execute.Effect, origin, execute.Failed, sequence: 0);
-    }
-
-    /// <summary>
-    /// Runs the one attempt of a recorded effect through its route. An effect whose record was not journaled, because
-    /// the journal rejected the write, is not run.
-    /// </summary>
-    private void StartRecorded(IssuedEffect issued, IActorRef origin)
-    {
-        var effect = issued.Execute.Effect;
-        if (issued.Sequence == 0)
-        {
-            _log.Error("The effect {0} of entity [{1}/{2}] was not journaled, so it is not run.",
-                effect.GetType().Name, EntityType.Value, _entityId.Value);
-            return;
-        }
-
-        if (!_routes.TryGet(effect.GetType(), out var route))
-            throw new MissingEffectRouteException(effect.GetType(), typeof(TCommand));
-
-        var delivery = new EffectDelivery(
-            new EffectId($"{EntityType.Value}/{_entityId.Value}/{issued.Sequence}", issued.Sequence), Attempt: 1);
-        var scope = _services.CreateAsyncScope();
-        var services = scope.ServiceProvider;
-        StartHandler(scope, ct => route.Invoke(services, effect, delivery, ct), effect, origin, failed: null, issued.Sequence);
+        StartHandler(scope, invoke, execute.Effect, origin, execute.Failed, sequence: 0, attempt: 0);
     }
 
     /// <summary>
     /// Starts a handler and does not wait for it: its outcome comes back as an <see cref="EffectCompleted"/>.
     /// </summary>
     /// <param name="sequence">The id of a recorded effect, or 0.</param>
+    /// <param name="attempt">The attempt of a recorded effect, or 0.</param>
     private void StartHandler(
         AsyncServiceScope scope, Func<CancellationToken, Task<object?>> invoke, object effect, IActorRef origin,
-        Func<Exception, object?>? failed, long sequence)
+        Func<Exception, object?>? failed, long sequence, int attempt)
     {
         var self = Self;
         var lifetime = _lifetime.Token;
@@ -878,19 +1184,19 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         _executesInFlight++;
         _ = InvokeAsync(scope, (_, ct) => invoke(ct), timeout: null).ContinueWith(t =>
         {
-            // This incarnation is gone. Its successor gives a recorded effect up as interrupted.
+            // This incarnation is gone. Its successor attempts a recorded effect again or gives it up.
             if (lifetime.IsCancellationRequested) return;
 
             if (t.IsCompletedSuccessfully)
             {
-                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin, failed, sequence), self);
+                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin, failed, sequence, attempt), self);
             }
             else
             {
                 log.Error(t.Exception, "The outcome of effect {0} could not be observed", effect.GetType().Name);
                 // Still report back, so that the entity no longer counts the effect as in flight. A recorded effect
-                // gives up.
-                self.Tell(new EffectCompleted(effect, null, sequence > 0 ? t.Exception : null, origin, null, sequence), self);
+                // counts it as a failed attempt.
+                self.Tell(new EffectCompleted(effect, null, sequence > 0 ? t.Exception : null, origin, null, sequence, attempt), self);
             }
         }, TaskScheduler.Default);
     }
@@ -926,76 +1232,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 if (t.IsCompletedSuccessfully)
                     self.Tell(new ForeignReply(t.Result, origin), self);
                 else
-                    log.Warning(t.Exception, "Send of {0} to [{1}] got no reply", send.Command, send.Target.Value);
+                    log.Warning(t.Exception, "Send of {0} to [{1}] got no reply", send.Command.GetType().Name, send.Target.Value);
             }, TaskScheduler.Default);
     }
-
-    #region Pending starts
-
-    /// <summary>
-    /// How long the reminder of a pending start waits before it issues the start again: the time limit of one
-    /// attempt. An attempt in flight has its answer or its time-out by then.
-    /// </summary>
-    private TimeSpan StartRetryInterval => _options.EffectTimeout;
-
-    private async Task StorePendingStartAsync(string key, PendingStart pending) =>
-        EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
-            new ReminderKey(key), _timeProvider.Now + StartRetryInterval, pending, ct: _lifetime.Token));
-
-    /// <summary>Counts an answer to a start. True when another start with the same key is still in flight.</summary>
-    private bool Settle(string key)
-    {
-        if (!_startsInFlight.TryGetValue(key, out var count)) return false;
-        if (count > 1)
-        {
-            _startsInFlight[key] = count - 1;
-            return true;
-        }
-
-        _startsInFlight.Remove(key);
-        return false;
-    }
-
-    /// <summary>
-    /// The reminder of a start that has not been answered fired. It issues the start again, unless this incarnation
-    /// still waits for an answer: then it only waits another interval. The delivery is acknowledged once the reminder
-    /// for the next attempt is stored.
-    /// </summary>
-    private void ReissueStart(PendingStart pending, ReminderEnvelope envelope)
-    {
-        var none = Decisions.None<TCommand, TEvent>();
-        var key = PendingStart.KeyOf(new WorkflowTypeName(pending.Workflow), new WorkflowId(pending.Id));
-
-        if (_startsInFlight.ContainsKey(key))
-        {
-            Commit(none.Add(new ScheduleEffect(key, StartRetryInterval, pending)), Context.System.DeadLetters, envelope);
-            return;
-        }
-
-        if (_startsSettled.Contains(key))
-        {
-            // Delivered while the answer or the give-up was removing the reminder. The start is settled.
-            _log.Debug("Dropping a stale delivery of the pending start of workflow [{0}/{1}]", pending.Workflow, pending.Id);
-            Commit(none.Add(new CancelTimerEffect(key)), Context.System.DeadLetters, envelope);
-            return;
-        }
-
-        if (!_definition.Used.TryGetValue(new WorkflowTypeName(pending.Workflow), out var use)
-            || use.Restart(new WorkflowId(pending.Id), pending.Input) is not { } start)
-        {
-            // The definition changed since the start was stored. A repeat cannot succeed, so the reminder is removed.
-            _log.Error("Entity [{0}/{1}] has a pending start of workflow [{2}/{3}], but its definition does not use " +
-                       "workflow type [{2}] with that input type. The start is dropped.",
-                EntityType.Value, _entityId.Value, pending.Workflow, pending.Id);
-            Commit(none.Add(new CancelTimerEffect(key)), Context.System.DeadLetters, envelope);
-            return;
-        }
-
-        _log.Info("Issuing the start of workflow [{0}/{1}] again: it has not been answered.", pending.Workflow, pending.Id);
-        Commit(none.Add(start), Context.System.DeadLetters, envelope);
-    }
-
-    #endregion
 
     private readonly record struct EffectOutcome(object? Result, Exception? Failure);
 
@@ -1171,10 +1410,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     /// <summary>The result of an <c>Execute</c> handler, sent by the entity to itself.</summary>
     /// <param name="Sequence">The id of a recorded effect, or 0 for an effect that is not recorded.</param>
+    /// <param name="Attempt">The attempt of a recorded effect, or 0.</param>
     private sealed record EffectCompleted(
         object Effect, object? Outcome, Exception? Failure, IActorRef Origin, Func<Exception, object?>? Failed,
-        long Sequence = 0)
+        long Sequence = 0, int Attempt = 0)
         : INoSerializationVerificationNeeded;
+
+    /// <summary>The timer of the next attempt of a recorded effect fired.</summary>
+    private sealed record RetryDue(long Sequence, int Attempt) : INoSerializationVerificationNeeded;
 
     /// <summary>
     /// The answer or give-up of a recorded effect, which <c>Decide</c> stashed. Decided again when the stash is
@@ -1189,11 +1432,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <param name="Then">Runs once the decision's effects have run.</param>
     private sealed record Settlement(long Sequence, object Record, Action? Then);
 
-    /// <summary>A recorded <c>Execute</c> of a decision, and the id its record got in the write.</summary>
-    private sealed class IssuedEffect(ExecuteEffect execute)
+    /// <summary>
+    /// A recorded <c>Execute</c> of a decision, its record, and the id the record got in the write. A null record: the
+    /// call was refused before the write.
+    /// </summary>
+    private sealed record IssuedEffect(ExecuteEffect Execute, EffectIssued? Record)
     {
-        public ExecuteEffect Execute { get; } = execute;
-
         /// <summary>The sequence number of its <see cref="EffectIssued"/>. 0 until the write succeeds.</summary>
         public long Sequence { get; set; }
     }

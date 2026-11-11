@@ -64,13 +64,19 @@ public static class DurableEntityHostingExtensions
     /// <para>The handler is scoped: each attempt gets a fresh DI scope. The registration also records where the effect
     /// type is handled, so an effect recovered after a restart finds its handler.</para>
     /// <para>One handler for each effect type. A second registration for the same effect type throws.</para>
+    /// <para>Without <paramref name="retry"/>, an effect is attempted once. With it, the library runs the handler again
+    /// after a failure, a time-out or a crash, until one attempt is acknowledged or the policy runs out. Giving a
+    /// policy says the handler is safe to repeat. See <see cref="Retry"/>.</para>
     /// </remarks>
+    /// <param name="services">The service collection.</param>
+    /// <param name="retry">The retry policy. Null: one attempt.</param>
     /// <exception cref="InvalidOperationException">A handler is already registered for <typeparamref name="TEffect"/>.</exception>
-    public static IServiceCollection AddEffectHandler<TEffect, TOutcome, THandler>(this IServiceCollection services)
+    public static IServiceCollection AddEffectHandler<TEffect, TOutcome, THandler>(
+        this IServiceCollection services, RetryPolicy? retry = null)
         where TEffect : notnull
         where THandler : class, IEffectHandler<TEffect, TOutcome>
     {
-        AddRoute(services, EffectRoute.WithAnswer<TEffect, TOutcome, THandler>());
+        AddRoute(services, EffectRoute.WithAnswer<TEffect, TOutcome, THandler>(retry));
         services.AddScoped<IEffectHandler<TEffect, TOutcome>, THandler>();
         return services;
     }
@@ -83,13 +89,19 @@ public static class DurableEntityHostingExtensions
     /// <para>The handler is scoped: each attempt gets a fresh DI scope. The registration also records where the effect
     /// type is handled, so an effect recovered after a restart finds its handler.</para>
     /// <para>One handler for each effect type. A second registration for the same effect type throws.</para>
+    /// <para>Without <paramref name="retry"/>, an effect is attempted once. With it, the library runs the handler again
+    /// after a failure, a time-out or a crash, until one attempt is acknowledged or the policy runs out. Giving a
+    /// policy says the handler is safe to repeat. See <see cref="Retry"/>.</para>
     /// </remarks>
+    /// <param name="services">The service collection.</param>
+    /// <param name="retry">The retry policy. Null: one attempt.</param>
     /// <exception cref="InvalidOperationException">A handler is already registered for <typeparamref name="TEffect"/>.</exception>
-    public static IServiceCollection AddEffectHandler<TEffect, THandler>(this IServiceCollection services)
+    public static IServiceCollection AddEffectHandler<TEffect, THandler>(
+        this IServiceCollection services, RetryPolicy? retry = null)
         where TEffect : notnull
         where THandler : class, IEffectHandler<TEffect>
     {
-        AddRoute(services, EffectRoute.WithoutAnswer<TEffect, THandler>());
+        AddRoute(services, EffectRoute.WithoutAnswer<TEffect, THandler>(retry));
         services.AddScoped<IEffectHandler<TEffect>, THandler>();
         return services;
     }
@@ -127,9 +139,6 @@ public static class DurableEntityHostingExtensions
             // be registered before or after the entity type.
             var uses = definition.Used.Values.ToArray();
             builder.WithActors((_, _) => EnsureWorkflowsHosted(builder, definition.TypeName, uses));
-
-            // A pending start is kept in a reminder. Without this, Native AOT cannot build its envelope.
-            ReminderMessageTypes.Register<PendingStart>();
         }
 
         return builder.HostEntity<TState, TCommand, TEvent, EntityRegion<TCommand>>(definition, sharding,
@@ -174,6 +183,16 @@ public static class DurableEntityHostingExtensions
         // The entity's effect types are known from their routes, so they are checked here, before any entity runs.
         builder.WithActors((system, _, resolver) =>
             EnsureEffectRoutes<TCommand>(system, definition.TypeName, resolver.GetService<IServiceProvider>()));
+
+        // An entity with pending effects keeps one reminder that wakes it. Without this, Native AOT cannot build its
+        // envelope.
+        ReminderMessageTypes.Register<EffectsWake>();
+
+        // A startup task runs after every actor is registered, so Akka.Reminders may be configured before or after.
+        var usesWorkflows = !definition.Used.IsEmpty;
+        builder.AddStartup((system, registry) =>
+            EnsureReminders<TCommand>(definition.TypeName, usesWorkflows, registry,
+                DependencyResolver.For(system).Resolver.GetService<IServiceProvider>()));
 
         if (sharding is not null)
         {
@@ -341,6 +360,27 @@ public static class DurableEntityHostingExtensions
                 (protocol is null ? "" : $" (for example, make it implement {protocol.Name})") +
                 ", and register that serializer with WithCustomSerializer.");
         }
+    }
+
+    /// <summary>
+    /// An entity that issues <c>Execute</c> (it has effect handlers) or calls workflows (it has <c>Uses</c>) needs
+    /// Akka.Reminders: the wake that brings it back after a crash is a reminder, and it is stored before the write.
+    /// </summary>
+    internal static void EnsureReminders<TCommand>(
+        EntityTypeName typeName, bool usesWorkflows, IActorRegistry registry, IServiceProvider services)
+    {
+        var routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
+        var effect = routes.Of<TCommand>().FirstOrDefault();
+        if (effect is null && !usesWorkflows) return;
+        if (registry.TryGet<ReminderSchedulerProxy>(out _)) return;
+
+        var why = effect is not null
+            ? $"it issues the effect {effect.EffectType.Name} (handled by {effect.HandlerType.Name})"
+            : "it calls workflows (Uses)";
+        throw new InvalidOperationException(
+            $"Durable entity [{typeName.Value}] cannot start: {why}, and Akka.Reminders is not configured. A recorded " +
+            "effect keeps a reminder that wakes the entity after a crash, so its effects are delivered or given up. " +
+            "Configure Akka.Reminders on the same builder, for example WithLocalReminders(...) or WithReminders(...).");
     }
 
     /// <summary>The protocol type of a source-generated serializer: the type argument of its <c>[AkkaSerializer&lt;T&gt;]</c>.</summary>
