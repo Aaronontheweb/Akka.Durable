@@ -7,7 +7,7 @@
     <AkkaRemindersVersion>1.6.0-beta5</AkkaRemindersVersion>
     <!-- Akka.Persistence.Sql also ships separately; used only by tests, for a real serializing journal. -->
     <AkkaPersistenceSqlVersion>1.6.0-beta5</AkkaPersistenceSqlVersion>
-    <XunitVersion>4.0.2</XunitVersion>
+    <XunitVersion>4.0.3</XunitVersion>
     <XunitRunnerVersion>3.1.5</XunitRunnerVersion>
     <TestSdkVersion>18.11.0</TestSdkVersion>
   </PropertyGroup>
