@@ -9,7 +9,7 @@
     <AkkaPersistenceSqlVersion>1.6.0-beta5</AkkaPersistenceSqlVersion>
     <XunitVersion>4.0.3</XunitVersion>
     <XunitRunnerVersion>4.0.1</XunitRunnerVersion>
-    <TestSdkVersion>18.11.0</TestSdkVersion>
+    <TestSdkVersion>18.12.0</TestSdkVersion>
   </PropertyGroup>
   <!-- App dependencies -->
   <ItemGroup>
