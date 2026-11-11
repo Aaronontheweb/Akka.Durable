@@ -104,7 +104,9 @@ What the library does:
 - One durable reminder for each entity wakes it after a crash, a passivation or a shard move, so the next attempt happens without anyone sending it a message. It is stored before the write that leaves the first effect pending, and again before a write whose effect is due earlier than the stored wake. If it cannot be stored, nothing is written and the command fails. It is removed when nothing is pending.
 - When a limited policy runs out, `Decide` gets the effect's give-up with `GaveUpReason.RetriesExhausted`. `WorkGaveUp.Attempts` says how many attempts were made, and `Error` holds the last failure.
 - An answer from an earlier attempt that arrives late is dropped. `Decide` gets one answer or one give-up for each effect.
-- `delivery.Id` is the same on every attempt. `delivery.Attempt` counts from 1.
+- `delivery.Id` is the same on every attempt. `delivery.Attempt` counts from 1. Give `delivery.Id.Value` to the other system as the idempotency key, so a repeated attempt is not applied twice.
+
+A workflow's work uses the same policies, registered the same way: `AddEffectHandler<ChargeCard, CheckoutFact, ChargeCardHandler>(Retry.Backoff(...))`. The workflow keeps the attempts in its own journal and waits on its own reminder, and a move to another state ends the retries. See [Retry policies on work](workflows.md#retry-policies-on-work).
 
 There is no order between effects. To do one thing after another, issue the second effect from the answer to the first.
 

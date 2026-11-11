@@ -10,7 +10,19 @@ Events, effects and snapshots go to the journal, scheduled commands go to the re
 - **Recovery fails on an entry it can't read** rather than continuing with missing state. `EntityOptions.SkipUnrecognizedJournalEntries` lets an entity skip such entries, logging an error for each. An `IReadEventAdapter` on the journal can repair or drop them instead.
 - **Effects are journaled.** An effect an entity issues with `Execute` is written in the same write as the decision's events, inside a record of Akka.Durable's own (serializer 22560). The effect itself is written by the serializer bound to its type, so it needs one: mark it `[AkkaSerializable(Manifest = "...")]` under the serializer that holds the entity's commands. `WithDurableEntity` checks every effect type that has a handler registered with `AddEffectHandler` and implements `IEffect<TCommand>` of the entity; if one would fall back to the default serializer, the host fails to start and the error names the effect and its handler. Evolve effect types like events: they are a long-lived contract too.
 - **The journal holds Akka.Durable's records between your events.** An entity's journal now has a record for each effect issued, attempted again, answered or given up, with the retry policy it was issued with, so `StateSnapshot.SequenceNr` counts them too. A snapshot is stored as Akka.Durable's own record, which holds your state and the effects pending at that time. A snapshot that is a bare state, written by an earlier version, is still read.
-- **Other effects are not journaled.** `Run` and `Tell` stay in the process. The command a `Send` carries is delivered to the target through its shard region, so it and the reply are serialized like any other command to that entity. A workflow's work is not journaled as an effect: the workflow's state says what its work is. Outcome commands and events are part of the issuing entity's protocol and are serialized like the rest of it.
+- **Other effects are not journaled.** `Run` and `Tell` stay in the process. The command a `Send` carries is delivered to the target through its shard region, so it and the reply are serialized like any other command to that entity. A workflow's work is not journaled as an effect: the workflow's state says what its work is. The attempts of work with a retry policy are journaled as the workflow's own events, so its effect types need no serializer. Outcome commands and events are part of the issuing entity's protocol and are serialized like the rest of it.
+
+## Reading the journal
+
+A projection or a migration tool that reads the journal sees Akka.Durable's own records between your events: the records of an entity's `Execute`, a workflow's events, and the envelope of a snapshot. Each of them implements the public marker `IDurableJournalRecord`, and your events never do. Skip them, or select them, with one type test:
+
+```csharp
+if (entry is IDurableJournalRecord) continue; // the library's own record
+```
+
+The types behind the marker are internal and can change between versions. Do not read their contents.
+
+## Changing stored types
 
 Stored events and snapshots are a long-lived contract, so evolve these types by extension only:
 
