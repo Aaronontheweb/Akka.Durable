@@ -51,8 +51,64 @@ public static class DurableEntityHostingExtensions
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
         services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
         services.TryAddSingleton(typeof(IWorkflowRefs<,,,>), typeof(WorkflowRefs<,,,>));
+        AddEffectRoutes(services);
         return services;
     }
+
+    /// <summary>
+    /// Registers <typeparamref name="THandler"/> as the handler of the effect <typeparamref name="TEffect"/>, with an
+    /// answer of type <typeparamref name="TOutcome"/>. For an entity, the answer is the entity's command type. For a
+    /// workflow, it is the workflow's fact type.
+    /// </summary>
+    /// <remarks>
+    /// <para>The handler is scoped: each attempt gets a fresh DI scope. The registration also records where the effect
+    /// type is handled, so an effect recovered after a restart finds its handler.</para>
+    /// <para>One handler for each effect type. A second registration for the same effect type throws.</para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">A handler is already registered for <typeparamref name="TEffect"/>.</exception>
+    public static IServiceCollection AddEffectHandler<TEffect, TOutcome, THandler>(this IServiceCollection services)
+        where TEffect : notnull
+        where THandler : class, IEffectHandler<TEffect, TOutcome>
+    {
+        AddRoute(services, EffectRoute.WithAnswer<TEffect, TOutcome, THandler>());
+        services.AddScoped<IEffectHandler<TEffect, TOutcome>, THandler>();
+        return services;
+    }
+
+    /// <summary>
+    /// Registers <typeparamref name="THandler"/> as the handler of the entity effect <typeparamref name="TEffect"/>, with
+    /// no answer for <c>Decide</c>. The effect is acknowledged when the handler returns.
+    /// </summary>
+    /// <remarks>
+    /// <para>The handler is scoped: each attempt gets a fresh DI scope. The registration also records where the effect
+    /// type is handled, so an effect recovered after a restart finds its handler.</para>
+    /// <para>One handler for each effect type. A second registration for the same effect type throws.</para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">A handler is already registered for <typeparamref name="TEffect"/>.</exception>
+    public static IServiceCollection AddEffectHandler<TEffect, THandler>(this IServiceCollection services)
+        where TEffect : notnull
+        where THandler : class, IEffectHandler<TEffect>
+    {
+        AddRoute(services, EffectRoute.WithoutAnswer<TEffect, THandler>());
+        services.AddScoped<IEffectHandler<TEffect>, THandler>();
+        return services;
+    }
+
+    private static void AddRoute(IServiceCollection services, EffectRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        foreach (var registered in services)
+            if (registered.ServiceType == typeof(EffectRoute)
+                && registered.ImplementationInstance is EffectRoute existing
+                && existing.EffectType == route.EffectType)
+                throw EffectRoutes.DuplicateRoute(existing, route);
+
+        services.AddSingleton(route);
+        AddEffectRoutes(services);
+    }
+
+    private static void AddEffectRoutes(IServiceCollection services) =>
+        services.TryAddSingleton(provider => new EffectRoutes(provider.GetServices<EffectRoute>()));
 
     /// <summary>
     /// Hosts a durable entity type: in a shard region when <paramref name="sharding"/> is given,
@@ -114,6 +170,10 @@ public static class DurableEntityHostingExtensions
         // System.Object serializer: events, snapshots, reminders and remote commands all serialize.
         builder.WithActors((system, _) => EnsureSerializable(system, "Durable entity", definition.TypeName,
             typeof(TState), typeof(TCommand), typeof(TEvent)));
+
+        // The entity's effect types are known from their routes, so they are checked here, before any entity runs.
+        builder.WithActors((system, _, resolver) =>
+            EnsureEffectRoutes<TCommand>(system, definition.TypeName, resolver.GetService<IServiceProvider>()));
 
         if (sharding is not null)
         {
@@ -243,6 +303,58 @@ public static class DurableEntityHostingExtensions
             $"{fallback?.GetType().Name ?? "no serializer at all"}. Mark them [AkkaSerializable(Manifest = \"...\")] " +
             "(for a C# 15 union, the union itself as well as each case) under an [AkkaSerializer<TProtocol>] " +
             "serializer, and register it with WithCustomSerializer(YourSerializer.CreateSerializerDetails).");
+    }
+
+    /// <summary>
+    /// Checks the effect types of an entity: the routes whose effect type implements <see cref="IEffect{TCommand}"/>.
+    /// Each answers with the entity's command or not at all, and each has a serializer of its own, because it is
+    /// journaled with the decision that issues it.
+    /// </summary>
+    internal static void EnsureEffectRoutes<TCommand>(ActorSystem system, EntityTypeName typeName, IServiceProvider services)
+    {
+        var routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
+        var serialization = system.Serialization;
+        var fallback = TryFindSerializer(serialization, typeof(object));
+
+        foreach (var route in routes.Of<TCommand>())
+        {
+            if (route.OutcomeType is { } outcome && !typeof(TCommand).IsAssignableFrom(outcome))
+                throw new InvalidOperationException(
+                    $"Durable entity [{typeName.Value}] cannot start: the effect {route.EffectType.Name} is an " +
+                    $"IEffect<{typeof(TCommand).Name}>, but its handler {route.HandlerType.Name} answers with a " +
+                    $"{outcome.Name}. The answer goes to the entity's Decide, so it must be a {typeof(TCommand).Name}. " +
+                    $"Register it with AddEffectHandler<{route.EffectType.Name}, {typeof(TCommand).Name}, " +
+                    $"{route.HandlerType.Name}>(), or with AddEffectHandler<{route.EffectType.Name}, " +
+                    $"{route.HandlerType.Name}>() for a handler with no answer.");
+
+            if (TryFindSerializer(serialization, route.EffectType) is { } found
+                && (fallback is null || found.Identifier != fallback.Identifier))
+                continue;
+
+            var protocol = ProtocolOf(TryFindSerializer(serialization, typeof(TCommand)));
+            throw new InvalidOperationException(
+                $"Durable entity [{typeName.Value}] cannot start: the effect {route.EffectType.Name}, handled by " +
+                $"{route.HandlerType.Name}, is journaled with the decision that issues it, and no serializer is " +
+                $"registered for it, so it would fall back to {fallback?.GetType().Name ?? "no serializer at all"}. " +
+                $"Mark it [AkkaSerializable(Manifest = \"...\")] under the [AkkaSerializer<TProtocol>] serializer that " +
+                $"holds {typeof(TCommand).Name}" +
+                (protocol is null ? "" : $" (for example, make it implement {protocol.Name})") +
+                ", and register that serializer with WithCustomSerializer.");
+        }
+    }
+
+    /// <summary>The protocol type of a source-generated serializer: the type argument of its <c>[AkkaSerializer&lt;T&gt;]</c>.</summary>
+    private static Type? ProtocolOf(Serializer? serializer)
+    {
+        if (serializer is null) return null;
+        foreach (var attribute in serializer.GetType().GetCustomAttributes(inherit: false))
+        {
+            var type = attribute.GetType();
+            if (type.IsGenericType && type.Name.StartsWith("AkkaSerializerAttribute", StringComparison.Ordinal))
+                return type.GetGenericArguments()[0];
+        }
+
+        return null;
     }
 
     private static Serializer? TryFindSerializer(Akka.Serialization.Serialization serialization, Type type)

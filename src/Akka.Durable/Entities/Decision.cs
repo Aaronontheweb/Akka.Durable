@@ -11,27 +11,35 @@ public sealed record Ignored;
 public sealed record NotHandled;
 public sealed record Stashed;
 
-// Built-in, in-process effects. None of these are journaled: an entity that must survive a crash
-// with an effect in flight records that fact in its state and re-derives the effect in Resume.
+// Built-in, in-process effects. Only an Execute that a decision issues is journaled. The others are not: an entity
+// that must not lose one keeps that fact in its state.
 public sealed record ReplyEffect(object Response);
 public sealed record TellEffect(ICanTell Recipient, object Message);
 
 /// <summary>
-/// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for <see cref="Effect"/>'s type.
-/// The handler's result comes back to the entity as one of its own commands or events.
+/// A call to the effect handler registered for <see cref="Effect"/>'s type. The handler's answer, or the effect's
+/// give-up, comes back to the entity as one of its own commands.
 /// </summary>
 /// <remarks>
-/// The effect is plain data: assert on it, log it, store it in state. The handler is resolved from a fresh
-/// DI scope when the effect runs, so <c>Decide</c> never sees a service. The entity does not wait for the
-/// outcome; it keeps handling commands and the outcome arrives as a message.
+/// <para>The effect is plain data: assert on it, log it. The handler is resolved from a fresh DI scope when the effect
+/// runs, so <c>Decide</c> never sees a service. The entity does not wait for the answer; it keeps handling commands and
+/// the answer arrives as a message.</para>
+/// <para>An effect a decision issues with <c>Execute</c> is journaled in the same write as the decision's events.</para>
 /// </remarks>
 public sealed record ExecuteEffect(object Effect)
 {
     // Bound when the effect is built, where TEffect is known, so no reflection is needed to find the handler.
+    // Null for a recorded effect: its handler is found by its route, also after a restart.
     internal Func<IServiceProvider, Func<CancellationToken, Task<object?>>>? Resolve { get; init; }
 
     // Turns a handler failure or timeout into an outcome. Without it the failure is logged and dropped.
     internal Func<Exception, object?>? Failed { get; init; }
+
+    /// <summary>
+    /// Journaled with the decision that issues it, attempted once, and answered or given up. True for the effect of
+    /// <c>Handled.Execute</c>. The library's own calls, and a workflow's work, are not recorded this way.
+    /// </summary>
+    internal bool Recorded { get; init; }
 
     public bool Equals(ExecuteEffect? other) => other is not null && Equals(Effect, other.Effect);
 
@@ -139,16 +147,22 @@ public sealed record Handled<TCommand, TEvent>(
     }
 
     /// <summary>
-    /// Runs <paramref name="effect"/> through its registered <see cref="IEffectHandler{TEffect,TOutcome}"/>.
-    /// The handler's result returns to the entity as a command, and <c>Decide</c> decides what it means.
+    /// Issues <paramref name="effect"/> to the handler registered for its type with <c>AddEffectHandler</c>. The
+    /// effect is journaled in the same write as this decision's events, and attempted once after the write.
     /// </summary>
-    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull
+    /// <remarks>
+    /// <para><c>Decide</c> then gets exactly one of two things, as a command: the handler's answer, or the effect's
+    /// give-up (<see cref="IEffect{TCommand}.GaveUp"/>) with <see cref="GaveUpReason.Failed"/>,
+    /// <see cref="GaveUpReason.TimedOut"/> or, after a crash or a restart, <see cref="GaveUpReason.Interrupted"/>. A
+    /// handler with no answer (<see cref="IEffectHandler{TEffect}"/>) is acknowledged when it returns, and
+    /// <c>Decide</c> gets nothing. The library never runs the effect again.</para>
+    /// <para>The effect type needs a serializer and a handler registered with <c>AddEffectHandler</c>. Without a
+    /// handler the effect is refused before the write, and the entity restarts.</para>
+    /// </remarks>
+    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull, IEffect<TCommand>
     {
         ArgumentNullException.ThrowIfNull(effect);
-        return Add(new ExecuteEffect(effect)
-        {
-            Resolve = services => EffectHandlers.Resolve<TEffect, TCommand>(services, effect),
-        });
+        return Add(new ExecuteEffect(effect) { Recorded = true });
     }
 
     /// <summary>
@@ -361,29 +375,18 @@ public static class Decisions
 }
 
 /// <summary>
-/// No <c>IEffectHandler</c> is registered for an effect. A deployment mistake, not a failure of the handler, so
-/// the logging site tells it apart by type and says it loudly.
+/// No effect handler is registered for an effect. A deployment mistake, not a failure of the handler, so the logging
+/// site tells it apart by type and says it loudly.
 /// </summary>
-internal sealed class MissingEffectHandlerException(Type effectType, Type resultType) : InvalidOperationException(
-    $"No effect handler is registered for {effectType.Name}. " +
-    $"Register an IEffectHandler<{effectType.Name}, {resultType.Name}>.")
+/// <param name="effectType">The effect's type.</param>
+/// <param name="outcomeType">The answer the caller expects: the entity's command type, or the workflow's fact type.</param>
+internal sealed class MissingEffectHandlerException(Type effectType, Type outcomeType) : InvalidOperationException(
+    $"No effect handler is registered for {effectType.Name}. Register one at startup with " +
+    $"services.{Registration(effectType, outcomeType)}.")
 {
     internal string EffectType { get; } = effectType.Name;
-    internal string HandlerInterface { get; } = $"IEffectHandler<{effectType.Name}, {resultType.Name}>";
-}
+    internal string HandlerInterface { get; } = Registration(effectType, outcomeType);
 
-internal static class EffectHandlers
-{
-    /// <summary>
-    /// Finds the one handler registered for <typeparamref name="TEffect"/> and returns a call to it. The
-    /// handler returns one of the entity's commands, which <c>Decide</c> then decides on.
-    /// </summary>
-    internal static Func<CancellationToken, Task<object?>> Resolve<TEffect, TCommand>(
-        IServiceProvider services, TEffect effect) where TEffect : notnull
-    {
-        var handler = services.GetService<IEffectHandler<TEffect, TCommand>>()
-            ?? throw new MissingEffectHandlerException(typeof(TEffect), typeof(TCommand));
-
-        return async ct => await handler.HandleAsync(effect, ct);
-    }
+    private static string Registration(Type effect, Type outcome) =>
+        $"AddEffectHandler<{effect.Name}, {outcome.Name}, YourHandler>()";
 }

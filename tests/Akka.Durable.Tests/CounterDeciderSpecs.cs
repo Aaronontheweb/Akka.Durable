@@ -106,31 +106,43 @@ public class CounterDeciderSpecs
     }
 
     [Fact]
-    public void Resume_re_issues_the_effect_for_a_pending_request()
+    public void An_interrupted_service_increment_ends_without_a_change_to_the_count()
     {
         var request = new IncrementViaService(2, Wait: false);
 
         Scenario()
-            .Given(new ServiceIncrementStarted(request))
-            .Resumed()
-            .ThenNothingPersisted()
-            .ThenExecuted(new Compute(request));
+            .Given(new Incremented(1), new ServiceIncrementStarted(request))
+            .WhenGaveUp(new Compute(request), GaveUpReason.Interrupted)
+            .ThenPersisted(new GaveUpNoted("compute:Interrupted", EndsServiceIncrement: true))
+            .ThenReplied(request, new Accepted())
+            .ThenState(s =>
+            {
+                Assert.Equal(1, s.Count);
+                Assert.Null(s.Pending);
+            });
     }
 
     [Fact]
-    public void Resume_with_nothing_pending_has_no_effects()
+    public void Resumed_fails_the_test_when_Resume_returns_an_Execute()
     {
-        Scenario()
-            .Given(new Incremented(1))
-            .Resumed()
-            .ThenNothingPersisted()
-            .ThenEffects();
+        var request = new IncrementViaService(2, Wait: false);
+        var definition = Counter.Definition with
+        {
+            Resume = (state, ctx) => state.Pending is { } pending ? ctx.None().Execute(new Compute(pending)) : ctx.None(),
+        };
+
+        var failure = Assert.ThrowsAny<Exception>(() => DeciderScenario.For(definition)
+            .Given(new ServiceIncrementStarted(request))
+            .Resumed());
+
+        Assert.Contains("Resume returned Execute(Compute)", failure.Message);
+        Assert.Contains("GaveUpReason.Interrupted", failure.Message);
     }
 
     [Fact]
     public void A_definition_without_Resume_resumes_nothing()
     {
-        DeciderScenario.For(Counter.Definition with { Resume = null })
+        DeciderScenario.For(Counter.Definition)
             .Given(new ServiceIncrementStarted(new IncrementViaService(2, Wait: false)))
             .Resumed()
             .ThenEffects();

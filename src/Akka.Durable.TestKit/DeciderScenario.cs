@@ -57,9 +57,26 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
     }
 
     /// <summary>
+    /// Decides the give-up of <paramref name="effect"/>: the command its <see cref="IEffect{TCommand}.GaveUp"/> returns
+    /// for <paramref name="reason"/>, against the recovered state. This is what the entity decides when the effect's
+    /// handler fails, runs out of time, or is interrupted by a restart.
+    /// </summary>
+    /// <param name="effect">The effect that gave up, as the decision issued it.</param>
+    /// <param name="reason">Why it gave up.</param>
+    /// <param name="attempts">How many attempts were made. At least 1.</param>
+    public DeciderOutcome<TState, TCommand, TEvent> WhenGaveUp<TEffect>(
+        TEffect effect, GaveUpReason reason, int attempts = 1)
+        where TEffect : notnull, IEffect<TCommand>
+    {
+        ArgumentNullException.ThrowIfNull(effect);
+        ArgumentOutOfRangeException.ThrowIfLessThan(attempts, 1);
+        return When(effect.GaveUp(new WorkGaveUp(effect, reason, Error: null, attempts)));
+    }
+
+    /// <summary>
     /// Recovers the entity from the given history and runs its <c>Resume</c>: the effects still pending for
     /// that state. A definition without <c>Resume</c> has none. Fails the test when <c>Resume</c> calls a workflow
-    /// type that the definition does not name with <c>Uses</c>.
+    /// type that the definition does not name with <c>Uses</c>, or returns an <c>Execute</c>, which the entity refuses.
     /// </summary>
     public DeciderOutcome<TState, TCommand, TEvent> Resumed()
     {
@@ -67,6 +84,13 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
         Decision<TCommand, TEvent> pending = definition.Resume is { } resume
             ? resume(state, context)
             : Decisions.None<TCommand, TEvent>();
+
+        if (pending is Handled<TCommand, TEvent> { Effects: { IsDefault: false } effects })
+            foreach (var effect in effects)
+                if (effect.Value is ExecuteEffect { Recorded: true } execute)
+                    throw new Xunit.Sdk.XunitException(
+                        new ExecuteFromResumeException(definition.TypeName, _entityId, execute.Effect).Message);
+
         return new DeciderOutcome<TState, TCommand, TEvent>(definition, state, EnsureDeclared(pending));
     }
 

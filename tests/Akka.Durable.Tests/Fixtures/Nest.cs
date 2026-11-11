@@ -73,7 +73,7 @@ public static class Nest
 
 public sealed class HoldHandler : IEffectHandler<Hold, NestFact>
 {
-    public async Task<NestFact> HandleAsync(Hold effect, CancellationToken cancellationToken)
+    public async Task<NestFact> HandleAsync(Hold effect, EffectDelivery delivery, CancellationToken cancellationToken)
     {
         await Task.Delay(Timeout.Infinite, cancellationToken);
         throw new InvalidOperationException("Unreachable: the delay only ends by cancellation.");

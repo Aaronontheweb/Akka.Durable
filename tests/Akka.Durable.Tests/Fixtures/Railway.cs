@@ -52,8 +52,13 @@ public sealed record AdjustmentRejected([property: AkkaField(0)] string Reason) 
 [AkkaSerializable(Manifest = "railway-reply-v1")]
 public readonly union AdjustmentReply(Adjusted, AdjustmentRejected) : IRailwayProtocol;
 
-/// <summary>The effect: what to calculate, and for which request.</summary>
-public sealed record Calculate(Adjust Request, int By);
+/// <summary>The effect: what to calculate, and for which request. Its give-up rejects the request.</summary>
+[AkkaSerializable(Manifest = "railway-calculate-v1")]
+public sealed record Calculate([property: AkkaField(0)] Adjust Request, [property: AkkaField(1)] int By)
+    : IRailwayProtocol, IEffect<RailwayCommand>
+{
+    public RailwayCommand GaveUp(WorkGaveUp gaveUp) => new CalculationFailed(Request, $"gave up: {gaveUp.Reason}");
+}
 
 [AkkaSerializer<IRailwayProtocol>("railway-test", 22600)]
 public sealed partial class RailwaySerializer : AkkaSerializer
@@ -104,7 +109,7 @@ public sealed class ScopedCalculator(Calculator calculator, EffectRecorder recor
 /// <summary>Turns the service's result or failure into the outcome command the entity decides on.</summary>
 public sealed class CalculateHandler(ScopedCalculator calculator) : IEffectHandler<Calculate, RailwayCommand>
 {
-    public async Task<RailwayCommand> HandleAsync(Calculate effect, CancellationToken cancellationToken)
+    public async Task<RailwayCommand> HandleAsync(Calculate effect, EffectDelivery delivery, CancellationToken cancellationToken)
     {
         try
         {

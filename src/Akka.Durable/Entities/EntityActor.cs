@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Event;
@@ -25,9 +26,16 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private readonly ITimeProvider _timeProvider;
     private readonly ILoggingAdapter _log;
 
-    // Cancelled when this incarnation stops. In-flight Run and Execute work is asked to stop, and an
-    // outcome that arrives afterwards is dropped: the next incarnation re-derives pending effects in Resume.
+    // Cancelled when this incarnation stops. In-flight Run and Execute work is asked to stop, and an outcome that arrives
+    // afterwards is dropped: the next incarnation gives a recorded effect up as interrupted.
     private readonly CancellationTokenSource _lifetime = new();
+
+    // Where each effect type is handled. Registered with AddEffectHandler.
+    private readonly EffectRoutes _routes;
+
+    // Recorded effects that were issued and have no acknowledgement or give-up yet, by id. Kept by the persist handlers
+    // and rebuilt in recovery from the journal records and the snapshot.
+    private readonly SortedDictionary<long, PendingEffect> _pending = [];
 
     // Created lazily so entities that never touch reminders don't require them to be configured.
     private IReminderClient? _reminderClient;
@@ -61,6 +69,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         _services = services;
         _timeProvider = timeProvider;
         _options = definition.Options ?? EntityOptions.Default;
+        _routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
 
         _log = Context.GetLogger()
             .WithContext("EntityType", definition.TypeName.Value)
@@ -94,24 +103,42 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     {
         Recover<SnapshotOffer>(offer =>
         {
-            if (offer.Snapshot is TState state)
+            switch (offer.Snapshot)
             {
-                State = state;
-                _lastSnapshotSequenceNr = offer.Metadata.SequenceNr;
-                _log.Debug("Recovered snapshot at SeqNr {0}", offer.Metadata.SequenceNr);
+                case EntitySnapshot { State: TState state } snapshot:
+                    State = state;
+                    _pending.Clear();
+                    foreach (var pending in snapshot.Pending.IsDefault ? [] : snapshot.Pending.Cast<PendingEffect>())
+                        _pending[pending.Sequence] = pending;
+                    break;
+
+                // Written before effects were recorded: nothing is pending.
+                case TState state:
+                    State = state;
+                    break;
+
+                default:
+                    // Ignoring the snapshot is unsafe: Akka.Persistence resumes event replay AFTER the
+                    // snapshot's sequence number, so every event the snapshot covered would be silently lost.
+                    var found = offer.Snapshot is EntitySnapshot wrapped ? wrapped.State?.GetType() : offer.Snapshot?.GetType();
+                    throw new EntityRecoveryException(
+                        $"Entity [{PersistenceId}] cannot recover: snapshot at sequence number " +
+                        $"[{offer.Metadata.SequenceNr}] holds a state of type [{found}] but the expected " +
+                        $"state type is [{typeof(TState)}]. The snapshot cannot be skipped, because events it covers " +
+                        "are not replayed. If the entity's events are still in the journal, delete the snapshot so " +
+                        "the entity recovers from its events.");
             }
-            else
-            {
-                // Ignoring the snapshot is unsafe: Akka.Persistence resumes event replay AFTER the
-                // snapshot's sequence number, so every event the snapshot covered would be silently lost.
-                throw new EntityRecoveryException(
-                    $"Entity [{PersistenceId}] cannot recover: snapshot at sequence number " +
-                    $"[{offer.Metadata.SequenceNr}] is of type [{offer.Snapshot?.GetType()}] but the expected " +
-                    $"state type is [{typeof(TState)}]. The snapshot cannot be skipped, because events it covers " +
-                    "are not replayed. If the entity's events are still in the journal, delete the snapshot so " +
-                    "the entity recovers from its events.");
-            }
+
+            _lastSnapshotSequenceNr = offer.Metadata.SequenceNr;
+            _log.Debug("Recovered snapshot at SeqNr {0}", offer.Metadata.SequenceNr);
         });
+
+        // The library's records rebuild the pending effects. Registered before TEvent, so they never reach Evolve.
+        // Akka.Persistence sets LastSequenceNr to an entry's number before its handler runs: it is the effect's id.
+        Recover<EffectIssued>(issued =>
+            _pending[LastSequenceNr] = new PendingEffect(LastSequenceNr, issued.Effect, issued.IssuedAt));
+        Recover<EffectAcknowledged>(acknowledged => _pending.Remove(acknowledged.Id));
+        Recover<EffectGaveUp>(gaveUp => _pending.Remove(gaveUp.Id));
 
         // Replay only domain events through Evolve. Decide and effects never run during recovery.
         // A C# 15 union TEvent comes back from the journal as the union, because WithDurableEntity requires
@@ -121,7 +148,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Recover<RecoveryCompleted>(_ =>
         {
             _log.Debug("Recovery completed at SeqNr {0}", LastSequenceNr);
-            ResumePendingEffects();
+            GiveUpInterruptedEffects();
         });
 
         // Catch-all, registered last (handlers match in registration order). An unmatched journal entry
@@ -151,6 +178,57 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     private void Apply(TEvent @event) => State = _definition.Evolve(State, @event);
 
     /// <summary>
+    /// After recovery, every recorded effect that is still pending was interrupted: the previous incarnation stopped
+    /// before its answer or give-up was journaled. It is not run again. Its give-up with
+    /// <see cref="GaveUpReason.Interrupted"/> is decided, one effect after the other in the order they were issued, each
+    /// with its record in the decision's write. Then <c>Resume</c> runs.
+    /// </summary>
+    /// <remarks>
+    /// This all happens before the internal stash is released, so before any command that arrived during recovery.
+    /// Each decision is persisted inside the completion of the one before, so each sees the state the one before left.
+    /// </remarks>
+    private void GiveUpInterruptedEffects()
+    {
+        if (_pending.Count == 0)
+        {
+            ResumePendingEffects();
+            return;
+        }
+
+        _log.Info("{0} effects of entity [{1}/{2}] were interrupted by a restart. Each gives up as Interrupted; none is run again.",
+            _pending.Count, EntityType.Value, _entityId.Value);
+        GiveUpInterrupted([.. _pending.Values], 0);
+    }
+
+    private void GiveUpInterrupted(List<PendingEffect> interrupted, int index)
+    {
+        if (index == interrupted.Count)
+        {
+            ResumePendingEffects();
+            return;
+        }
+
+        var pending = interrupted[index];
+        var record = new EffectGaveUp(pending.Sequence, 1, GaveUpReason.Interrupted);
+        Action next = () => GiveUpInterrupted(interrupted, index + 1);
+
+        // The asker of the request that issued the effect belongs to the previous incarnation.
+        var origin = Context.System.DeadLetters;
+        if (pending.Effect is not IEffect<TCommand> effect)
+        {
+            // The effect's type changed since it was journaled. Decide cannot get its give-up, so it is only closed.
+            _log.Error("Entity [{0}/{1}] has the interrupted effect {2} (id {3}), which is not an IEffect<{4}>. Decide " +
+                       "cannot get its give-up. It is closed as interrupted.",
+                EntityType.Value, _entityId.Value, pending.Effect.GetType().Name, pending.Sequence, typeof(TCommand).Name);
+            Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [record], next);
+            return;
+        }
+
+        var command = effect.GaveUp(new WorkGaveUp(pending.Effect, GaveUpReason.Interrupted));
+        HandleCommand(command, origin, reminder: null, settlement: new Settlement(pending.Sequence, record, next));
+    }
+
+    /// <summary>
     /// Re-issues the effects the recovered state says are still pending. Committing here, before the
     /// internal stash is released, makes them run before any command that arrived during recovery.
     /// </summary>
@@ -166,6 +244,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 "Return the events from Decide instead.");
 
         if (pending.Effects.IsDefaultOrEmpty) return;
+
+        foreach (var effect in pending.Effects)
+            if (effect is ExecuteEffect { Recorded: true } execute)
+                throw new ExecuteFromResumeException(EntityType, _entityId, execute.Effect);
 
         _log.Debug("Resuming {0} pending effects", pending.Effects.Length);
         // The asker of the request that started this work belongs to the previous incarnation.
@@ -186,9 +268,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // answered only once that command's events are committed and its Run effects have finished.
         // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
         Command<GetEntityState>(_ => Sender.Tell(new EntityStateReply(State!, LastSequenceNr)));
+        Command<GetPendingEffects>(_ =>
+            Sender.Tell(new PendingEffectsReply([.. _pending.Values.Select(pending => pending.Effect)])));
 
         Command<TCommand>(command => HandleCommand(command, Sender, reminder: null));
         Command<EffectCompleted>(HandleEffectCompleted);
+        Command<DecideAgain>(HandleDecideAgain);
         Command<ForeignReply>(reply => HandleForeign(reply.Message, reply.Origin));
         Command<StopEntity>(_ => RequestStop());
 
@@ -216,28 +301,52 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <param name="first">
     /// An effect of the library's own that runs before the decision's effects, whatever the decision is.
     /// </param>
-    private void HandleCommand(TCommand command, IActorRef origin, ReminderEnvelope? reminder, EntityEffect? first = null)
+    /// <param name="settlement">
+    /// For the answer or the give-up of a recorded effect: the record that settles it, written in the same write as the
+    /// decision's events, whatever the decision is.
+    /// </param>
+    private void HandleCommand(
+        TCommand command, IActorRef origin, ReminderEnvelope? reminder, EntityEffect? first = null,
+        Settlement? settlement = null)
     {
         var decision = _definition.Decide(State, command, NewContext());
-        if (first is { } prefix)
+        if (first is not null || settlement is not null)
         {
-            if (decision is Handled<TCommand, TEvent> withFirst)
+            ImmutableArray<object> records = settlement is null ? [] : [settlement.Record];
+            if (decision is Handled<TCommand, TEvent> handled)
             {
-                Commit(withFirst with
-                {
-                    Effects = withFirst.Effects.IsDefault ? [prefix] : withFirst.Effects.Insert(0, prefix),
-                }, origin, reminder);
+                if (first is { } prefix)
+                    handled = handled with
+                    {
+                        Effects = handled.Effects.IsDefault ? [prefix] : handled.Effects.Insert(0, prefix),
+                    };
+                Commit(handled, origin, reminder, records, settlement?.Then);
                 return;
             }
 
-            // The decision runs nothing, but the library's effect must still run. A stash keeps the current message,
-            // so it happens here, before the commit.
-            if (decision is Stashed) Stash.Stash();
+            // The decision runs nothing, but the library's effect must still run, and the settlement must still be
+            // journaled. A stash keeps the current message, so it happens here, before the commit.
+            if (decision is Stashed)
+            {
+                if (settlement is null)
+                {
+                    Stash.Stash();
+                }
+                else
+                {
+                    // The current message may not be this command (after recovery it is not). The command is decided
+                    // again when the stash is released, and the settlement is journaled then.
+                    Stash.Prepend([new Envelope(new DecideAgain(settlement.Sequence, command!, settlement.Record, origin), Self)]);
+                    records = [];
+                }
+            }
             else if (decision is NotHandled) Unhandled(command);
             else if (decision is not Ignored)
                 throw new InvalidOperationException(
                     $"{EntityType.Value}.Decide returned an uninitialized Decision for command {command}.");
-            Commit(Decisions.None<TCommand, TEvent>().Add(prefix), origin, reminder);
+
+            var none = Decisions.None<TCommand, TEvent>();
+            Commit(first is { } only ? none.Add(only) : none, origin, reminder, records, settlement?.Then);
             return;
         }
 
@@ -333,6 +442,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // An outcome sent just before a restart can reach the next incarnation, which never counted it.
         _executesInFlight = Math.Max(0, _executesInFlight - 1);
 
+        if (completed.Sequence > 0)
+        {
+            SettleRecorded(completed);
+            return;
+        }
+
         // A start that the workflow answered, or whose give-up the entity decides on, needs its reminder no more.
         EntityEffect? first = null;
         if (completed.Effect is StartWorkflow start && completed.Failure is not UndeclaredWorkflowException)
@@ -397,6 +512,70 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         }
     }
 
+    /// <summary>
+    /// The one attempt of a recorded effect finished. Its answer is decided with an <see cref="EffectAcknowledged"/>
+    /// in the same write; a failure, a time-out or an empty answer becomes the effect's give-up command, decided with
+    /// an <see cref="EffectGaveUp"/>. A handler with no answer is acknowledged in a write of its own.
+    /// </summary>
+    private void SettleRecorded(EffectCompleted completed)
+    {
+        var sequence = completed.Sequence;
+        var effect = completed.Effect;
+        if (!_pending.ContainsKey(sequence))
+        {
+            _log.Debug("Dropping the late answer of effect {0} (id {1}) of entity [{2}/{3}]: it is already settled.",
+                effect.GetType().Name, sequence, EntityType.Value, _entityId.Value);
+            StopIfRequested();
+            return;
+        }
+
+        var failure = completed.Failure;
+        var withAnswer = _routes.TryGet(effect.GetType(), out var route) && route.OutcomeType is not null;
+        TCommand answer = default!;
+        if (failure is null && withAnswer)
+        {
+            if (completed.Outcome is TCommand command && command is not IUnion { Value: null })
+                answer = command;
+            else
+                failure = new InvalidOperationException(completed.Outcome is null or IUnion { Value: null }
+                    ? $"The handler {route.HandlerType.Name} answered with nothing."
+                    : $"The handler {route.HandlerType.Name} answered with a {completed.Outcome.GetType().Name}, " +
+                      $"which is not a {typeof(TCommand).Name}.");
+        }
+
+        if (failure is null)
+        {
+            var acknowledged = new EffectAcknowledged(sequence);
+            if (withAnswer)
+                HandleCommand(answer, completed.Origin, reminder: null, settlement: new Settlement(sequence, acknowledged, Then: null));
+            else
+                Commit(Decisions.None<TCommand, TEvent>(), completed.Origin, reminder: null, [acknowledged]);
+            return;
+        }
+
+        var reason = failure is TimeoutException ? GaveUpReason.TimedOut : GaveUpReason.Failed;
+        _log.Warning(failure, "Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}. Decide gets its give-up command.",
+            effect.GetType().Name, sequence, EntityType.Value, _entityId.Value, reason);
+
+        // Execute only accepts an IEffect<TCommand>, so the effect says what its give-up means to this entity.
+        var gaveUp = ((IEffect<TCommand>)effect).GaveUp(new WorkGaveUp(effect, reason, failure.Message));
+        HandleCommand(gaveUp, completed.Origin, reminder: null,
+            settlement: new Settlement(sequence, new EffectGaveUp(sequence, 1, reason), Then: null));
+    }
+
+    /// <summary>The answer or give-up of a recorded effect was stashed by <c>Decide</c>, and the stash was released.</summary>
+    private void HandleDecideAgain(DecideAgain again)
+    {
+        if (!_pending.ContainsKey(again.Sequence))
+        {
+            StopIfRequested();
+            return;
+        }
+
+        HandleCommand((TCommand)again.Command, again.Origin, reminder: null,
+            settlement: new Settlement(again.Sequence, again.Record, Then: null));
+    }
+
     private void LogFailedEffect(object effect, Exception failure, string consequence)
     {
         if (failure is MissingEffectHandlerException missing)
@@ -414,26 +593,87 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     // The effect's contents may hold personal data, so only its type is named.
     private void LogMissingHandler(MissingEffectHandlerException missing) =>
-        _log.Error("No effect handler is registered for effect {0} issued by [{1}/{2}]. Register an {3} in the " +
-                   "service provider. The effect was not run.",
+        _log.Error("No effect handler is registered for effect {0} issued by [{1}/{2}]. Register it at startup with " +
+                   "services.{3}. The effect was not run.",
             missing.EffectType, EntityType.Value, _entityId.Value, missing.HandlerInterface);
 
-    private void Commit(Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder)
+    /// <summary>
+    /// Journals a decision and then runs its effects. The decision's events, <paramref name="records"/> and one
+    /// <see cref="EffectIssued"/> for each recorded <c>Execute</c> go in one <c>PersistAll</c>, which is one atomic
+    /// write: all of them are stored, or none.
+    /// </summary>
+    /// <param name="handled">The decision.</param>
+    /// <param name="origin">Who <c>Reply</c> answers.</param>
+    /// <param name="reminder">The reminder delivery that carried the command, acknowledged once it is decided.</param>
+    /// <param name="records">Library records that settle effects: an acknowledgement or a give-up.</param>
+    /// <param name="then">Runs last, after the effects. Used to decide the next interrupted effect after recovery.</param>
+    private void Commit(
+        Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder,
+        ImmutableArray<object> records = default, Action? then = null)
     {
         ImmutableArray<TEvent> events = handled.Events.IsDefault ? [] : handled.Events;
         ImmutableArray<EntityEffect> effects = handled.Effects.IsDefault ? [] : handled.Effects;
 
-        // Zero events is fine here: PersistAll routes onCompleteAsync through the internal
+        // An effect type with no route is refused before the write: a recorded effect must be able to find its handler,
+        // also after a restart. A configuration error, so it goes to supervision.
+        var issued = new List<IssuedEffect>();
+        foreach (var effect in effects)
+        {
+            if (effect is not ExecuteEffect { Recorded: true } execute) continue;
+            if (!_routes.TryGet(execute.Effect.GetType(), out _))
+            {
+                var missing = new MissingEffectRouteException(execute.Effect.GetType(), typeof(TCommand));
+                _log.Error("Entity [{0}/{1}] issued the effect {2}, and no handler is registered for it. Register it at " +
+                           "startup with services.{3}. The effect was not journaled and not run.",
+                    EntityType.Value, _entityId.Value, missing.EffectType, missing.Registration);
+                throw missing;
+            }
+
+            issued.Add(new IssuedEffect(execute));
+        }
+
+        var batch = ImmutableArray.CreateBuilder<object>(events.Length + (records.IsDefault ? 0 : records.Length) + issued.Count);
+        foreach (var @event in events) batch.Add(@event!);
+        if (!records.IsDefault) batch.AddRange(records);
+        var issuedAt = _timeProvider.Now;
+        foreach (var effect in issued) batch.Add(new EffectIssued(effect.Execute.Effect, issuedAt));
+
+        // The handler runs once for each entry, in batch order, so the n-th EffectIssued belongs to the n-th recorded
+        // Execute. Matched by order, not by reference: a journal may hand back a copy of the entry.
+        var next = 0;
+
+        // An empty batch is fine here: PersistAll routes onCompleteAsync through the internal
         // *stashing* Defer, so no further commands are processed until the effects are dispatched.
         // (Public DeferAsync does NOT stash - don't swap it in.)
-        PersistAll(events, Apply, onCompleteAsync: async () =>
+        PersistAll(batch.ToImmutable(), entry =>
         {
-            if (!events.IsEmpty) MaybeSnapshot();
-            await ExecuteEffectsAsync(effects, origin);
+            switch (entry)
+            {
+                case EffectIssued record:
+                    // Akka.Persistence sets LastSequenceNr to this entry's number before it calls the handler.
+                    var sequence = LastSequenceNr;
+                    issued[next++].Sequence = sequence;
+                    _pending[sequence] = new PendingEffect(sequence, record.Effect, record.IssuedAt);
+                    break;
+                case EffectAcknowledged acknowledged:
+                    _pending.Remove(acknowledged.Id);
+                    break;
+                case EffectGaveUp gaveUp:
+                    _pending.Remove(gaveUp.Id);
+                    break;
+                default:
+                    Apply((TEvent)entry);
+                    break;
+            }
+        }, onCompleteAsync: async () =>
+        {
+            if (!events.IsEmpty || !records.IsDefaultOrEmpty || issued.Count > 0) MaybeSnapshot();
+            await ExecuteEffectsAsync(effects, origin, issued);
             if (reminder is not null) AckReminder(reminder);
 
             // The decision is complete. It may have started new Execute effects; then the entity keeps running.
             StopIfRequested();
+            then?.Invoke();
         });
     }
 
@@ -463,12 +703,22 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     #region Effects
 
-    private async Task ExecuteEffectsAsync(ImmutableArray<EntityEffect> effects, IActorRef origin)
+    /// <param name="effects">The decision's effects, in order.</param>
+    /// <param name="origin">Who <c>Reply</c> answers.</param>
+    /// <param name="issued">The decision's recorded <c>Execute</c> effects, in order, with their ids.</param>
+    private async Task ExecuteEffectsAsync(
+        ImmutableArray<EntityEffect> effects, IActorRef origin, IReadOnlyList<IssuedEffect> issued)
     {
+        var recorded = 0;
         foreach (var effect in effects)
         {
             switch (effect)
             {
+                case ExecuteEffect { Recorded: true }:
+                    // Started at its place among the effects, not awaited: a later Reply leaves at once.
+                    StartRecorded(issued[recorded++], origin);
+                    break;
+
                 case ReplyEffect reply:
                     origin.Tell(reply.Response, Self);
                     break;
@@ -587,26 +837,60 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             throw;
         }
 
+        StartHandler(scope, invoke, execute.Effect, origin, execute.Failed, sequence: 0);
+    }
+
+    /// <summary>
+    /// Runs the one attempt of a recorded effect through its route. An effect whose record was not journaled, because
+    /// the journal rejected the write, is not run.
+    /// </summary>
+    private void StartRecorded(IssuedEffect issued, IActorRef origin)
+    {
+        var effect = issued.Execute.Effect;
+        if (issued.Sequence == 0)
+        {
+            _log.Error("The effect {0} of entity [{1}/{2}] was not journaled, so it is not run.",
+                effect.GetType().Name, EntityType.Value, _entityId.Value);
+            return;
+        }
+
+        if (!_routes.TryGet(effect.GetType(), out var route))
+            throw new MissingEffectRouteException(effect.GetType(), typeof(TCommand));
+
+        var delivery = new EffectDelivery(
+            new EffectId($"{EntityType.Value}/{_entityId.Value}/{issued.Sequence}", issued.Sequence), Attempt: 1);
+        var scope = _services.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        StartHandler(scope, ct => route.Invoke(services, effect, delivery, ct), effect, origin, failed: null, issued.Sequence);
+    }
+
+    /// <summary>
+    /// Starts a handler and does not wait for it: its outcome comes back as an <see cref="EffectCompleted"/>.
+    /// </summary>
+    /// <param name="sequence">The id of a recorded effect, or 0.</param>
+    private void StartHandler(
+        AsyncServiceScope scope, Func<CancellationToken, Task<object?>> invoke, object effect, IActorRef origin,
+        Func<Exception, object?>? failed, long sequence)
+    {
         var self = Self;
         var lifetime = _lifetime.Token;
         var log = _log;
-        var effect = execute.Effect;
-        var failed = execute.Failed;
         _executesInFlight++;
         _ = InvokeAsync(scope, (_, ct) => invoke(ct), timeout: null).ContinueWith(t =>
         {
-            // This incarnation is gone; its successor re-derives pending effects in Resume.
+            // This incarnation is gone. Its successor gives a recorded effect up as interrupted.
             if (lifetime.IsCancellationRequested) return;
 
             if (t.IsCompletedSuccessfully)
             {
-                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin, failed), self);
+                self.Tell(new EffectCompleted(effect, t.Result.Result, t.Result.Failure, origin, failed, sequence), self);
             }
             else
             {
-                log.Error(t.Exception, "The outcome of effect {0} could not be observed", effect);
-                // Still report back, so that the entity no longer counts the effect as in flight.
-                self.Tell(new EffectCompleted(effect, null, null, origin, null), self);
+                log.Error(t.Exception, "The outcome of effect {0} could not be observed", effect.GetType().Name);
+                // Still report back, so that the entity no longer counts the effect as in flight. A recorded effect
+                // gives up.
+                self.Tell(new EffectCompleted(effect, null, sequence > 0 ? t.Exception : null, origin, null, sequence), self);
             }
         }, TaskScheduler.Default);
     }
@@ -854,7 +1138,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         if (LastSequenceNr - _lastSnapshotSequenceNr < _options.SnapshotEvery) return;
 
         _lastSnapshotSequenceNr = LastSequenceNr;
-        SaveSnapshot(State!);
+        // The pending effects go with the state: with events deleted on snapshot, their records can be gone from the journal.
+        SaveSnapshot(new EntitySnapshot(State!, [.. _pending.Values.Cast<object>()]));
     }
 
     private void HandleSnapshotSaved(SaveSnapshotSuccess success)
@@ -885,9 +1170,33 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     }
 
     /// <summary>The result of an <c>Execute</c> handler, sent by the entity to itself.</summary>
+    /// <param name="Sequence">The id of a recorded effect, or 0 for an effect that is not recorded.</param>
     private sealed record EffectCompleted(
-        object Effect, object? Outcome, Exception? Failure, IActorRef Origin, Func<Exception, object?>? Failed)
+        object Effect, object? Outcome, Exception? Failure, IActorRef Origin, Func<Exception, object?>? Failed,
+        long Sequence = 0)
         : INoSerializationVerificationNeeded;
+
+    /// <summary>
+    /// The answer or give-up of a recorded effect, which <c>Decide</c> stashed. Decided again when the stash is
+    /// released; its settlement is journaled then.
+    /// </summary>
+    private sealed record DecideAgain(long Sequence, object Command, object Record, IActorRef Origin)
+        : INoSerializationVerificationNeeded;
+
+    /// <summary>The library record that settles a recorded effect, written with the decision on its answer or give-up.</summary>
+    /// <param name="Sequence">The effect's id.</param>
+    /// <param name="Record">An <see cref="EffectAcknowledged"/> or an <see cref="EffectGaveUp"/>.</param>
+    /// <param name="Then">Runs once the decision's effects have run.</param>
+    private sealed record Settlement(long Sequence, object Record, Action? Then);
+
+    /// <summary>A recorded <c>Execute</c> of a decision, and the id its record got in the write.</summary>
+    private sealed class IssuedEffect(ExecuteEffect execute)
+    {
+        public ExecuteEffect Execute { get; } = execute;
+
+        /// <summary>The sequence number of its <see cref="EffectIssued"/>. 0 until the write succeeds.</summary>
+        public long Sequence { get; set; }
+    }
 
     /// <summary>Another entity's reply to a <c>Send</c>, with the origin of the command that sent it.</summary>
     private sealed record ForeignReply(object Message, IActorRef Origin) : INoSerializationVerificationNeeded;

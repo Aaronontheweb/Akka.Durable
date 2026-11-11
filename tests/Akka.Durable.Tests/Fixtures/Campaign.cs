@@ -243,19 +243,19 @@ public sealed class CampaignServices
 
 public sealed class SendReminderHandler(CampaignServices services) : IEffectHandler<SendReminder, CampaignFact>
 {
-    public Task<CampaignFact> HandleAsync(SendReminder effect, CancellationToken cancellationToken) =>
+    public Task<CampaignFact> HandleAsync(SendReminder effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
         services.Run(effect, services.Send, cancellationToken);
 }
 
 public sealed class NotifyCollectionsHandler(CampaignServices services) : IEffectHandler<NotifyCollections, CampaignFact>
 {
-    public Task<CampaignFact> HandleAsync(NotifyCollections effect, CancellationToken cancellationToken) =>
+    public Task<CampaignFact> HandleAsync(NotifyCollections effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
         services.Run(effect, services.Notify, cancellationToken);
 }
 
 public sealed class CheckPaymentHandler(CampaignServices services) : IEffectHandler<CheckPayment, CampaignFact>
 {
-    public Task<CampaignFact> HandleAsync(CheckPayment effect, CancellationToken cancellationToken) =>
+    public Task<CampaignFact> HandleAsync(CheckPayment effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
         services.Run(effect, services.Check, cancellationToken);
 }
 
@@ -263,7 +263,7 @@ public static class CampaignHandlers
 {
     public static IServiceCollection AddCampaignHandlers(this IServiceCollection services) => services
         .AddSingleton<CampaignServices>()
-        .AddScoped<IEffectHandler<SendReminder, CampaignFact>, SendReminderHandler>()
-        .AddScoped<IEffectHandler<NotifyCollections, CampaignFact>, NotifyCollectionsHandler>()
-        .AddScoped<IEffectHandler<CheckPayment, CampaignFact>, CheckPaymentHandler>();
+        .AddEffectHandler<SendReminder, CampaignFact, SendReminderHandler>()
+        .AddEffectHandler<NotifyCollections, CampaignFact, NotifyCollectionsHandler>()
+        .AddEffectHandler<CheckPayment, CampaignFact, CheckPaymentHandler>();
 }

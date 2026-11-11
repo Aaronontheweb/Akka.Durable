@@ -17,7 +17,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     private static readonly TimeSpan NoChangeWindow = TimeSpan.FromMilliseconds(300);
 
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
-        services.AddCheckoutHandlers().AddScoped<IEffectHandler<Repeat, EchoFact>, RepeatHandler>();
+        services.AddCheckoutHandlers().AddEffectHandler<Repeat, EchoFact, RepeatHandler>();
 
     /// <summary>
     /// A later deployment of the echo workflow whose outcome type changed from <see cref="Heard"/> to

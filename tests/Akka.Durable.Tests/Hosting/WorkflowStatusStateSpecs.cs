@@ -17,7 +17,7 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
     /// <summary>An echo whose one piece of work never answers: a workflow whose state is a plain record.</summary>
     private sealed class HoldEcho : IEffectHandler<Repeat, EchoFact>
     {
-        public async Task<EchoFact> HandleAsync(Repeat effect, CancellationToken cancellationToken)
+        public async Task<EchoFact> HandleAsync(Repeat effect, EffectDelivery delivery, CancellationToken cancellationToken)
         {
             await Task.Delay(Timeout.Infinite, cancellationToken);
             throw new InvalidOperationException("Unreachable: the delay only ends by cancellation.");
@@ -26,8 +26,8 @@ public abstract class WorkflowStatusStateSpecs(ITestOutputHelper output) : Check
 
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddCheckoutHandlers()
-            .AddScoped<IEffectHandler<Repeat, EchoFact>, HoldEcho>()
-            .AddScoped<IEffectHandler<Hold, NestFact>, HoldHandler>();
+            .AddEffectHandler<Repeat, EchoFact, HoldEcho>()
+            .AddEffectHandler<Hold, NestFact, HoldHandler>();
 
     protected override void ConfigureMore(AkkaConfigurationBuilder builder) =>
         builder

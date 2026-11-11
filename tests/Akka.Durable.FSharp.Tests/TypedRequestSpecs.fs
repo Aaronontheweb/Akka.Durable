@@ -21,8 +21,11 @@ and Request =
     interface IReplies<Command, Reply> with
         member this.ToCommand() = Issue this
 
-/// The effect: plain data the decider hands to a registered handler.
-type Compute = { Request: Request; Value: int }
+/// The effect: plain data the decider hands to a registered handler. Its give-up fails the request.
+type Compute =
+    { Request: Request; Value: int }
+    interface IEffect<Command> with
+        member this.GaveUp(gaveUp) = Failed(this.Request, string gaveUp.Reason)
 
 // This signature only compiles if the command supplies the Ask reply type.
 let inferAsk (entity: IEntityRef<Command>) (command: Request) : Task<Reply> =

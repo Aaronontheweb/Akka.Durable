@@ -26,7 +26,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         services.AddSingleton<Calculator>();
         services.AddSingleton<EffectRecorder>();
         services.AddScoped<ScopedCalculator>();
-        services.AddScoped<IEffectHandler<Calculate, RailwayCommand>, CalculateHandler>();
+        services.AddEffectHandler<Calculate, RailwayCommand, CalculateHandler>();
     }
 
     private IActorRef Spawn(string id, TimeSpan? timeout = null,
@@ -56,7 +56,8 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         await ReadState(actor);
         Watch(actor);
 
-        await WithJournalWrite(write => write.Fail(), async () =>
+        // Only the outcome's write fails: the write that issues the effect holds no event of the entity.
+        await WithJournalWrite(write => write.SetInterceptorAsync(new FailEventWrites()), async () =>
         {
             Send(actor, new Adjust(3));
             await ExpectTerminatedAsync(actor, cancellationToken: Ct);
@@ -65,7 +66,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         Assert.Equal(["calculate:3", "disposed"], Recorder.Entries);
         await ExpectNoMsgAsync(NoMessageWindow, Ct);
         var recovered = Spawn("journal-failure");
-        Assert.Equal(0, (await ReadState(recovered)).SequenceNr);
+        Assert.Equal(new RailwayState(0), (await ReadState(recovered)).State);
     }
 
     [Fact]
@@ -93,7 +94,6 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
             Assert.Equal(3, Assert.IsType<Adjusted>(reply.Value).Count);
             var state = await ExpectMsgAsync<EntityStateReply>(cancellationToken: Ct);
             Assert.Equal(new RailwayState(3), state.State);
-            Assert.Equal(1, state.SequenceNr);
         });
     }
 
@@ -107,7 +107,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         Send(actor, new Adjust(3));
         await AwaitAssertAsync(() => Assert.Equal(["calculate:3"], Recorder.Entries), cancellationToken: Ct);
 
-        Assert.Equal(0, (await ReadState(actor)).SequenceNr);
+        Assert.Equal(new RailwayState(0), (await ReadState(actor)).State);
 
         finish.SetResult(3);
         var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
@@ -115,7 +115,7 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
     }
 
     [Fact]
-    public async Task Timeout_is_logged_and_cancels_the_invocation_and_no_outcome_is_delivered()
+    public async Task Timeout_is_logged_and_cancels_the_invocation_and_the_effect_gives_up_as_timed_out()
     {
         var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Calculator.Calculate = async (_, ct) =>
@@ -139,8 +139,9 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         }, Ct);
 
         await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
-        await ExpectNoMsgAsync(NoMessageWindow, Ct);
-        Assert.Equal(0, (await ReadState(actor)).SequenceNr);
+        var reply = await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct);
+        Assert.Equal(new AdjustmentRejected("gave up: TimedOut"), reply.Value);
+        Assert.Equal(new RailwayState(0), (await ReadState(actor)).State);
     }
 
     [Fact]
@@ -157,12 +158,13 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         }, Ct);
 
         Assert.Equal(["calculate:3"], Recorder.Entries);
+        Assert.IsType<AdjustmentRejected>((await ExpectMsgAsync<AdjustmentReply>(cancellationToken: Ct)).Value);
         finish.SetResult(3);
 
         await AwaitAssertAsync(() => Assert.Equal(["calculate:3", "disposed"], Recorder.Entries),
             cancellationToken: Ct);
-        // A late result cannot reply or persist.
-        Assert.Equal(0, (await ReadState(actor)).SequenceNr);
+        // The give-up settled the effect. A late result cannot reply or persist.
+        Assert.Equal(new RailwayState(0), (await ReadState(actor)).State);
         await ExpectNoMsgAsync(NoMessageWindow, Ct);
     }
 
@@ -236,10 +238,19 @@ public sealed class RailwayActorSpecs(ITestOutputHelper output) : PersistenceTes
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // Holds the write of the entity's events: the outcome's. The write that issues the effect passes.
         public async Task InterceptAsync(IPersistentRepresentation message)
         {
+            if (message.Payload is not RailwayEvent) return;
             Entered.TrySetResult();
             await Release.Task.WaitAsync(Ct);
         }
+    }
+
+    /// <summary>Fails a write that holds one of the entity's events.</summary>
+    private sealed class FailEventWrites : IJournalInterceptor
+    {
+        public Task InterceptAsync(IPersistentRepresentation message) =>
+            message.Payload is RailwayEvent ? throw new InvalidOperationException("the journal is down") : Task.CompletedTask;
     }
 }
