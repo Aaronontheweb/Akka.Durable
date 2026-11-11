@@ -5,7 +5,7 @@ using Xunit;
 namespace Akka.Durable.Tests;
 
 /// <summary>
-/// Pure decision tests: Decide / Evolve / Resume only, no ActorSystem.
+/// Pure decision tests: Decide / Evolve only, no ActorSystem.
 /// </summary>
 public class CounterDeciderSpecs
 {
@@ -106,34 +106,20 @@ public class CounterDeciderSpecs
     }
 
     [Fact]
-    public void Resume_re_issues_the_effect_for_a_pending_request()
+    public void An_interrupted_service_increment_ends_without_a_change_to_the_count()
     {
         var request = new IncrementViaService(2, Wait: false);
 
         Scenario()
-            .Given(new ServiceIncrementStarted(request))
-            .Resumed()
-            .ThenNothingPersisted()
-            .ThenExecuted(new Compute(request));
-    }
-
-    [Fact]
-    public void Resume_with_nothing_pending_has_no_effects()
-    {
-        Scenario()
-            .Given(new Incremented(1))
-            .Resumed()
-            .ThenNothingPersisted()
-            .ThenEffects();
-    }
-
-    [Fact]
-    public void A_definition_without_Resume_resumes_nothing()
-    {
-        DeciderScenario.For(Counter.Definition with { Resume = null })
-            .Given(new ServiceIncrementStarted(new IncrementViaService(2, Wait: false)))
-            .Resumed()
-            .ThenEffects();
+            .Given(new Incremented(1), new ServiceIncrementStarted(request))
+            .WhenGaveUp(new Compute(request), GaveUpReason.Interrupted)
+            .ThenPersisted(new GaveUpNoted("compute:Interrupted", EndsServiceIncrement: true))
+            .ThenReplied(request, new Accepted())
+            .ThenState(s =>
+            {
+                Assert.Equal(1, s.Count);
+                Assert.Null(s.Pending);
+            });
     }
 
     [Fact]

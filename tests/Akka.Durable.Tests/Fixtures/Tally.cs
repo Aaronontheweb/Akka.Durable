@@ -59,9 +59,6 @@ public static class Tally
 
     public static readonly EntityDefinition<TallyState, TallyCommand, TallyEvent> Definition =
         new EntityDefinition<TallyState, TallyCommand, TallyEvent>(TypeName, _ => new TallyState(null, null), Decide, Evolve)
-        {
-            Resume = Resume,
-        }
         .Accepts<Accepted>(_ => new CounterAccepted())
         .Accepts<CountIs>(count => new CounterCounted(count.Count));
 
@@ -83,12 +80,6 @@ public static class Tally
             _ => ctx.Ignore(),
         };
 
-    /// <summary>
-    /// Mid-flight after a restart: ask the counter where it stands. The increment is not re-sent because it is
-    /// not idempotent; the query is.
-    /// </summary>
-    public static Handled<TallyCommand, TallyEvent> Resume(TallyState state, TallyContext ctx) =>
-        state.Pending is { } p ? ctx.None().Send<CounterCommand>(new EntityId(p.Counter), new GetCount()) : ctx.None();
 
     public static TallyState Evolve(TallyState state, TallyEvent @event) =>
         @event switch

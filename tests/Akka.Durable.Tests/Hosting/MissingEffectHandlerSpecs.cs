@@ -37,7 +37,7 @@ internal static class LogCollector
 public abstract class WorkflowMissingHandlerLogSpecs(ITestOutputHelper output) : CheckoutWorkflowKit(output)
 {
     private const string Secret = "order-7f3a91c2";
-    private const string Interface = "IEffectHandler<ChargeCard, CheckoutFact>";
+    private const string Interface = "AddEffectHandler<ChargeCard, CheckoutFact, ";
 
     // The stock checkout, but the give-up fact keeps the error, so a spec can read it from the workflow's state.
     protected override WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> Definition =>
@@ -47,9 +47,9 @@ public abstract class WorkflowMissingHandlerLogSpecs(ITestOutputHelper output) :
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services
             .AddSingleton<CheckoutServices>()
-            .AddScoped<IEffectHandler<ReserveStock, CheckoutFact>, ReserveStockHandler>()
-            .AddScoped<IEffectHandler<UndoOrder, CheckoutFact>, UndoOrderHandler>()
-            .AddScoped<IEffectHandler<OpenSupportTicket, CheckoutFact>, OpenSupportTicketHandler>();
+            .AddEffectHandler<ReserveStock, CheckoutFact, ReserveStockHandler>()
+            .AddEffectHandler<UndoOrder, CheckoutFact, UndoOrderHandler>()
+            .AddEffectHandler<OpenSupportTicket, CheckoutFact, OpenSupportTicketHandler>();
 
     // The workflow's table sends given-up work to NeedsAttention, whose reason reads "<what>: <error> <GaveUpReason>".
     private async Task<string> GaveUp(string id, PlaceOrder order)
@@ -113,7 +113,7 @@ public abstract class EntityMissingHandlerLogSpecs(ITestOutputHelper output) : C
     // Unregistered has no handler. Explode has one, and it throws.
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddSingleton<EffectRecorder>().AddSingleton<Gate>().AddScoped<ScopedRecorder>()
-            .AddScoped<IEffectHandler<Explode, CounterCommand>, ExplodeHandler>();
+            .AddEffectHandler<Explode, CounterCommand, ExplodeHandler>();
 
     [Fact]
     public async Task Every_missing_handler_is_logged_as_an_error_without_the_effects_contents()
@@ -125,7 +125,7 @@ public abstract class EntityMissingHandlerLogSpecs(ITestOutputHelper output) : C
 
         // One entry for each occurrence names the effect type, the interface to register and the entity.
         await AwaitAssertAsync(() => Assert.True(log.Count(e => e is Error
-            && LogCollector.Text(e) is var text && text.Contains("IEffectHandler<Unregistered, CounterCommand>") && text.Contains("counter")
+            && LogCollector.Text(e) is var text && text.Contains("AddEffectHandler<Unregistered, CounterCommand, ") && text.Contains("counter")
             && text.Contains("m1")) >= 2), cancellationToken: TestCancellation);
 
         Assert.DoesNotContain(log, e => LogCollector.Text(e).Contains(Secret));

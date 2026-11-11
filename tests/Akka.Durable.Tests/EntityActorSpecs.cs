@@ -1,3 +1,5 @@
+using Akka.Reminders;
+using Akka.Reminders.Storage;
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures;
@@ -31,6 +33,10 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         base.ConfigureAkka(builder, provider);
+        // An Execute stores the wake reminder before its write.
+        builder.WithLocalReminders(reminders => reminders
+            .WithStorage(_ => new InMemoryReminderStorage())
+            .WithResolver(system => new DirectEntityReminderResolver(system)));
     }
 
     private EffectRecorder Recorder => Host.Services.GetRequiredService<EffectRecorder>();
@@ -367,10 +373,16 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
 
     #endregion
 
-    #region Resume
+    #region Interrupted effects
+
+    private async Task<CounterState> StateOf(IActorRef entity)
+    {
+        entity.Tell(GetEntityState.Instance, TestActor);
+        return (CounterState)(await ExpectMsgAsync<EntityStateReply>(cancellationToken: Ct)).State;
+    }
 
     [Fact]
-    public async Task Resume_re_issues_the_effect_a_recovered_state_says_is_pending()
+    public async Task An_effect_pending_at_a_stop_gives_up_as_interrupted_and_is_not_run_again()
     {
         var entity = SpawnEntity("r1");
         Send(entity, new IncrementViaService(2, Wait: true));
@@ -380,20 +392,24 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         entity.Tell(PoisonPill.Instance);
         await ExpectTerminatedAsync(entity, cancellationToken: Ct);
 
-        // The request is in the journal, so the next incarnation asks the service again.
+        // The effect is in the journal with no answer, so the next incarnation decides its give-up first.
         var recovered = SpawnEntity("r1");
-        await AwaitAssertAsync(() => Assert.Equal(2, Recorder.Entries.Count(e => e == "compute:2")), cancellationToken: Ct);
+        var state = await StateOf(recovered);
+        Assert.Equal("compute:Interrupted", state.LastGaveUp);
+        Assert.Null(state.Pending);
+        Assert.Equal(0, state.Count);
 
-        // Both handler calls finish. The first incarnation's outcome is dropped; the second's is applied.
+        // The first incarnation's handler was cancelled and its answer, if any, dropped. Nothing ran again.
         Gate.Open();
-        await AssertCountBecomes(recovered, 4);
         await ExpectNoMsgAsync(NoMsgWindow, Ct); // the original asker belongs to the old incarnation
+        Assert.Equal(1, Recorder.Entries.Count(e => e == "compute:2"));
+        Assert.Equal(0, (await StateOf(recovered)).Count);
     }
 
     [Fact]
-    public async Task Resume_re_issues_the_effect_when_the_state_comes_from_a_snapshot_alone()
+    public async Task An_effect_pending_in_a_snapshot_gives_up_as_interrupted_when_no_event_is_replayed()
     {
-        // A snapshot after every event, and the events behind it deleted: a compacted journal.
+        // A snapshot after every write, and the events behind it deleted: a compacted journal.
         var definition = Counter.Definition with
         {
             Options = EntityOptions.Default with { SnapshotEvery = 1, KeepSnapshots = 1, DeleteEventsOnSnapshot = true },
@@ -404,38 +420,19 @@ public class EntityActorSpecs(ITestOutputHelper output) : PersistenceTestKit(out
         Send(entity, new IncrementViaService(2, Wait: true));
         await AwaitAssertAsync(() => Assert.Equal(["compute:2"], Recorder.Entries), cancellationToken: Ct);
 
-        // The latest snapshot covers every event, so a recovery replays none of them.
+        // The latest snapshot covers every entry, so a recovery replays none of them.
         await AwaitAssertAsync(async () => Assert.Empty(await ReadJournal("counter-r3")), cancellationToken: Ct);
 
         Watch(entity);
         entity.Tell(PoisonPill.Instance);
         await ExpectTerminatedAsync(entity, cancellationToken: Ct);
 
-        // The pending request comes back in the snapshot, and Resume needs nothing else.
+        // The pending effect comes back from the snapshot alone.
         var recovered = SpawnEntity("r3", definition);
-        await AwaitAssertAsync(() => Assert.Equal(2, Recorder.Entries.Count(e => e == "compute:2")), cancellationToken: Ct);
-
-        Gate.Open();
-        await AssertCountBecomes(recovered, 5);
-    }
-
-    [Fact]
-    public async Task Resume_may_not_persist_events()
-    {
-        var definition = Counter.Definition with
-        {
-            Resume = (_, ctx) => ctx.Persist(new Incremented(1)),
-        };
-        var probe = CreateTestProbe();
-        var props = EntityProps("r2", definition);
-
-        await EventFilter.Exception<InvalidOperationException>(contains: "Resume returned events").ExpectOneAsync(() =>
-        {
-            Sys.ActorOf(Props.Create(() => new TestEntityParent(props, probe.Ref, true)));
-            return Task.CompletedTask;
-        }, Ct);
-
-        await probe.ExpectMsgAsync<EntityStopped>(cancellationToken: Ct);
+        var state = await StateOf(recovered);
+        Assert.Equal("compute:Interrupted", state.LastGaveUp);
+        Assert.Equal(1, state.Count);
+        Assert.Equal(1, Recorder.Entries.Count(e => e == "compute:2"));
     }
 
     #endregion

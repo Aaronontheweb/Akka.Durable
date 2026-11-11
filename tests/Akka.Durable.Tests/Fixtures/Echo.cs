@@ -52,6 +52,6 @@ public static class Echo
 
 public sealed class RepeatHandler : IEffectHandler<Repeat, EchoFact>
 {
-    public Task<EchoFact> HandleAsync(Repeat effect, CancellationToken cancellationToken) =>
+    public Task<EchoFact> HandleAsync(Repeat effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
         Task.FromResult<EchoFact>(new Echoed(effect.Text));
 }

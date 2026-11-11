@@ -252,7 +252,7 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             WorkflowEvolve.Evolve,
             _options)
         {
-            Resume = Resume,
+            AfterRecovery = Resume,
             Accepted = accepted,
         };
     }
@@ -627,10 +627,17 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         var work = WorkOf(state, ctx, input, enteredAt);
         for (var index = 0; index < work.Length; index++)
             if (work[index] is ExecuteWork<TFact> execute)
-                handled = handled.Add(Execute(execute, entry, index));
+                handled = handled.Add(Execute(execute, entry, index, ctx));
 
         return handled;
     }
+
+    /// <summary>
+    /// The id of the work at <paramref name="index"/> of entry <paramref name="entry"/>: the same each time it is asked
+    /// for, because the entry and the position are journaled.
+    /// </summary>
+    private EffectDelivery DeliveryOf(int entry, int index, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
+        new(new EffectId($"{definition.TypeName.Value}/{ctx.EntityId.Value}/{entry}.{index}", entry), Attempt: 1);
 
     private ImmutableArray<Work<TFact>> WorkOf(WfRunning running, DecisionContext<WfState, WfCommand, WfEvent> ctx) =>
         WorkOf((TState)running.State, ctx, (TInput)running.Input, running.EnteredAt);
@@ -645,17 +652,19 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
         return list.Items.IsDefault ? [] : list.Items;
     }
 
-    private ExecuteEffect Execute(ExecuteWork<TFact> work, int entry, int index)
+    private ExecuteEffect Execute(
+        ExecuteWork<TFact> work, int entry, int index, DecisionContext<WfState, WfCommand, WfEvent> ctx)
     {
         if (work.Resolve is null)
             throw new InvalidOperationException("Work must be created through WorkContext.Execute.");
 
+        var delivery = DeliveryOf(entry, index, ctx);
         return new ExecuteEffect(work.Effect)
         {
             // The handler returns one of the author's facts. The entity's command is the answer that carries it.
             Resolve = services =>
             {
-                var invoke = work.Resolve(services);
+                var invoke = work.Resolve(services, delivery);
                 return async ct => (WfCommand)new WfAnswer(entry, index, FactOf(await invoke(ct), work.Effect));
             },
 

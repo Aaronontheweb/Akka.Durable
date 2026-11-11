@@ -7,19 +7,26 @@
     <LangVersion>preview</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.1.0-alpha.3</VersionPrefix>
-    <PackageReleaseNotes>Third alpha release of Akka.Durable. It makes a workflow read typed, moves to Akka.NET 1.6.0-beta7, refuses an effect time limit that is not positive, and logs a missing effect handler as an error. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+    <VersionPrefix>0.1.0-alpha.4</VersionPrefix>
+    <PackageReleaseNotes>Fourth alpha release of Akka.Durable. An entity's `Execute` is now recorded with its decision, and a retry policy makes the library redeliver it, which gives entities a built-in outbox. An entity can also start, notify and cancel a workflow from a decision. This release changes parts of the 0.1.0-alpha.3 API. Akka.Durable is still a proof of concept, not an official Akka.NET project.
 
-* **A workflow is read the way an entity is read.** `GetStateAsync()` on a workflow ref returns `StateSnapshot&lt;WorkflowStatus&lt;TState, TOutcome&gt;&gt;`. The status is `WorkflowNotStarted`, `WorkflowRunning&lt;TState&gt;` with the state as you typed it, or `WorkflowFinished&lt;TOutcome&gt;` with the outcome. For a state type that is a union, a `switch` expression over `WorkflowRunning&lt;TState&gt;.State` needs no catch-all arm. `StateName` gives the name of the state for logs. `Status()` is removed.
-* **Workflow refs have four type arguments.** They are now `IWorkflowRef&lt;TInput, TState, TFact, TOutcome&gt;` and `IWorkflowRefs&lt;TInput, TState, TFact, TOutcome&gt;`, in the same order as `WorkflowDefinition`. A workflow type is found by all four types, and `Get` throws `InvalidOperationException` when no hosted workflow type has them. The `WorkflowRef` helper in `DurableEntityTestKit` takes the same four.
-* **`SequenceNr` on a workflow read.** It is the sequence number of the hosting entity's journal. Compare it with an earlier read to see whether anything changed. It is not a count of state changes: a fact that keeps the state also adds one.
-* **An effect time limit of zero or less is refused.** `WithDurableEntity` and `WithDurableWorkflow` throw `ArgumentOutOfRangeException` when `EntityOptions.EffectTimeout` is zero or negative. `Timeout.InfiniteTimeSpan` is negative, so it is refused too. The message names the entity or workflow type and the value.
-* **A missing effect handler is an error in the log.** When an entity or a workflow issues an effect with `Execute` and no `IEffectHandler` is registered for it, the library logs an error. The entry names the effect type, the handler interface to register, and the entity or workflow type and ID. It does not contain the effect's contents. A workflow still receives the give-up fact with the reason `Failed`, and `WorkGaveUp.Error` names the interface. An entity still fails and restarts, as before.
-* **Akka.NET 1.6.0-beta7.** It contains the fix for the command-order issue listed for 0.1.0-alpha.2 (akkadotnet/akka.net#8942).
+* **Every `Execute` is recorded.** The effect is journaled in the same atomic write as the events of the decision that issued it. It is attempted once, and `Decide` always gets its answer or a give-up: `Failed`, `TimedOut`, or `Interrupted` after a crash. A handler that throws is no longer logged and dropped.
+* **A built-in outbox.** Register a handler with a retry policy, for example `AddEffectHandler&lt;TEffect, THandler&gt;(Retry.UntilAcknowledged(first, max))`, and the library redelivers the effect until the handler acknowledges it, after a crash, a passivation or a shard move too. `Retry.Every` and `Retry.Backoff` stop after a number of attempts and give up with `RetriesExhausted`. Delivery is at least once, so a handler that is registered with a policy must be safe to repeat.
+* **`AddEffectHandler` registers a handler and its route.** A recovered effect finds its handler through the route. An entity effect whose handler has no route is refused at its first `Execute`. Two handlers for one effect type fail at startup.
+* **`IEffect&lt;TCommand&gt;`.** An entity effect type implements it to turn a give-up into one of the entity's commands, and `Execute` requires it. Entity effect types are journaled, so they need a serializer; the host checks this at startup.
+* **`EffectDelivery`.** Every handler receives a stable effect id and the attempt number, so its work can be made safe to repeat. `IEffectHandler&lt;TEffect&gt;` is the form with no answer for `Decide`.
+* **An entity starts, notifies and cancels a workflow.** Declare the workflow with `Uses(definition)` on the entity definition, then call `Start`, `Notify` or `Cancel` on a decision. A start is recorded and delivered until the workflow answers. `Notify` and `Cancel` are recorded and attempted once; their answer and their give-up become commands through `Uses(definition, told:, gaveUp:)`. A workflow that is not hosted fails the host at startup.
+* **`Resume` is removed.** A recorded effect comes back by itself. "Ask again after a crash" is an arm in `Decide` on the `Interrupted` give-up.
+* **Akka.Reminders is required** for an entity that has effect handlers or uses a workflow; the host refuses to start without it. Timer keys that start with `durable-` are reserved for the library.
+* **A finished workflow cancels its wake reminder.**
+* **`VerifyMessageSerialization` works with C# union events** on Akka.NET 1.6.0-beta7. It stays off by default.
+* **TestKit.** `DeciderScenario` adds `WhenGaveUp`, `ThenStarted`, `ThenNotified` and `ThenCancelled`, and loses `Resumed()`. `DurableEntityTestKit` adds `PendingEffects`.
+* **`Run`, `Tell` and `Send` are unchanged.** They are light and not recorded. If delivery must be guaranteed, write an effect handler and use `Execute`.
+* **The repository builds with the stable .NET 11 SDK.**
 
-Not yet implemented: workflow retry policies, `Again` with a delay, child workflows, a scenario test kit for workflows, state and event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests. `VerifyMessageSerialization` stays off by default in the TestKit (see akkadotnet/akka.net#8910).
+Not yet implemented: retry policies on workflow work, `Again` with a delay, delivery of a workflow's outcome to the entity or workflow that started it, child workflows, a scenario test kit for workflows, state and event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests.
 
-Known issue: an entity that fails right after recovery is restarted with no delay, so a failure that repeats on every recovery restarts it in a loop.</PackageReleaseNotes>
+Known issues: an entity that fails right after recovery is restarted with no delay, so a failure that repeats on every recovery restarts it in a loop. A reader of the journal now sees the library's own records between an entity's events, and `StateSnapshot.SequenceNr` counts them. A snapshot written by this release cannot be read by 0.1.0-alpha.3.</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Target framework definitions. Projects should reference these instead of hardcoding a TFM:

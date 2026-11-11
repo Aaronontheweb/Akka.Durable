@@ -175,11 +175,8 @@ public abstract class EntityCallsKit(ITestOutputHelper output) : DurableEntityTe
     protected IDurableEntityRef<BillingCommand, BillingState, BillingEvent> Bill(string id) =>
         DurableEntityRef<BillingCommand, BillingState, BillingEvent>(id);
 
-    /// <summary>Issues the bill: the start is plain, or asks for its answer.</summary>
-    protected Task Issue(string id, bool watched) =>
-        watched
-            ? Bill(id).Ask(new IssueBillWatched(FarAway), AskCancellation(FirstAsk))
-            : Bill(id).Ask(new IssueBill(FarAway), AskCancellation(FirstAsk));
+    /// <summary>Issues the bill, which starts its campaign.</summary>
+    protected Task Issue(string id) => Bill(id).Ask(new IssueBill(FarAway), AskCancellation(FirstAsk));
 
     /// <summary>The campaign of a bill, reached without the control: the test acts as an outside caller.</summary>
     protected CampaignRef Campaigns(string bill) =>

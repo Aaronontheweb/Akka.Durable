@@ -94,3 +94,15 @@ internal sealed class JournalReader : ReceivePersistentActor
 
     public override string PersistenceId { get; }
 }
+
+/// <summary>
+/// Lets Akka.Reminders store reminders for an entity actor that a spec creates directly, with no shard region or
+/// local host. Deliveries go to dead letters.
+/// </summary>
+internal sealed class DirectEntityReminderResolver(ActorSystem system) : Akka.Reminders.Sharding.IShardRegionResolver
+{
+    public IActorRef? TryResolve(Akka.Reminders.ReminderEntity entity) => system.DeadLetters;
+
+    public void DeliverReminder(Akka.Reminders.ReminderEntity entity, Akka.Reminders.ReminderEnvelope envelope, IActorRef? sender = null) =>
+        system.DeadLetters.Tell(envelope, sender ?? ActorRefs.NoSender);
+}

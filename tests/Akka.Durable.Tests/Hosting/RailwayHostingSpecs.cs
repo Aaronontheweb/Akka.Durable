@@ -18,7 +18,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         services.AddSingleton<Calculator>();
         services.AddSingleton<EffectRecorder>();
         services.AddScoped<ScopedCalculator>();
-        services.AddScoped<IEffectHandler<Calculate, RailwayCommand>, CalculateHandler>();
+        services.AddEffectHandler<Calculate, RailwayCommand, CalculateHandler>();
     }
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
@@ -49,7 +49,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         Assert.Equal(new Adjusted(6), Assert.IsType<Adjusted>(reply.Value));
         var state = await Ref.GetStateAsync(AskCancellation());
         Assert.Equal(6, state.State.Count);
-        Assert.Equal(1, state.SequenceNr);
+        Assert.Empty(await PendingEffects<RailwayCommand>("a")); // the answer was journaled
         Assert.Equal(["calculate:3", "disposed"], Recorder.Entries);
     }
 
@@ -61,7 +61,8 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         var reply = await Ref.Ask(new Adjust(3), AskCancellation());
 
         Assert.Equal("negative result", Assert.IsType<AdjustmentRejected>(reply.Value).Reason);
-        Assert.Equal(0, (await Ref.GetStateAsync(AskCancellation())).SequenceNr);
+        Assert.Equal(0, (await Ref.GetStateAsync(AskCancellation())).State.Count);
+        Assert.Empty(await PendingEffects<RailwayCommand>("a"));
     }
 
     [Theory]
@@ -78,7 +79,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         Assert.Equal("service failed", Assert.IsType<AdjustmentRejected>(reply.Value).Reason);
         var state = await Ref.GetStateAsync(AskCancellation());
         Assert.Equal(0, state.State.Count);
-        Assert.Equal(0, state.SequenceNr);
+        Assert.Empty(await PendingEffects<RailwayCommand>("a"));
         Assert.Equal(["calculate:3", "disposed"], Recorder.Entries);
     }
 
@@ -90,7 +91,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         Assert.Equal(13, Assert.IsType<Adjusted>(reply.Value).Count);
         var state = await Ref.GetStateAsync(AskCancellation());
         Assert.Equal(13, state.State.Count);
-        Assert.Equal(2, state.SequenceNr);
+        Assert.Empty(await PendingEffects<RailwayCommand>("a"));
     }
 
     [Fact]
@@ -103,7 +104,7 @@ public abstract class RailwayHostingSpecs(ITestOutputHelper output) : DurableEnt
         Assert.IsType<AdjustmentRejected>(reply.Value);
         var state = await Ref.GetStateAsync(AskCancellation());
         Assert.Equal(10, state.State.Count);
-        Assert.Equal(1, state.SequenceNr);
+        Assert.Empty(await PendingEffects<RailwayCommand>("a")); // the answer was journaled
     }
 
     [Fact]

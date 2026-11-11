@@ -1,4 +1,5 @@
 using Akka.Actor;
+using Akka.Cluster.Sharding;
 using Akka.Hosting;
 using Akka.Reminders;
 using Akka.Reminders.Storage;
@@ -106,6 +107,24 @@ public abstract class DurableEntityTestKit(
     protected IWorkflowRef<TInput, TState, TFact, TOutcome> WorkflowRef<TInput, TState, TFact, TOutcome>(string workflowId)
         where TState : notnull =>
         Host.Services.GetRequiredService<IWorkflowRefs<TInput, TState, TFact, TOutcome>>().Get(new WorkflowId(workflowId));
+
+    /// <summary>
+    /// The effects the entity <paramref name="entityId"/> has issued with <c>Execute</c> and that have no answer or
+    /// give-up yet, in the order they were issued. For tests only.
+    /// </summary>
+    /// <remarks>
+    /// The query starts the entity if it is not running. A started entity first gives every effect that was pending in
+    /// its journal up as <see cref="GaveUpReason.Interrupted"/>, so the list holds only effects issued by the running
+    /// incarnation.
+    /// </remarks>
+    /// <typeparam name="TCommand">The entity type's command type.</typeparam>
+    protected async Task<IReadOnlyList<object>> PendingEffects<TCommand>(string entityId)
+    {
+        var region = ActorRegistry.For(Sys).Get<EntityRegion<TCommand>>();
+        var reply = await region.Ask<PendingEffectsReply>(
+            new ShardingEnvelope(entityId, GetPendingEffects.Instance), AskCancellation());
+        return reply.Effects.IsDefault ? [] : reply.Effects;
+    }
 
     /// <summary>The current test's cancellation token, for awaited calls.</summary>
     protected static CancellationToken TestCancellation => TestContext.Current.CancellationToken;

@@ -41,19 +41,9 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
     EntityOptions? Options = null)
 {
     /// <summary>
-    /// The effects that are still pending for a state. Optional.
+    /// The library's own work after recovery, for the workflow host: the give-ups of work that was interrupted.
     /// </summary>
-    /// <remarks>
-    /// <para>Runs once after recovery, before the entity handles its first command, and its effects go through
-    /// the same path as a decision's. A decider can also call it from a retry arm. It decides nothing, so it
-    /// may not return events; the entity fails to start if it does.</para>
-    /// <para>Everything it returns follows from state alone, so running it twice must be harmless: give the
-    /// effects idempotency keys, and prefer re-sending a query over a change. An entity whose effects never
-    /// wait for an outcome does not need it.</para>
-    /// <para>Replies issued by resumed effects go to dead letters: the asker of the original request belongs
-    /// to the previous incarnation.</para>
-    /// </remarks>
-    public Func<TState, DecisionContext<TState, TCommand, TEvent>, Handled<TCommand, TEvent>>? Resume { get; init; }
+    internal Func<TState, DecisionContext<TState, TCommand, TEvent>, Handled<TCommand, TEvent>>? AfterRecovery { get; init; }
 
     internal ImmutableDictionary<Type, Func<object, TCommand>> Accepted { get; init; } =
         ImmutableDictionary<Type, Func<object, TCommand>>.Empty;
@@ -64,7 +54,7 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
     /// </summary>
     /// <remarks>
     /// The table lives on the definition rather than on each send so that it survives a restart. The reply
-    /// to a command re-sent by <see cref="Resume"/> is wrapped the same way.
+    /// to a command sent before a restart is wrapped the same way.
     /// </remarks>
     public EntityDefinition<TState, TCommand, TEvent> Accepts<TMessage>(Func<TMessage, TCommand> wrap)
         where TMessage : notnull
@@ -77,15 +67,15 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
         ImmutableDictionary<WorkflowTypeName, WorkflowUse>.Empty;
 
     /// <summary>
-    /// Declares a workflow type this entity may start, notify or cancel from a decision.
+    /// Declares a workflow type this entity may start from a decision.
     /// </summary>
     /// <remarks>
     /// <para>When the host starts, every workflow type an entity uses must be hosted in the same actor system with
     /// <c>WithDurableWorkflow</c>. If one is not, the host fails to start with an error that names both types. The
     /// order of the registrations does not matter.</para>
-    /// <para>A decision that calls a workflow type not declared here does not reach it: the entity logs an error and
-    /// gives the call up as <see cref="GaveUpReason.Failed"/>. <c>DeciderScenario</c> fails the test.</para>
-    /// <para>The declaration is also how the entity issues a pending start again after a restart.</para>
+    /// <para>A decision that calls a workflow type not declared here does not reach it: the call is not journaled and
+    /// the entity logs an error. <c>DeciderScenario</c> fails the test.</para>
+    /// <para>To also notify or cancel the workflow, use the overload with <c>told</c> and <c>gaveUp</c>.</para>
     /// </remarks>
     public EntityDefinition<TState, TCommand, TEvent> Uses<TInput, TWorkflowState, TFact, TOutcome>(
         WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow)
@@ -95,7 +85,47 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
         where TOutcome : notnull
     {
         ArgumentNullException.ThrowIfNull(workflow);
-        return this with { Used = Used.SetItem(workflow.TypeName, WorkflowUse.Of(workflow)) };
+        return this with
+        {
+            Used = Used.SetItem(workflow.TypeName, WorkflowUse.Of<TCommand, TInput, TWorkflowState, TFact, TOutcome>(workflow, null, null)),
+        };
+    }
+
+    /// <summary>
+    /// Declares a workflow type this entity may start, notify and cancel from a decision, and how the answer of a
+    /// <c>Notify</c> or <c>Cancel</c>, or its give-up, becomes one of this entity's commands.
+    /// </summary>
+    /// <param name="workflow">The workflow type's definition.</param>
+    /// <param name="told">
+    /// Turns the workflow's answer to a <c>Notify</c> or a <c>Cancel</c> into one of this entity's commands:
+    /// <see cref="Delivered"/>, <see cref="Held"/>, <see cref="WorkflowNotStarted"/> or <see cref="AlreadyFinished{TOutcome}"/>.
+    /// </param>
+    /// <param name="gaveUp">
+    /// Turns a <c>Notify</c> or <c>Cancel</c> that got no answer into one of this entity's commands. Its
+    /// <see cref="WorkGaveUp.Work"/> is the <see cref="NotifyWorkflow"/> or <see cref="CancelWorkflow"/>. The reason is
+    /// <see cref="GaveUpReason.Failed"/>, <see cref="GaveUpReason.TimedOut"/> or, after a restart,
+    /// <see cref="GaveUpReason.Interrupted"/>. The fact may have been journaled.
+    /// </param>
+    /// <remarks>
+    /// The functions live on the definition, not on the call, so they still work after a restart, when the library
+    /// has only the journaled call.
+    /// </remarks>
+    public EntityDefinition<TState, TCommand, TEvent> Uses<TInput, TWorkflowState, TFact, TOutcome>(
+        WorkflowDefinition<TInput, TWorkflowState, TFact, TOutcome> workflow,
+        Func<DeliveryResult<TOutcome>, TCommand> told,
+        Func<WorkGaveUp, TCommand> gaveUp)
+        where TInput : notnull
+        where TWorkflowState : notnull
+        where TFact : notnull
+        where TOutcome : notnull
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        ArgumentNullException.ThrowIfNull(told);
+        ArgumentNullException.ThrowIfNull(gaveUp);
+        return this with
+        {
+            Used = Used.SetItem(workflow.TypeName, WorkflowUse.Of(workflow, told, gaveUp)),
+        };
     }
 
     /// <summary>True when the definition declares the workflow type <paramref name="call"/> addresses.</summary>

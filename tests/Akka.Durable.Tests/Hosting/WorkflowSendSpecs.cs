@@ -22,7 +22,7 @@ public abstract class BumpWorkflowKit(ITestOutputHelper output) : DurableEntityT
 
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) => services
         .AddSingleton<Calculator>().AddSingleton<EffectRecorder>().AddScoped<ScopedCalculator>()
-        .AddScoped<IEffectHandler<Calculate, RailwayCommand>, CalculateHandler>();
+        .AddEffectHandler<Calculate, RailwayCommand, CalculateHandler>();
 
     protected sealed override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {

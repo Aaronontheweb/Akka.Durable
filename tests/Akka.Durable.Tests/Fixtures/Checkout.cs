@@ -189,9 +189,13 @@ public static class Checkout
 public sealed class CheckoutServices
 {
     private readonly ConcurrentQueue<object> _issued = new();
+    private readonly ConcurrentQueue<EffectDelivery> _deliveries = new();
 
     /// <summary>Every effect a handler received, in order.</summary>
     public IReadOnlyList<object> Issued => [.. _issued];
+
+    /// <summary>The delivery each handler call received, in the same order as <see cref="Issued"/>.</summary>
+    public IReadOnlyList<EffectDelivery> Deliveries => [.. _deliveries];
 
     public Func<ReserveStock, CancellationToken, Task<CheckoutFact>> Reserve { get; set; } =
         (effect, _) => Task.FromResult<CheckoutFact>(new Reserved($"res-{effect.Order}"));
@@ -206,9 +210,11 @@ public sealed class CheckoutServices
         (_, _) => Task.FromResult<CheckoutFact>(new TicketOpened());
 
     internal Task<CheckoutFact> Run<TEffect>(
-        TEffect effect, Func<TEffect, CancellationToken, Task<CheckoutFact>> answer, CancellationToken ct)
+        TEffect effect, EffectDelivery delivery, Func<TEffect, CancellationToken, Task<CheckoutFact>> answer,
+        CancellationToken ct)
         where TEffect : notnull
     {
+        _deliveries.Enqueue(delivery);
         _issued.Enqueue(effect);
         return answer(effect, ct);
     }
@@ -216,34 +222,34 @@ public sealed class CheckoutServices
 
 public sealed class ReserveStockHandler(CheckoutServices services) : IEffectHandler<ReserveStock, CheckoutFact>
 {
-    public Task<CheckoutFact> HandleAsync(ReserveStock effect, CancellationToken cancellationToken) =>
-        services.Run(effect, services.Reserve, cancellationToken);
+    public Task<CheckoutFact> HandleAsync(ReserveStock effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
+        services.Run(effect, delivery, services.Reserve, cancellationToken);
 }
 
 public sealed class ChargeCardHandler(CheckoutServices services) : IEffectHandler<ChargeCard, CheckoutFact>
 {
-    public Task<CheckoutFact> HandleAsync(ChargeCard effect, CancellationToken cancellationToken) =>
-        services.Run(effect, services.Charge, cancellationToken);
+    public Task<CheckoutFact> HandleAsync(ChargeCard effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
+        services.Run(effect, delivery, services.Charge, cancellationToken);
 }
 
 public sealed class UndoOrderHandler(CheckoutServices services) : IEffectHandler<UndoOrder, CheckoutFact>
 {
-    public Task<CheckoutFact> HandleAsync(UndoOrder effect, CancellationToken cancellationToken) =>
-        services.Run(effect, services.Undo, cancellationToken);
+    public Task<CheckoutFact> HandleAsync(UndoOrder effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
+        services.Run(effect, delivery, services.Undo, cancellationToken);
 }
 
 public sealed class OpenSupportTicketHandler(CheckoutServices services) : IEffectHandler<OpenSupportTicket, CheckoutFact>
 {
-    public Task<CheckoutFact> HandleAsync(OpenSupportTicket effect, CancellationToken cancellationToken) =>
-        services.Run(effect, services.OpenTicket, cancellationToken);
+    public Task<CheckoutFact> HandleAsync(OpenSupportTicket effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
+        services.Run(effect, delivery, services.OpenTicket, cancellationToken);
 }
 
 public static class CheckoutHandlers
 {
     public static IServiceCollection AddCheckoutHandlers(this IServiceCollection services) => services
         .AddSingleton<CheckoutServices>()
-        .AddScoped<IEffectHandler<ReserveStock, CheckoutFact>, ReserveStockHandler>()
-        .AddScoped<IEffectHandler<ChargeCard, CheckoutFact>, ChargeCardHandler>()
-        .AddScoped<IEffectHandler<UndoOrder, CheckoutFact>, UndoOrderHandler>()
-        .AddScoped<IEffectHandler<OpenSupportTicket, CheckoutFact>, OpenSupportTicketHandler>();
+        .AddEffectHandler<ReserveStock, CheckoutFact, ReserveStockHandler>()
+        .AddEffectHandler<ChargeCard, CheckoutFact, ChargeCardHandler>()
+        .AddEffectHandler<UndoOrder, CheckoutFact, UndoOrderHandler>()
+        .AddEffectHandler<OpenSupportTicket, CheckoutFact, OpenSupportTicketHandler>();
 }

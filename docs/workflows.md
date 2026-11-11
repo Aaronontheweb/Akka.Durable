@@ -138,15 +138,15 @@ A handler runs one kind of effect and returns one of your facts. It is an `IEffe
 ```csharp
 public sealed class ChargeCardHandler(IPaymentGateway gateway) : IEffectHandler<ChargeCard, CheckoutFact>
 {
-    public async Task<CheckoutFact> HandleAsync(ChargeCard effect, CancellationToken cancellationToken)
+    public async Task<CheckoutFact> HandleAsync(ChargeCard effect, EffectDelivery delivery, CancellationToken cancellationToken)
     {
-        var result = await gateway.ChargeAsync(effect.Order, effect.Total, cancellationToken);
+        var result = await gateway.ChargeAsync(effect.Order, effect.Total, idempotencyKey: delivery.Id.Value, cancellationToken);
         return result.Approved ? new Charged(result.ChargeId) : new Declined(result.Reason);
     }
 }
 ```
 
-`IPaymentGateway` is your own service. It is not part of Akka.Durable. A decline is an expected failure, so the handler returns it as the fact `Declined`.
+`IPaymentGateway` is your own service. It is not part of Akka.Durable. A decline is an expected failure, so the handler returns it as the fact `Declined`. `delivery.Id` is the id of this piece of work, for example `checkouts/c-9/2.0`: the workflow type and id, the entry and the position in the work list. It is the same each time it is read, so it can be an idempotency key. Register the handler with `services.AddEffectHandler<ChargeCard, CheckoutFact, ChargeCardHandler>()`; one handler per effect type.
 
 The definition puts it together:
 
@@ -183,7 +183,7 @@ Sometimes work gets no answer. The workflow then receives the give-up fact: the 
 | Case | `GaveUpReason` |
 |---|---|
 | The handler throws. | `Failed` |
-| No handler is registered for the effect. This is a deployment mistake: an error is logged that names the effect type, the `IEffectHandler<,>` to register and the workflow. `Error` says the same. | `Failed` |
+| No handler is registered for the effect. This is a deployment mistake: an error is logged that names the effect type, the `AddEffectHandler<...>` call to add and the workflow. `Error` says the same. | `Failed` |
 | The entity type that a `Send` is for is not hosted. | `Failed` |
 | The entity does not reply to a `Send` within `EntityOptions.EffectTimeout`. | `TimedOut` |
 | The handler does not answer within `EntityOptions.EffectTimeout` (30 seconds by default). | `TimedOut` |
@@ -322,10 +322,10 @@ Hosting is the same as for entities. See [Hosting](hosting.md). Call `AddDurable
 
 ```csharp
 builder.Services.AddDurableEntities();
-builder.Services.AddScoped<IEffectHandler<ReserveStock, CheckoutFact>, ReserveStockHandler>();
-builder.Services.AddScoped<IEffectHandler<ChargeCard, CheckoutFact>, ChargeCardHandler>();
-builder.Services.AddScoped<IEffectHandler<UndoOrder, CheckoutFact>, UndoOrderHandler>();
-builder.Services.AddScoped<IEffectHandler<OpenSupportTicket, CheckoutFact>, OpenSupportTicketHandler>();
+builder.Services.AddEffectHandler<ReserveStock, CheckoutFact, ReserveStockHandler>();
+builder.Services.AddEffectHandler<ChargeCard, CheckoutFact, ChargeCardHandler>();
+builder.Services.AddEffectHandler<UndoOrder, CheckoutFact, UndoOrderHandler>();
+builder.Services.AddEffectHandler<OpenSupportTicket, CheckoutFact, OpenSupportTicketHandler>();
 
 builder.Services.AddAkka("shop", (akka, sp) =>
 {
@@ -429,7 +429,7 @@ ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
 
 Register a serializer for your own four types: input, state, fact and outcome. You do not register one for anything else. The library's own messages already have a serializer, and they carry your values inside them.
 
-`WithDurableWorkflow` checks this at startup. If one of the four types would fall back to the default serializer, the host fails to start and the error names the type. The effect records are not journaled, so they need no serializer.
+`WithDurableWorkflow` checks this at startup. If one of the four types would fall back to the default serializer, the host fails to start and the error names the type. A workflow's effect records are not journaled, so they need no serializer: the workflow's state says what its work is.
 
 Mark each type with `[AkkaSerializable(Manifest = "...")]`, and each union as well as its cases. The rules for how to do this, and for how to change the types later, are in [Serialization](serialization.md).
 

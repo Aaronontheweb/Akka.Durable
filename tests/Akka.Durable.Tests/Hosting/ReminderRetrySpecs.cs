@@ -1,6 +1,7 @@
 using Akka.Cluster.Hosting;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Reminders;
+using Akka.Serialization.V2;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -16,7 +17,7 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
     {
         base.ConfigureTestServices(context, services);
-        services.AddScoped<IEffectHandler<SendMail, CounterCommand>, UnavailableMailer>();
+        services.AddEffectHandler<SendMail, CounterCommand, UnavailableMailer>();
     }
 
     // The reminder's command issues an effect. The handler cannot deliver, and says so by returning the
@@ -58,16 +59,20 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
 
         var snapshot = await counter.GetStateAsync(AskCancellation());
         Assert.Equal(new CounterState(5, false), snapshot.State);
-        Assert.Equal(1, snapshot.SequenceNr);
+        Assert.Empty(await PendingEffects<CounterCommand>("retry")); // the mail was answered, and the answer journaled
         Assert.Equal(1, Volatile.Read(ref _initializations));
         Assert.Equal(["mail", "disposed"], Recorder.Entries);
     }
 
-    public sealed record SendMail;
+    [AkkaSerializable(Manifest = "counter-test-send-mail-v1", AllowEmpty = true)]
+    public sealed record SendMail : ICounterProtocol, IEffect<CounterCommand>
+    {
+        public CounterCommand GaveUp(WorkGaveUp gaveUp) => new EffectGaveUpNoted($"mail:{gaveUp.Reason}");
+    }
 
     private sealed class UnavailableMailer(ScopedRecorder recorder) : IEffectHandler<SendMail, CounterCommand>
     {
-        public async Task<CounterCommand> HandleAsync(SendMail effect, CancellationToken cancellationToken)
+        public async Task<CounterCommand> HandleAsync(SendMail effect, EffectDelivery delivery, CancellationToken cancellationToken)
         {
             await recorder.RecordAsync("mail", cancellationToken);
             return new RemindLater(TimeSpan.FromHours(1));

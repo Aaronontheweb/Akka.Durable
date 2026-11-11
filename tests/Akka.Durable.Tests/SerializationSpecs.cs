@@ -104,19 +104,17 @@ public sealed class SerializationSpecs : IAsyncLifetime
     }
 
     [Fact]
-    public void Reminder_envelope_carries_a_pending_start_with_the_authors_input()
+    public void Reminder_envelope_carries_the_wake_of_an_entity_with_pending_effects()
     {
-        // How a start the workflow has not answered travels from reminder storage back to the entity.
+        // The reminder that wakes an entity after a crash, so its pending effects are delivered or given up.
         var due = new DateTimeOffset(2026, 11, 7, 12, 0, 0, TimeSpan.Zero);
-        var sent = new ReminderEnvelope(new ReminderEntity("billing", "b1"), new ReminderKey("pending"), due,
-            ReminderDeadline.Infinite, new PendingStart("campaigns", "campaign-b1", new CounterState(4, true)));
+        var sent = new ReminderEnvelope(new ReminderEntity("billing", "b1"), new ReminderKey(EffectsWake.Key), due,
+            ReminderDeadline.Infinite, new EffectsWake(due));
 
         var received = (ReminderEnvelope)RoundTrip(sent);
 
-        var pending = Assert.IsType<PendingStart>(received.Message);
-        Assert.Equal("campaigns", pending.Workflow);
-        Assert.Equal("campaign-b1", pending.Id);
-        Assert.Equal(new CounterState(4, true), pending.Input);
+        Assert.Equal(new EffectsWake(due), received.Message);
+        Assert.Equal(new ReminderKey("durable-effects-wake"), received.Key);
     }
 
     [Fact]

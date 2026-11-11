@@ -37,7 +37,7 @@ public sealed class WorkflowMissingHandlerSpecs(ITestOutputHelper output) : Chec
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
         services
             .AddSingleton<CheckoutServices>()
-            .AddScoped<IEffectHandler<ReserveStock, CheckoutFact>, ReserveStockHandler>();
+            .AddEffectHandler<ReserveStock, CheckoutFact, ReserveStockHandler>();
 
     [Fact]
     public async Task Work_with_no_registered_handler_gives_up()

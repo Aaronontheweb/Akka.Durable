@@ -56,7 +56,7 @@ public static class Invoice
                     .CancelTimer("reminder")
                     .Reply(p, new PaymentAccepted()),
 
-            // Nothing comes back from a reminder, so best-effort Run is enough.
+            // A lost reminder mail is acceptable, so the light, unrecorded Run is enough.
             (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
             (_, SendReminder) => ctx.Ignore(),
 
@@ -76,13 +76,23 @@ public static class Invoice
 }
 ```
 
-`VerifyRecipient` is a plain record, `public sealed record VerifyRecipient(string Recipient);`, and it is never serialized. The only impure code is its handler, which Akka.Durable resolves from a fresh DI scope each time the effect runs. The handler's second type argument says what kind of outcome it produces, here a command that goes back through `Decide`:
+`VerifyRecipient` is the effect: plain data, journaled in the same write as `VerificationStarted`. It says which command `Decide` gets when the directory gives no answer:
+
+```csharp
+[AkkaSerializable(Manifest = "verify-recipient-v1")]
+public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient) : IInvoiceProtocol, IEffect<InvoiceCommand>
+{
+    public InvoiceCommand GaveUp(WorkGaveUp g) => new RecipientRejected($"directory: {g.Reason}");
+}
+```
+
+The only impure code is its handler, which Akka.Durable resolves from a fresh DI scope when the effect runs. The handler's second type argument says what kind of answer it produces, here a command that goes back through `Decide`:
 
 ```csharp
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
     : IEffectHandler<VerifyRecipient, InvoiceCommand>
 {
-    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, CancellationToken ct) =>
+    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, EffectDelivery delivery, CancellationToken ct) =>
         await directory.LookupAsync(effect.Recipient, ct) switch
         {
             Known => new RecipientVerified(),
@@ -91,7 +101,7 @@ public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
 }
 
 // at startup, next to the other services
-services.AddScoped<IEffectHandler<VerifyRecipient, InvoiceCommand>, VerifyRecipientHandler>();
+services.AddEffectHandler<VerifyRecipient, InvoiceCommand, VerifyRecipientHandler>();
 ```
 
 The [state, command, event, and reply declarations](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md) are in the guide. You write the domain functions and the handlers; Akka.Durable supplies the actor.
@@ -117,6 +127,18 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
 
 `Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`. The registry is keyed by command type, so each entity type must have its own command type.
 
+## You do not need to build an outbox. Akka.Durable has one.
+
+```csharp
+ctx.Persist(new PaymentRecorded(p.Amount)).Execute(new PublishPayment(ctx.EntityId, p.Amount));    // in Decide
+services.AddEffectHandler<PublishPayment, PublishPaymentHandler>(Retry.UntilAcknowledged(TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5)));
+public sealed class PublishPaymentHandler(IBus bus) : IEffectHandler<PublishPayment> { /* ... */ }
+```
+
+`PublishPayment` is recorded in the same journal write as `PaymentRecorded`, and its handler runs at least once, after a crash too, until it returns without throwing; it can run more than once, so it must be safe to repeat.
+
+See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) for the other retry policies, and for `Execute` without a policy, which is attempted once and tells `Decide` how it ended.
+
 ## Getting started
 
 Install the .NET 11 SDK pinned in `global.json`, then run:
@@ -141,9 +163,8 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | Page | What it covers |
 |---|---|
 | [State, commands, events, and replies](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md) | How to declare an entity's state, commands, events and replies, and what a decision can do. |
-| [Effects with outcomes](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects-with-outcomes.md) | `Execute` and effect handlers, for work whose result the entity decides on. |
-| [Run or Execute](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/run-or-execute.md) | Which of the two to use for service work. |
-| [Resuming after a restart](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/resuming-after-a-restart.md) | `Resume`, for effects that were pending when the process stopped. |
+| [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) | `Execute`, the normal way to do outside work, retry policies (the outbox), and the light forms `Run`, `Tell` and `Send`. |
+| [Effects with outcomes](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects-with-outcomes.md) | Effect handlers, answers and give-ups, for work whose result the entity decides on. |
 | [Talking to other entities](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/talking-to-other-entities.md) | `Send` and `Accepts`, for one entity that drives another. |
 | [Starting a workflow from an entity](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/starting-a-workflow-from-an-entity.md) | `Uses`, and `Start`, `Notify` and `Cancel` from a decision. |
 | [Serialization](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/serialization.md) | What is serialized, and how to change stored types safely. |

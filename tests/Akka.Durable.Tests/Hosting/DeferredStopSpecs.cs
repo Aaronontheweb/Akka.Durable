@@ -2,7 +2,6 @@ using Akka.Actor;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Hosting;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Xunit;
 
@@ -62,20 +61,15 @@ public abstract class RestartWhileStopDeferredSpec(ITestOutputHelper output) : D
         // A command with no case in Decide: the decision throws and the entity restarts.
         entity.Tell(default(CounterCommand));
 
-        // The restarted entity recovers the request that is still pending and asks the service again. The
-        // handler records each run, so a second run says the new incarnation is up with its handler in flight.
-        await AwaitAssertAsync(
-            () => Assert.Equal(2, Recorder.Entries.Count(e => e == "compute:5")), cancellationToken: TestCancellation);
-
-        // The new handler waits for the same gate, so the stop is deferred again until it is open.
-        Gate.Open();
-
-        // The reply to the original asker went to the first incarnation, so only two messages arrive.
+        // The restarted entity recovers the effect that is still pending. It is not run again: it gives up as
+        // interrupted, and nothing is in flight any more, so the stop the host asked for before the restart happens.
+        // The give-up's reply goes to dead letters: the asker belongs to the first incarnation.
         var received = await ReceiveNAsync(2, cancellationToken: TestCancellation).ToListAsync(TestCancellation);
         Assert.Contains(received.OfType<Terminated>(), t => t.ActorRef.Equals(entity));
 
-        // The buffered message was answered by a new incarnation, which recovered the outcome.
-        Assert.Equal(10, Assert.Single(received.OfType<CountIs>()).Count);
+        // The buffered message was answered by a new incarnation. The increment gave up, so the count did not move.
+        Assert.Equal(0, Assert.Single(received.OfType<CountIs>()).Count);
+        Assert.Equal(1, Recorder.Entries.Count(e => e == "compute:5"));
         Assert.NotEqual(entity, await Sys.ActorSelection(EntityPath("a")).ResolveOne(TimeSpan.FromSeconds(5), TestCancellation));
     }
 }
@@ -103,12 +97,10 @@ public class ShardedRestartWhileStopDeferredSpecs(ITestOutputHelper output) : Re
 /// </summary>
 public abstract class FaultingHandlerStopDeferredSpec(ITestOutputHelper output) : DeferredStopSpec(output)
 {
-    protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
-    {
-        base.ConfigureTestServices(context, services);
-        services.RemoveAll<IEffectHandler<Compute, CounterCommand>>();
-        services.AddScoped<IEffectHandler<Compute, CounterCommand>, ComputeHandlerThatFaultsOnDisposal>();
-    }
+    // The counter's services, with this handler for Compute instead of the counter's own.
+    protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services) =>
+        services.AddSingleton<EffectRecorder>().AddSingleton<Gate>().AddScoped<ScopedRecorder>()
+            .AddEffectHandler<Compute, CounterCommand, ComputeHandlerThatFaultsOnDisposal>();
 
     [Fact]
     public async Task A_handler_whose_task_faults_before_it_reports_still_lets_the_entity_stop()
@@ -116,12 +108,13 @@ public abstract class FaultingHandlerStopDeferredSpec(ITestOutputHelper output) 
         var counter = CounterRef("a");
         var entity = await StopDeferredWithHandlerInFlight(counter);
 
-        // The handler finishes, its scope fails to dispose, and the entity gets no outcome to decide on.
+        // The handler finishes, its scope fails to dispose, and its answer is lost: the effect gives up as failed.
         Gate.Open();
 
-        // The entity stops anyway, and the buffered message is answered by a new incarnation. Nothing was
-        // decided for the increment, so there is no reply to it and the count has not moved.
-        var received = await ReceiveNAsync(2, cancellationToken: TestCancellation).ToListAsync(TestCancellation);
+        // The give-up answers the asker, the entity stops, and the buffered message is answered by a new incarnation.
+        // The increment gave up, so the count has not moved.
+        var received = await ReceiveNAsync(3, cancellationToken: TestCancellation).ToListAsync(TestCancellation);
+        Assert.Single(received.OfType<Accepted>());
         Assert.Contains(received.OfType<Terminated>(), t => t.ActorRef.Equals(entity));
         Assert.Equal(0, Assert.Single(received.OfType<CountIs>()).Count);
     }
@@ -147,7 +140,7 @@ public class ShardedFaultingHandlerStopDeferredSpecs(ITestOutputHelper output) :
 /// <summary>Waits for the gate like the counter's own handler, then fails when its DI scope is disposed.</summary>
 public sealed class ComputeHandlerThatFaultsOnDisposal(Gate gate) : IEffectHandler<Compute, CounterCommand>, IAsyncDisposable
 {
-    public async Task<CounterCommand> HandleAsync(Compute effect, CancellationToken cancellationToken)
+    public async Task<CounterCommand> HandleAsync(Compute effect, EffectDelivery delivery, CancellationToken cancellationToken)
     {
         if (effect.Request.Wait) await gate.WaitAsync(cancellationToken);
         return new Computed(effect.Request, effect.Request.By * 2);

@@ -23,7 +23,6 @@ public class EntityWorkflowCallDeciderSpecs
     private static BillingCommand Command(string name) => name switch
     {
         "start" => new IssueBill(Due),
-        "start-watched" => new IssueBillWatched(Due),
         "notify" => new PayBill(),
         _ => new StopCampaign("written off"),
     };
@@ -33,8 +32,7 @@ public class EntityWorkflowCallDeciderSpecs
 
     [Theory]
     [InlineData("start")]
-    [InlineData("start-watched")]
-    public void A_start_with_or_without_then_is_asserted_by_value(string command)
+    public void A_start_is_asserted_by_value(string command)
     {
         Scenario().When(Command(command))
             .ThenPersisted(new BillIssued())
@@ -110,7 +108,6 @@ public class EntityWorkflowCallDeciderSpecs
 
     [Theory]
     [InlineData("start")]
-    [InlineData("start-watched")]
     [InlineData("notify")]
     [InlineData("cancel")]
     public void A_decision_that_calls_a_workflow_the_definition_does_not_name_fails_When(string command)
@@ -139,23 +136,27 @@ public class EntityWorkflowCallDeciderSpecs
         Assert.ThrowsAny<XunitException>(() => Scenario(definition).When(Command("start")));
     }
 
-    private static Handled<BillingCommand, BillingEvent> ResumeStart(
-        BillingState state, DecisionContext<BillingState, BillingCommand, BillingEvent> ctx) =>
-        ctx.None().Start(Campaign.Definition, Billing.CampaignOf(ctx.EntityId), Billing.InputOf(ctx.EntityId, Due));
+    // The campaign is used for starts only: told and gaveUp are not given.
+    private static readonly EntityDefinition<BillingState, BillingCommand, BillingEvent> StartsOnly =
+        new EntityDefinition<BillingState, BillingCommand, BillingEvent>(
+                Billing.TypeName, _ => new BillingState(false, []), Billing.Decide, Billing.Evolve)
+            .Uses(Campaign.Definition);
 
-    [Fact]
-    public void A_start_issued_from_Resume_is_asserted_after_Resumed()
+    [Theory]
+    [InlineData("notify")]
+    [InlineData("cancel")]
+    public void A_notify_or_cancel_to_a_workflow_used_without_told_and_gaveUp_fails_When(string command)
     {
-        Scenario(Billing.Definition with { Resume = ResumeStart }).Given(new BillIssued()).Resumed()
-            .ThenStarted(Campaign.Definition, Campaign1, new Invoice("test-entity", Due, TimeSpan.FromDays(7), TimeSpan.FromDays(14), 3));
+        var failure = Assert.ThrowsAny<XunitException>(() => Scenario(StartsOnly).Given(new BillIssued()).When(Command(command)));
+
+        Assert.Contains("told and gaveUp", failure.Message);
     }
 
     [Fact]
-    public void A_call_from_Resume_to_a_workflow_the_definition_does_not_name_fails_Resumed()
+    public void A_start_to_a_workflow_used_without_told_and_gaveUp_passes_When()
     {
-        var definition = Undeclared with { Resume = ResumeStart };
-
-        Assert.ThrowsAny<XunitException>(() => Scenario(definition).Given(new BillIssued()).Resumed());
+        Scenario(StartsOnly).When(Command("start"))
+            .ThenStarted(Campaign.Definition, Campaign1, new Invoice("test-entity", Due, TimeSpan.FromDays(7), TimeSpan.FromDays(14), 3));
     }
 
     [Theory]
@@ -164,8 +165,7 @@ public class EntityWorkflowCallDeciderSpecs
     public void Cancel_rejects_an_empty_reason_or_caller(string reason, string by)
     {
         Assert.ThrowsAny<ArgumentException>(() => Context().None().Cancel(
-            Campaign.Definition, Campaign1, reason, by,
-            then: _ => new CampaignAnswered("x"), gaveUp: g => new CampaignUnreachable(g.Reason)));
+            Campaign.Definition, Campaign1, reason, by));
     }
 
     private static readonly Invoice Input = new("a", Due, TimeSpan.FromDays(7), TimeSpan.FromDays(14), 3);

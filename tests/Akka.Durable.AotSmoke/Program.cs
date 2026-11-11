@@ -38,7 +38,10 @@ public readonly union Event(Added);
 public sealed record Answer(int Value);
 public sealed record Rejected(string Reason);
 public readonly union Reply(Answer, Rejected);
-public sealed record Compute(Calculate Request, int Value);
+public sealed record Compute(Calculate Request, int Value) : IEffect<Command>
+{
+    public Command GaveUp(WorkGaveUp gaveUp) => new Computed(Request, -1);
+}
 public sealed class Calculator
 {
     public Task<int> CalculateAsync(int value, CancellationToken ct) => Task.FromResult(value);

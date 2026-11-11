@@ -84,19 +84,21 @@ public sealed class EntityStartsWorkflowSmokeSpecs(ITestOutputHelper output) : D
     }
 
     [Fact]
-    public async Task Start_notify_and_cancel_answers_arrive_as_commands()
+    public async Task Notify_and_cancel_answers_arrive_as_commands()
     {
         var bill = BillRef("b3");
 
-        await bill.Ask(new IssueBillWatched(FarAway), AskCancellation());
-        await AwaitAnswers("b3", "Started");
+        await bill.Ask(new IssueBill(FarAway), AskCancellation());
+        await AwaitAssertAsync(async () =>
+            Assert.IsType<WorkflowRunning<CampaignState>>((await CampaignOf("b3").GetStateAsync(AskCancellation())).State.Value),
+            TimeSpan.FromSeconds(10), cancellationToken: TestCancellation);
 
         await bill.Ask(new StopCampaign("written off"), AskCancellation());
-        await AwaitAnswers("b3", "Started", "Delivered");
+        await AwaitAnswers("b3", "Delivered");
 
         // The cancel finished the campaign, so the payment finds it closed.
         await bill.Ask(new PayBill(), AskCancellation());
-        await AwaitAnswers("b3", "Started", "Delivered", "AlreadyFinished`1");
+        await AwaitAnswers("b3", "Delivered", "AlreadyFinished`1");
     }
 }
 

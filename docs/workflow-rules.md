@@ -10,7 +10,7 @@ Each rule is one sentence. The reason follows it. The page [Workflows](workflows
 
 **In `Decide`, take the time from `ctx.Now`.** Do not read the clock yourself. Anything else a decision needs must arrive as a fact. Then the decision is a function of the state, the fact and the context, and a plain call can test it.
 
-**Register a handler for every effect type.** Work with no registered handler gets no answer. The workflow receives the give-up fact with the reason `Failed`, and its `Error` names the `IEffectHandler` to register. An error is logged as well, because a missing handler is a deployment mistake.
+**Register a handler for every effect type.** Work with no registered handler gets no answer. The workflow receives the give-up fact with the reason `Failed`, and its `Error` names the `AddEffectHandler<...>` call to add. An error is logged as well, because a missing handler is a deployment mistake.
 
 **Return an expected failure as a fact.** A declined card is not an error. A handler that throws gives the workflow the give-up fact, which says only that there is no answer. A handler that returns `Declined` lets the table decide with full knowledge.
 

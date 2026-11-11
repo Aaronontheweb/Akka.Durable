@@ -225,10 +225,20 @@ public class WorkflowEngineSpecs
 
     // ---- Recovery ----
 
+    /// <summary>What the workflow host does after recovering from <paramref name="history"/>.</summary>
+    private static DeciderOutcome<WfState, WfCommand, WfEvent> Recovered(
+        EntityDefinition<WfState, WfCommand, WfEvent> definition, params WfEvent[] history)
+    {
+        var id = new EntityId("test-entity");
+        var state = history.Aggregate(definition.InitialState(id), definition.Evolve);
+        var context = new DecisionContext<WfState, WfCommand, WfEvent>(id, definition.TypeName, Now);
+        return new DeciderOutcome<WfState, WfCommand, WfEvent>(definition, state, definition.AfterRecovery!(state, context));
+    }
+
     [Fact]
     public async Task Recovery_gives_up_on_work_that_has_no_answer()
     {
-        var outcome = Scenario().Given(Started()).Resumed();
+        var outcome = Recovered(Entity, Started());
 
         var effect = Assert.Single(IssuedWork(outcome));
         Assert.Equal(new InterruptedWork(new ReserveStock("o1")), effect.Effect);
@@ -244,19 +254,15 @@ public class WorkflowEngineSpecs
         var paired = new WorkflowEntity<string, string, string, string>(PairedWork.Definition).Compile();
 
         // Neither piece has an answer.
-        var neither = DeciderScenario.For(paired).At(Now)
-            .Given(new WfStarted("go", "pair", Now))
-            .Resumed();
+        var neither = Recovered(paired, new WfStarted("go", "pair", Now));
         Assert.Equal<object>(
             [new InterruptedWork(new PairedWork.Step("first")), new InterruptedWork(new PairedWork.Step("second"))],
             IssuedWork(neither).Select(e => e.Effect));
 
         // The first piece answered; only the second is given up on.
-        var second = DeciderScenario.For(paired).At(Now)
-            .Given(
-                new WfStarted("go", "pair", Now),
-                new WfFactRecorded("first done", 0, Now, new WfKept(), FromHeld: false))
-            .Resumed();
+        var second = Recovered(paired,
+            new WfStarted("go", "pair", Now),
+            new WfFactRecorded("first done", 0, Now, new WfKept(), FromHeld: false));
         Assert.Equal<object>(
             [new InterruptedWork(new PairedWork.Step("second"))],
             IssuedWork(second).Select(e => e.Effect));
@@ -266,7 +272,7 @@ public class WorkflowEngineSpecs
     [Fact]
     public void Recovery_issues_nothing_for_a_running_state_whose_work_is_settled()
     {
-        var outcome = Scenario().Given(WaitingForAPerson()).Resumed();
+        var outcome = Recovered(Entity, WaitingForAPerson());
 
         Assert.Empty(outcome.Effects);
     }
@@ -274,7 +280,7 @@ public class WorkflowEngineSpecs
     [Fact]
     public void Recovery_issues_nothing_for_a_workflow_that_is_not_started()
     {
-        var outcome = Scenario().Resumed();
+        var outcome = Recovered(Entity);
 
         Assert.Empty(outcome.Effects);
     }
@@ -282,7 +288,7 @@ public class WorkflowEngineSpecs
     [Fact]
     public void Recovery_issues_nothing_for_a_workflow_that_has_finished()
     {
-        var outcome = Scenario().Given(Finished()).Resumed();
+        var outcome = Recovered(Entity, Finished());
 
         Assert.IsType<WfFinished>(Finished().Aggregate(Entity.InitialState(new EntityId("o1")), Entity.Evolve).Value);
         Assert.Empty(outcome.Effects);

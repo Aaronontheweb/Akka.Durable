@@ -30,13 +30,6 @@ public sealed record IssueBill([property: AkkaField(0)] DateTimeOffset DueAt) : 
     public BillingCommand ToCommand() => new(this);
 }
 
-/// <summary>Issues the bill and starts its campaign, and wants the start's answer.</summary>
-[AkkaSerializable(Manifest = "billing-issue-watched-v1")]
-public sealed record IssueBillWatched([property: AkkaField(0)] DateTimeOffset DueAt) : IBillingProtocol, IReplies<BillingCommand, BillingAck>
-{
-    public BillingCommand ToCommand() => new(this);
-}
-
 /// <summary>Records a payment and tells the campaign.</summary>
 [AkkaSerializable(Manifest = "billing-pay-v1", AllowEmpty = true)]
 public sealed record PayBill : IBillingProtocol, IReplies<BillingCommand, BillingAck>
@@ -65,7 +58,7 @@ public sealed record CampaignUnreachable([property: AkkaField(0)] GaveUpReason R
 
 [AkkaSerializable(Manifest = "billing-command-v1")]
 public readonly union BillingCommand(
-    IssueBill, IssueBillWatched, PayBill, StopCampaign, CrashBilling, CampaignAnswered, CampaignUnreachable) : IBillingProtocol;
+    IssueBill, PayBill, StopCampaign, CrashBilling, CampaignAnswered, CampaignUnreachable) : IBillingProtocol;
 
 // Events
 [AkkaSerializable(Manifest = "billing-issued-v1", AllowEmpty = true)]
@@ -104,7 +97,9 @@ public static class Billing
     public static readonly EntityDefinition<BillingState, BillingCommand, BillingEvent> Definition =
         new EntityDefinition<BillingState, BillingCommand, BillingEvent>(
                 TypeName, _ => new BillingState(false, []), Decide, Evolve)
-            .Uses(Campaign.Definition);
+            .Uses(Campaign.Definition,
+                told: answer => new CampaignAnswered(answer.Value!.GetType().Name),
+                gaveUp: failure => new CampaignUnreachable(failure.Reason));
 
     public static Decision<BillingCommand, BillingEvent> Decide(BillingState state, BillingCommand command, BillingContext ctx) =>
         command switch
@@ -113,22 +108,12 @@ public static class Billing
                 .Start(Campaign.Definition, CampaignOf(ctx.EntityId), InputOf(ctx.EntityId, c.DueAt))
                 .Reply(c, new BillingAck()),
 
-            IssueBillWatched c => ctx.Persist(new BillIssued())
-                .Start(Campaign.Definition, CampaignOf(ctx.EntityId), InputOf(ctx.EntityId, c.DueAt),
-                    then: answer => new CampaignAnswered(answer.Value!.GetType().Name),
-                    gaveUp: failure => new CampaignUnreachable(failure.Reason))
-                .Reply(c, new BillingAck()),
-
             PayBill c => ctx.Persist(new BillPaid())
-                .Notify(Campaign.Definition, CampaignOf(ctx.EntityId), new Paid(),
-                    then: answer => new CampaignAnswered(answer.Value!.GetType().Name),
-                    gaveUp: failure => new CampaignUnreachable(failure.Reason))
+                .Notify(Campaign.Definition, CampaignOf(ctx.EntityId), new Paid())
                 .Reply(c, new BillingAck()),
 
             StopCampaign c => ctx.None()
-                .Cancel(Campaign.Definition, CampaignOf(ctx.EntityId), c.Reason, "billing",
-                    then: answer => new CampaignAnswered(answer.Value!.GetType().Name),
-                    gaveUp: failure => new CampaignUnreachable(failure.Reason))
+                .Cancel(Campaign.Definition, CampaignOf(ctx.EntityId), c.Reason, "billing")
                 .Reply(c, new BillingAck()),
 
             CrashBilling => throw new InvalidOperationException("The billing entity was asked to crash."),

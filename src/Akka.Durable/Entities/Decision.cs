@@ -11,27 +11,35 @@ public sealed record Ignored;
 public sealed record NotHandled;
 public sealed record Stashed;
 
-// Built-in, in-process effects. None of these are journaled: an entity that must survive a crash
-// with an effect in flight records that fact in its state and re-derives the effect in Resume.
+// Built-in, in-process effects. Only an Execute that a decision issues is journaled. The others are not: an entity
+// that must not lose one keeps that fact in its state.
 public sealed record ReplyEffect(object Response);
 public sealed record TellEffect(ICanTell Recipient, object Message);
 
 /// <summary>
-/// A call to the <see cref="IEffectHandler{TEffect,TOutcome}"/> registered for <see cref="Effect"/>'s type.
-/// The handler's result comes back to the entity as one of its own commands or events.
+/// A call to the effect handler registered for <see cref="Effect"/>'s type. The handler's answer, or the effect's
+/// give-up, comes back to the entity as one of its own commands.
 /// </summary>
 /// <remarks>
-/// The effect is plain data: assert on it, log it, store it in state. The handler is resolved from a fresh
-/// DI scope when the effect runs, so <c>Decide</c> never sees a service. The entity does not wait for the
-/// outcome; it keeps handling commands and the outcome arrives as a message.
+/// <para>The effect is plain data: assert on it, log it. The handler is resolved from a fresh DI scope when the effect
+/// runs, so <c>Decide</c> never sees a service. The entity does not wait for the answer; it keeps handling commands and
+/// the answer arrives as a message.</para>
+/// <para>An effect a decision issues with <c>Execute</c> is journaled in the same write as the decision's events.</para>
 /// </remarks>
 public sealed record ExecuteEffect(object Effect)
 {
     // Bound when the effect is built, where TEffect is known, so no reflection is needed to find the handler.
+    // Null for a recorded effect: its handler is found by its route, also after a restart.
     internal Func<IServiceProvider, Func<CancellationToken, Task<object?>>>? Resolve { get; init; }
 
     // Turns a handler failure or timeout into an outcome. Without it the failure is logged and dropped.
     internal Func<Exception, object?>? Failed { get; init; }
+
+    /// <summary>
+    /// Journaled with the decision that issues it, attempted once, and answered or given up. True for the effect of
+    /// <c>Handled.Execute</c>. The library's own calls, and a workflow's work, are not recorded this way.
+    /// </summary>
+    internal bool Recorded { get; init; }
 
     public bool Equals(ExecuteEffect? other) => other is not null && Equals(Effect, other.Effect);
 
@@ -139,16 +147,26 @@ public sealed record Handled<TCommand, TEvent>(
     }
 
     /// <summary>
-    /// Runs <paramref name="effect"/> through its registered <see cref="IEffectHandler{TEffect,TOutcome}"/>.
-    /// The handler's result returns to the entity as a command, and <c>Decide</c> decides what it means.
+    /// Issues <paramref name="effect"/> to the handler registered for its type with <c>AddEffectHandler</c>. The
+    /// effect is journaled in the same write as this decision's events, and attempted after the write.
     /// </summary>
-    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull
+    /// <remarks>
+    /// <para>Without a retry policy on the handler, the effect is attempted once. With one, it is attempted again after
+    /// a failure, a time-out or a restart, until an attempt is acknowledged or the policy runs out.</para>
+    /// <para><c>Decide</c> then gets exactly one of two things, as a command: the handler's answer, or the effect's
+    /// give-up (<see cref="IEffect{TCommand}.GaveUp"/>) with <see cref="GaveUpReason.Failed"/>,
+    /// <see cref="GaveUpReason.TimedOut"/>, <see cref="GaveUpReason.Interrupted"/> (without a policy, after a restart) or
+    /// <see cref="GaveUpReason.RetriesExhausted"/>. A handler with no answer (<see cref="IEffectHandler{TEffect}"/>) is
+    /// acknowledged when it returns, and <c>Decide</c> gets nothing.</para>
+    /// <para>Before the first write that leaves an effect pending, the entity stores a reminder that wakes it after a
+    /// crash. If the reminder cannot be stored, nothing is written and the command fails.</para>
+    /// <para>The effect type needs a serializer and a handler registered with <c>AddEffectHandler</c>. Without a
+    /// handler the effect is refused before the write, and the entity restarts.</para>
+    /// </remarks>
+    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull, IEffect<TCommand>
     {
         ArgumentNullException.ThrowIfNull(effect);
-        return Add(new ExecuteEffect(effect)
-        {
-            Resolve = services => EffectHandlers.Resolve<TEffect, TCommand>(services, effect),
-        });
+        return Add(new ExecuteEffect(effect) { Recorded = true });
     }
 
     /// <summary>
@@ -170,16 +188,15 @@ public sealed record Handled<TCommand, TEvent>(
 
     /// <summary>
     /// Starts the workflow <paramref name="id"/> of the workflow type <paramref name="workflow"/> with
-    /// <paramref name="input"/>, after this decision's events are journaled. The library completes the start.
+    /// <paramref name="input"/>. The start is journaled in the same write as this decision's events, and the library
+    /// delivers it until the workflow answers.
     /// </summary>
     /// <remarks>
     /// <para>The entity's definition must name the workflow type with <c>Uses</c>.</para>
-    /// <para>Until the workflow answers, a durable reminder keeps the start. If the start gets no answer, because
-    /// the call failed, timed out or the process stopped, the reminder issues it again after
-    /// <see cref="EntityOptions.EffectTimeout"/>, also after a restart. The repeats stop when the workflow answers
+    /// <para>The library attempts the start after the write, and again after a failure, a time-out or a restart, waiting
+    /// 1 second, then twice as long each time, up to 1 minute. It stops when the workflow answers
     /// <see cref="Started"/>, <see cref="AlreadyRunning"/> or <see cref="AlreadyFinished{TOutcome}"/>. A start is
-    /// addressed by id, so a repeat is safe. The answer is not delivered to the entity: use the overload with
-    /// <c>then</c> for that.</para>
+    /// addressed by id, so a repeat is safe. The answer is not delivered to the entity.</para>
     /// </remarks>
     public Handled<TCommand, TEvent> Start<TInput, TState, TFact, TOutcome>(
         WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TInput input)
@@ -190,65 +207,26 @@ public sealed record Handled<TCommand, TEvent>(
     {
         ArgumentNullException.ThrowIfNull(workflow);
         ArgumentNullException.ThrowIfNull(input);
-        return Add(WorkflowCalls.Start<TInput, TState, TFact, TOutcome>(workflow.TypeName, id, input, then: null, gaveUp: null));
+        return Add(WorkflowCalls.Start<TInput, TState, TFact, TOutcome>(workflow.TypeName, id, input));
     }
 
     /// <summary>
-    /// Starts the workflow <paramref name="id"/> like the overload without <c>then</c>, and delivers the answer as one
-    /// of this entity's commands.
+    /// Sends <paramref name="fact"/> to the workflow <paramref name="id"/>. The call is journaled in the same write as
+    /// this decision's events and attempted once.
     /// </summary>
-    /// <param name="workflow">The workflow type's definition. The entity's definition must name it with <c>Uses</c>.</param>
-    /// <param name="id">The workflow's id. Derive it from this entity's id.</param>
-    /// <param name="input">The record the workflow starts with.</param>
-    /// <param name="then">Turns the workflow's answer into one of this entity's commands.</param>
-    /// <param name="gaveUp">
-    /// Turns a start that got no answer, because it failed or ran past <see cref="EntityOptions.EffectTimeout"/>, into
-    /// one of this entity's commands. The library then stops repeating the start: the entity decides, and it may start
-    /// again.
+    /// <param name="workflow">
+    /// The workflow type's definition. The entity's definition must name it with <c>Uses(workflow, told, gaveUp)</c>,
+    /// which says how the answer and the give-up become this entity's commands.
     /// </param>
-    /// <remarks>
-    /// After a restart the library still issues a start that was not answered, but the functions belong to the
-    /// incarnation that issued it, so the answer is not delivered. An entity that needs the answer after a restart
-    /// keeps "waiting for the start" in its state and issues this start again from <c>Resume</c>.
-    /// </remarks>
-    public Handled<TCommand, TEvent> Start<TInput, TState, TFact, TOutcome>(
-        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TInput input,
-        Func<StartResult<TOutcome>, TCommand> then, Func<WorkGaveUp, TCommand> gaveUp)
-        where TInput : notnull
-        where TState : notnull
-        where TFact : notnull
-        where TOutcome : notnull
-    {
-        ArgumentNullException.ThrowIfNull(workflow);
-        ArgumentNullException.ThrowIfNull(input);
-        ArgumentNullException.ThrowIfNull(then);
-        ArgumentNullException.ThrowIfNull(gaveUp);
-        return Add(WorkflowCalls.Start<TInput, TState, TFact, TOutcome>(
-            workflow.TypeName, id, input, answer => then(answer), failure => gaveUp(failure)));
-    }
-
-    /// <summary>
-    /// Sends <paramref name="fact"/> to the workflow <paramref name="id"/>, after this decision's events are journaled.
-    /// The answer, or the give-up, becomes one of this entity's commands.
-    /// </summary>
-    /// <param name="workflow">The workflow type's definition. The entity's definition must name it with <c>Uses</c>.</param>
     /// <param name="id">The workflow's id.</param>
     /// <param name="fact">The fact. The compiler checks it is of the workflow's fact type.</param>
-    /// <param name="then">
-    /// Turns the answer into one of this entity's commands: <see cref="Delivered"/>, <see cref="Held"/>,
-    /// <see cref="WorkflowNotStarted"/> or <see cref="AlreadyFinished{TOutcome}"/>.
-    /// </param>
-    /// <param name="gaveUp">
-    /// Turns a call that got no answer, because it failed or ran past <see cref="EntityOptions.EffectTimeout"/>, into one
-    /// of this entity's commands. The fact may have been journaled.
-    /// </param>
     /// <remarks>
-    /// The fact is sent once. The library does not repeat it, also not after a restart: a repeated fact would be
-    /// journaled twice. To send it again, the entity decides so.
+    /// The library does not send the fact again, also not after a restart: a repeated fact would be journaled twice.
+    /// After a crash, <c>Decide</c> gets the give-up with <see cref="GaveUpReason.Interrupted"/>, and decides whether to
+    /// send it again.
     /// </remarks>
     public Handled<TCommand, TEvent> Notify<TInput, TState, TFact, TOutcome>(
-        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TFact fact,
-        Func<DeliveryResult<TOutcome>, TCommand> then, Func<WorkGaveUp, TCommand> gaveUp)
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, TFact fact)
         where TInput : notnull
         where TState : notnull
         where TFact : notnull
@@ -256,30 +234,25 @@ public sealed record Handled<TCommand, TEvent>(
     {
         ArgumentNullException.ThrowIfNull(workflow);
         ArgumentNullException.ThrowIfNull(fact);
-        ArgumentNullException.ThrowIfNull(then);
-        ArgumentNullException.ThrowIfNull(gaveUp);
-        return Add(WorkflowCalls.Notify<TInput, TState, TFact, TOutcome>(
-            workflow.TypeName, id, fact, answer => then(answer), failure => gaveUp(failure)));
+        return Add(WorkflowCalls.Notify<TInput, TState, TFact, TOutcome>(workflow.TypeName, id, fact));
     }
 
     /// <summary>
-    /// Asks the workflow <paramref name="id"/> to stop, after this decision's events are journaled. The answer, or the
-    /// give-up, becomes one of this entity's commands.
+    /// Asks the workflow <paramref name="id"/> to stop. The call is journaled in the same write as this decision's
+    /// events and attempted once, like <c>Notify</c>.
     /// </summary>
-    /// <param name="workflow">The workflow type's definition. The entity's definition must name it with <c>Uses</c>.</param>
+    /// <param name="workflow">
+    /// The workflow type's definition. The entity's definition must name it with <c>Uses(workflow, told, gaveUp)</c>.
+    /// </param>
     /// <param name="id">The workflow's id.</param>
     /// <param name="reason">Why the workflow should stop. Required, and not empty.</param>
     /// <param name="by">
     /// Who or what asked. Required, and not empty. Use an id, not a person's name or e-mail address: the value goes
     /// into the journal and the log.
     /// </param>
-    /// <param name="then">Turns the answer into one of this entity's commands.</param>
-    /// <param name="gaveUp">Turns a call that got no answer into one of this entity's commands.</param>
-    /// <remarks>Sent once, like <c>Notify</c>. The workflow's table decides what the cancel means.</remarks>
     /// <exception cref="ArgumentException"><paramref name="reason"/> or <paramref name="by"/> is null or empty.</exception>
     public Handled<TCommand, TEvent> Cancel<TInput, TState, TFact, TOutcome>(
-        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, string reason, string by,
-        Func<DeliveryResult<TOutcome>, TCommand> then, Func<WorkGaveUp, TCommand> gaveUp)
+        WorkflowDefinition<TInput, TState, TFact, TOutcome> workflow, WorkflowId id, string reason, string by)
         where TInput : notnull
         where TState : notnull
         where TFact : notnull
@@ -288,10 +261,7 @@ public sealed record Handled<TCommand, TEvent>(
         ArgumentNullException.ThrowIfNull(workflow);
         ArgumentException.ThrowIfNullOrEmpty(reason);
         ArgumentException.ThrowIfNullOrEmpty(by);
-        ArgumentNullException.ThrowIfNull(then);
-        ArgumentNullException.ThrowIfNull(gaveUp);
-        return Add(WorkflowCalls.Cancel<TInput, TState, TFact, TOutcome>(
-            workflow.TypeName, id, reason, by, answer => then(answer), failure => gaveUp(failure)));
+        return Add(WorkflowCalls.Cancel<TInput, TState, TFact, TOutcome>(workflow.TypeName, id, reason, by));
     }
 
     public Handled<TCommand, TEvent> Tell<TMessage>(
@@ -315,20 +285,36 @@ public sealed record Handled<TCommand, TEvent>(
     // Durable reminders via Akka.Reminders, scoped to this entity. Delivery is
     // at-least-once, so deciders must tolerate duplicate occurrences. Scheduling
     // with an existing key overwrites that reminder.
+    /// <exception cref="ArgumentException"><paramref name="key"/> is empty or starts with <c>durable-</c>.</exception>
     public Handled<TCommand, TEvent> Schedule(
         string key,
         TimeSpan delay,
         TCommand message) =>
-        Add(new ScheduleEffect(key, delay, message!));
+        Add(new ScheduleEffect(OwnKey(key), delay, message!));
 
+    /// <exception cref="ArgumentException"><paramref name="key"/> is empty or starts with <c>durable-</c>.</exception>
     public Handled<TCommand, TEvent> Schedule(string key,
         TimeSpan initialDelay,
         TimeSpan interval,
         TCommand message) =>
-        Add(new ScheduleRecurringEffect(key, initialDelay, interval, message!));
+        Add(new ScheduleRecurringEffect(OwnKey(key), initialDelay, interval, message!));
 
+    /// <exception cref="ArgumentException"><paramref name="key"/> is empty or starts with <c>durable-</c>.</exception>
     public Handled<TCommand, TEvent> CancelTimer(string key) =>
-        Add(new CancelTimerEffect(key));
+        Add(new CancelTimerEffect(OwnKey(key)));
+
+    /// <summary>The library keeps its own reminders under keys that start with <c>durable-</c>.</summary>
+    private static string OwnKey(string key, [System.Runtime.CompilerServices.CallerArgumentExpression(nameof(key))] string? name = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(key, name);
+        if (key.StartsWith(ReservedKeyPrefix, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"The timer key [{key}] starts with \"{ReservedKeyPrefix}\", which Akka.Durable keeps for its own reminders. " +
+                "Choose another key.", name);
+        return key;
+    }
+
+    internal const string ReservedKeyPrefix = "durable-";
 
     public Handled<TCommand, TEvent> UnstashAll() =>
         Add(new UnstashAllEffect());
@@ -361,29 +347,18 @@ public static class Decisions
 }
 
 /// <summary>
-/// No <c>IEffectHandler</c> is registered for an effect. A deployment mistake, not a failure of the handler, so
-/// the logging site tells it apart by type and says it loudly.
+/// No effect handler is registered for an effect. A deployment mistake, not a failure of the handler, so the logging
+/// site tells it apart by type and says it loudly.
 /// </summary>
-internal sealed class MissingEffectHandlerException(Type effectType, Type resultType) : InvalidOperationException(
-    $"No effect handler is registered for {effectType.Name}. " +
-    $"Register an IEffectHandler<{effectType.Name}, {resultType.Name}>.")
+/// <param name="effectType">The effect's type.</param>
+/// <param name="outcomeType">The answer the caller expects: the entity's command type, or the workflow's fact type.</param>
+internal sealed class MissingEffectHandlerException(Type effectType, Type outcomeType) : InvalidOperationException(
+    $"No effect handler is registered for {effectType.Name}. Register one at startup with " +
+    $"services.{Registration(effectType, outcomeType)}.")
 {
     internal string EffectType { get; } = effectType.Name;
-    internal string HandlerInterface { get; } = $"IEffectHandler<{effectType.Name}, {resultType.Name}>";
-}
+    internal string HandlerInterface { get; } = Registration(effectType, outcomeType);
 
-internal static class EffectHandlers
-{
-    /// <summary>
-    /// Finds the one handler registered for <typeparamref name="TEffect"/> and returns a call to it. The
-    /// handler returns one of the entity's commands, which <c>Decide</c> then decides on.
-    /// </summary>
-    internal static Func<CancellationToken, Task<object?>> Resolve<TEffect, TCommand>(
-        IServiceProvider services, TEffect effect) where TEffect : notnull
-    {
-        var handler = services.GetService<IEffectHandler<TEffect, TCommand>>()
-            ?? throw new MissingEffectHandlerException(typeof(TEffect), typeof(TCommand));
-
-        return async ct => await handler.HandleAsync(effect, ct);
-    }
+    private static string Registration(Type effect, Type outcome) =>
+        $"AddEffectHandler<{effect.Name}, {outcome.Name}, YourHandler>()";
 }

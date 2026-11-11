@@ -14,8 +14,8 @@ public readonly record struct WorkflowTypeName(string Value);
 public enum GaveUpReason
 {
     /// <summary>
-    /// The handler threw, or no handler is registered for the effect. For a send: the entity type is not
-    /// hosted, or the send failed.
+    /// The handler threw, or answered with nothing, or no handler is registered for the effect. For a send: the entity
+    /// type is not hosted, or the send failed.
     /// </summary>
     Failed = 0,
 
@@ -26,25 +26,34 @@ public enum GaveUpReason
     TimedOut = 1,
 
     /// <summary>
-    /// The workflow restarted after it entered the state and before the answer arrived. The work may have
-    /// run, may have run in part, or may not have run.
+    /// The process stopped, or the workflow or entity restarted, after the work was issued and before its answer
+    /// was journaled. The work may have run, may have run in part, or may not have run. Without a retry policy it is
+    /// not run again.
     /// </summary>
     Interrupted = 2,
+
+    /// <summary>
+    /// The handler's retry policy ran out before an attempt was acknowledged. <see cref="WorkGaveUp.Error"/> holds the
+    /// last failure, and <see cref="WorkGaveUp.Attempts"/> the number of attempts.
+    /// </summary>
+    RetriesExhausted = 3,
 }
 
 /// <summary>
-/// The notice that a piece of work got no answer. The workflow's <c>GaveUp</c> function turns it into one of
-/// the workflow's own facts, and the fact table decides what it means.
+/// The notice that a piece of work got no answer. A workflow's <c>GaveUp</c> function turns it into one of the
+/// workflow's own facts. An entity's effect turns it into one of the entity's commands with
+/// <see cref="IEffect{TCommand}.GaveUp"/>.
 /// </summary>
 /// <param name="Work">The effect record that was issued.</param>
 /// <param name="Reason">Why there is no answer.</param>
 /// <param name="Error">The failure's message, when there was one.</param>
+/// <param name="Attempts">How many attempts were made: 1 without a retry policy.</param>
 /// <remarks>
 /// No answer does not mean the work did not happen: a charge can go through and its reply be lost. Work is
-/// not issued again on its own, so the table chooses: ask again with the same key, look the result up, wait
+/// not issued again on its own, so <c>Decide</c> chooses: ask again with the same key, look the result up, wait
 /// for the service to report it, or ask a person.
 /// </remarks>
-public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error = null)
+public sealed record WorkGaveUp(object Work, GaveUpReason Reason, string? Error = null, int Attempts = 1)
 {
     /// <summary>
     /// The name of the effect type, for a message or a log line. For a send to an entity, the name of the
@@ -169,7 +178,7 @@ public sealed record ExecuteWork<TFact> : Work<TFact>
     internal override bool IsWait => false;
 
     // Bound when the work is built, where TEffect is known, so no reflection is needed to find the handler.
-    internal Func<IServiceProvider, Func<CancellationToken, Task<TFact>>>? Resolve { get; init; }
+    internal Func<IServiceProvider, EffectDelivery, Func<CancellationToken, Task<TFact>>>? Resolve { get; init; }
 
     public bool Equals(ExecuteWork<TFact>? other) => other is not null && Equals(Effect, other.Effect);
 
@@ -245,7 +254,10 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
     public ExecuteWork<TFact> Execute<TEffect>(TEffect effect) where TEffect : notnull
     {
         ArgumentNullException.ThrowIfNull(effect);
-        return new ExecuteWork<TFact>(effect) { Resolve = services => WorkHandlers.Resolve<TEffect, TFact>(services, effect) };
+        return new ExecuteWork<TFact>(effect)
+        {
+            Resolve = (services, delivery) => WorkHandlers.Resolve<TEffect, TFact>(services, effect, delivery),
+        };
     }
 
     /// <summary>
@@ -269,7 +281,7 @@ public readonly record struct WorkContext<TInput, TFact>(WorkflowId Id, TInput I
         ArgumentNullException.ThrowIfNull(then);
         return new ExecuteWork<TFact>(new SendEffect(typeof(TCommand), target, command))
         {
-            Resolve = services => async ct =>
+            Resolve = (services, _) => async ct =>
                 then(await WorkHandlers.Entity<TCommand>(services, target, command).Ask(command, ct)),
         };
     }
@@ -365,14 +377,15 @@ internal static class WorkHandlers
     /// Returns a call to the handler registered for <typeparamref name="TEffect"/>. A missing handler is not a
     /// crash: the call fails, and the workflow receives the give-up fact like any other work without an answer.
     /// </summary>
-    internal static Func<CancellationToken, Task<TFact>> Resolve<TEffect, TFact>(IServiceProvider services, TEffect effect)
+    internal static Func<CancellationToken, Task<TFact>> Resolve<TEffect, TFact>(
+        IServiceProvider services, TEffect effect, EffectDelivery delivery)
         where TEffect : notnull
     {
         var handler = services.GetService<IEffectHandler<TEffect, TFact>>();
         if (handler is null)
             return _ => Task.FromException<TFact>(new MissingEffectHandlerException(typeof(TEffect), typeof(TFact)));
 
-        return ct => handler.HandleAsync(effect, ct);
+        return ct => handler.HandleAsync(effect, delivery, ct);
     }
 
     /// <summary>
