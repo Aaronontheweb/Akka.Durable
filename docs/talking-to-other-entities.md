@@ -9,7 +9,7 @@ public sealed record InvoiceReplied(IssueReply Reply);      // a CheckoutCommand
 
 public static readonly EntityDefinition<CheckoutState, CheckoutCommand, CheckoutEvent> Definition =
     new EntityDefinition<CheckoutState, CheckoutCommand, CheckoutEvent>(
-            new EntityTypeName("checkouts"), _ => new NotStarted(), Decide, Evolve) { Resume = Resume }
+            new EntityTypeName("checkouts"), _ => new NotStarted(), Decide, Evolve)
         .Accepts<IssueReply>(reply => new InvoiceReplied(reply));
 
 (NotStarted, StartCheckout c) => ctx.Persist(new Started(c, InvoiceFor(ctx.EntityId)))
@@ -23,7 +23,9 @@ public static readonly EntityDefinition<CheckoutState, CheckoutCommand, Checkout
     .CancelTimer("deadline").Reply(a.Request, new CheckoutFailed(r.Reason)).Stop(),
 ```
 
-Name the target's command type explicitly in `Send<InvoiceCommand>(...)`: the compiler would otherwise infer the case type, which no entity type is registered under. The target's entity type must be registered with `WithDurableEntity` in this actor system; in a cluster the entity itself can run on any node. The reply is handled on behalf of the command that sent it, so `Reply(a.Request, ...)` reaches the caller that started the checkout. The `Accepts` table lives on the definition rather than on the send so that a reply to a command re-sent by `Resume` is wrapped the same way after a restart.
+Name the target's command type explicitly in `Send<InvoiceCommand>(...)`: the compiler would otherwise infer the case type, which no entity type is registered under. The target's entity type must be registered with `WithDurableEntity` in this actor system; in a cluster the entity itself can run on any node. The reply is handled on behalf of the command that sent it, so `Reply(a.Request, ...)` reaches the caller that started the checkout. The `Accepts` table lives on the definition rather than on the send, so that a reply that arrives after a restart is wrapped the same way.
+
+A `Send` is not recorded. If the process stops before the command is sent, it is lost. To tell another entity a fact that must not be lost, write an effect handler that sends it and issue it with `Execute`, with a retry policy if a repeat is safe. See [Effects](effects.md).
 
 There is no timeout on a send. The entity's own reminder is its deadline, as above. A message of a type the definition does not accept is unhandled, as before.
 

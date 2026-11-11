@@ -38,7 +38,7 @@ services.AddEffectHandler<MailReminder, InvoiceCommand, MailReminderHandler>();
 This is what `Execute` promises:
 
 - **It is recorded.** The effect is journaled in the same write as the decision's events. Both are stored, or neither is.
-- **It is attempted once.** The handler runs after the write, in a fresh DI scope, within `EntityOptions.EffectTimeout`. The entity does not wait for it: it keeps handling commands.
+- **Without a retry policy, it is attempted once.** The handler runs after the write, in a fresh DI scope, within `EntityOptions.EffectTimeout`. The entity does not wait for it: it keeps handling commands. With a policy, see [Retry policies](#retry-policies-the-outbox).
 - **`Decide` hears how it ended.** It gets exactly one command: the handler's answer, or the effect's give-up. The give-up comes from `GaveUp` on the effect, with a reason:
 
   | Reason | When |
@@ -48,7 +48,7 @@ This is what `Execute` promises:
   | `Interrupted` | The process stopped, or the entity restarted, after the effect was journaled and before its answer was. |
 
   The answer or the give-up is journaled in the same write as the decision on it. After a crash, the next incarnation decides the `Interrupted` give-up before any other command.
-- **It is never run again by the library.** A give-up does not mean the work did not happen: a mail can go out and its answer be lost. `Decide` chooses what to do: ask again, look the result up, or ask a person. To ask again, issue a new `Execute` from the arm for the give-up.
+- **Without a policy, the library never runs it again.** A give-up does not mean the work did not happen: a mail can go out and its answer be lost. `Decide` chooses what to do: ask again, look the result up, or ask a person. To ask again, issue a new `Execute` from the arm for the give-up.
 
 A handler that has nothing to tell `Decide` implements `IEffectHandler<TEffect>`. It is acknowledged when it returns, and `Decide` gets nothing. A failure still reaches `Decide` as the give-up:
 
@@ -72,6 +72,55 @@ The rules for setting it up are checked early:
 - An effect type with no handler registered at all is refused at its first `Execute`, before anything is written. The entity logs an error that names the `AddEffectHandler<...>` call to add, and restarts.
 
 [Effects with outcomes](effects-with-outcomes.md) shows the two halves of a decision around an `Execute` in detail.
+
+## Retry policies: the outbox
+
+A handler registered with a retry policy is run again until one attempt is acknowledged, or until the policy runs out. This is at least once. An attempt can do its work and lose its answer, so the handler can run more than once for one effect: it must be safe to repeat. Registering a handler with a policy is your statement that it is.
+
+```csharp
+services.AddEffectHandler<PublishPayment, PublishPaymentHandler>(
+    Retry.UntilAcknowledged(first: TimeSpan.FromSeconds(1), max: TimeSpan.FromMinutes(5)));
+
+services.AddEffectHandler<ChargeCard, InvoiceCommand, ChargeCardHandler>(
+    Retry.Backoff(first: TimeSpan.FromSeconds(2), max: TimeSpan.FromMinutes(1), attempts: 6));
+```
+
+| Policy | Wait before attempt n+1 | Ends |
+|---|---|---|
+| `Retry.Every(every, attempts)` | `every` | after `attempts` |
+| `Retry.Backoff(first, max, attempts)` | `min(first × 2^(n−1), max)` | after `attempts` |
+| `Retry.UntilAcknowledged(first, max)` | as `Backoff` | never |
+
+- `attempts` counts every attempt, the first included. It must be at least 2.
+- Waits must be positive, and `first` must not be greater than `max`. A value that is not valid throws `ArgumentOutOfRangeException` where you register the handler, which is at startup.
+- There are no defaults without numbers, no jitter and no filter on exceptions. A failed attempt is an exception, a time-out, or an answer with nothing in it. An answer is never retried, because a decline is an answer: to ask for a retry, throw.
+- The policy is written once for each effect type, where the handler is registered. `Execute(effect)` takes no policy, so `Decide` says nothing about delivery. For a different policy in another case, use a second effect type.
+- The policy is journaled with each effect, so a pending effect keeps the promise made when it was issued, also after a deployment.
+
+What the library does:
+
+- Each attempt after the first is journaled before it runs, so a restart does not reset the count.
+- While the entity runs, the wait between attempts is a timer. Between attempts the effect is not in flight: the entity handles other commands, and it can be passivated.
+- One durable reminder for each entity wakes it after a crash, a passivation or a shard move, so the next attempt happens without anyone sending it a message. It is stored before the write that leaves the first effect pending. If it cannot be stored, nothing is written and the command fails. It is removed when nothing is pending.
+- When a limited policy runs out, `Decide` gets the effect's give-up with `GaveUpReason.RetriesExhausted`. `WorkGaveUp.Attempts` says how many attempts were made, and `Error` holds the last failure.
+- An answer from an earlier attempt that arrives late is dropped. `Decide` gets one answer or one give-up for each effect.
+- `delivery.Id` is the same on every attempt. `delivery.Attempt` counts from 1.
+
+There is no order between effects. To do one thing after another, issue the second effect from the answer to the first.
+
+### Do not build it by hand
+
+Before the outbox, an entity that had to deliver a message kept delivery flags in its state, with a retry timer and an acknowledge command:
+
+```csharp
+// Do not do this.
+(Paid s, PaymentRecorded) => ctx.Persist(new LedgerPostingPending(s.Amount))
+    .Schedule("ledger-retry", TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1), new RetryLedgerPosting()),
+(Paid { LedgerPending: true } s, RetryLedgerPosting) => ctx.None().Run<ILedger>((ledger, ct) => ledger.PostAsync(s.Amount, ct)),
+(Paid, LedgerPostingAcknowledged) => ctx.Persist(new LedgerPostingDelivered()).CancelTimer("ledger-retry"),
+```
+
+The library already does this. Issue the effect with `Execute`, and register its handler with `Retry.UntilAcknowledged`.
 
 ## `Run`: cheap work you can lose
 
@@ -104,7 +153,9 @@ Use `Run` when nothing in the entity depends on the result and losing one is acc
 
 | | Recorded | Attempts | `Decide` gets |
 |---|---|---|---|
-| `Execute` | yes, with the decision's events | one | the answer, or a give-up: `Failed`, `TimedOut`, `Interrupted` |
+| `Execute`, handler without a policy | yes, with the decision's events | one | the answer, or a give-up: `Failed`, `TimedOut`, `Interrupted` |
+| `Execute`, handler with a policy (the outbox) | yes, with the decision's events | until acknowledged or the policy ends | the answer, or a give-up: `RetriesExhausted` |
+| `Start` of a workflow | yes, with the decision's events | until answered | nothing |
 | `Run` | no | one, best effort | nothing |
 | `Tell` | no | one, best effort | nothing |
 | `Send` | no | one, best effort | the reply, through `Accepts` |

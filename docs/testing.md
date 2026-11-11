@@ -41,9 +41,11 @@ DeciderScenario.For(Invoice.Definition)
     .ThenPersisted(new VerificationFailed("directory: Interrupted"));
 ```
 
-A handler is a plain class. `EffectDelivery` has a public constructor, so a test can call a handler twice with the same delivery and check that the second call changes nothing.
+A handler is a plain class. `EffectDelivery` has a public constructor, so a test can call a handler twice with the same delivery and check that the second call changes nothing. That is the test a handler registered with a retry policy needs.
 
-Calls to a workflow are effects too. `ThenStarted`, `ThenNotified` and `ThenCancelled` compare them by value, after `When` and after `Resumed()`. They name the workflow by its definition, like the decision does. `ThenStarted` matches a start with or without `then`:
+For a handler with a limited policy, test the end of the policy the same way: `.WhenGaveUp(effect, GaveUpReason.RetriesExhausted, attempts: 5)`.
+
+Calls to a workflow are effects too. `ThenStarted`, `ThenNotified` and `ThenCancelled` compare them by value. They name the workflow by its definition, like the decision does:
 
 ```csharp
 DeciderScenario.For(Invoice.Definition)
@@ -63,7 +65,7 @@ DeciderScenario.For(Invoice.Definition)
     .ThenCancelled(ReminderCampaign.Definition, new WorkflowId("reminders-test-entity"), "customer closed", "invoices");
 ```
 
-`When` and `Resumed()` fail the test when a decision calls a workflow type that the definition does not name with `Uses`. At run time that call would be refused with an error log.
+`When` fails the test when a decision calls a workflow type that the definition does not name with `Uses`, or notifies or cancels a workflow whose `Uses` has no `told` and `gaveUp`. At run time that call would be refused with an error log.
 
 The answer of a call is an ordinary command, so you test what it means with `When`, like any other command.
 

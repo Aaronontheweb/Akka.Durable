@@ -102,7 +102,7 @@ When the handler gets no answer, `Decide` gets the effect's give-up command inst
 - `TimedOut`: it ran longer than `EntityOptions.EffectTimeout` (30 seconds by default; zero or a negative value is refused at startup).
 - `Interrupted`: the process stopped, or the entity restarted, after the effect was journaled and before its answer was. The next incarnation decides it before any other command.
 
-The library never runs the effect again. A give-up does not mean the directory was not asked. `Decide` chooses what to do. The invoice turns every give-up into a rejection, so a caller can try again. An entity that wants to ask again issues the effect again from its arm:
+Without a retry policy on the handler, the library never runs the effect again. With one, it runs the handler again until an attempt is acknowledged, and `Decide` gets `RetriesExhausted` only when the policy runs out (see [Retry policies](effects.md#retry-policies-the-outbox)). A give-up does not mean the directory was not asked. `Decide` chooses what to do. The invoice turns every give-up into a rejection, so a caller can try again. An entity that wants to ask again issues the effect again from its arm:
 
 ```csharp
 public sealed record VerificationGaveUp(GaveUpReason Reason) : IInvoiceProtocol;   // a command case
@@ -128,4 +128,4 @@ Invoice.Definition with { Options = EntityOptions.Default with { EffectTimeout =
 
 ---
 
-Next: [Resuming after a restart](resuming-after-a-restart.md)
+Next: [Talking to other entities](talking-to-other-entities.md)

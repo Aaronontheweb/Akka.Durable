@@ -127,6 +127,18 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
 
 `Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`. The registry is keyed by command type, so each entity type must have its own command type.
 
+## You do not need to build an outbox. Akka.Durable has one.
+
+```csharp
+ctx.Persist(new PaymentRecorded(p.Amount)).Execute(new PublishPayment(ctx.EntityId, p.Amount));    // in Decide
+services.AddEffectHandler<PublishPayment, PublishPaymentHandler>(Retry.UntilAcknowledged(TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5)));
+public sealed class PublishPaymentHandler(IBus bus) : IEffectHandler<PublishPayment> { /* ... */ }
+```
+
+`PublishPayment` is recorded in the same journal write as `PaymentRecorded`, and its handler runs at least once, after a crash too, until it returns without throwing; it can run more than once, so it must be safe to repeat.
+
+See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) for the other retry policies, and for `Execute` without a policy, which is attempted once and tells `Decide` how it ended.
+
 ## Getting started
 
 Install the .NET 11 SDK pinned in `global.json`, then run:
@@ -151,9 +163,8 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | Page | What it covers |
 |---|---|
 | [State, commands, events, and replies](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md) | How to declare an entity's state, commands, events and replies, and what a decision can do. |
-| [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) | `Execute`, the normal way to do outside work, and the light forms `Run`, `Tell` and `Send`. |
+| [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) | `Execute`, the normal way to do outside work, retry policies (the outbox), and the light forms `Run`, `Tell` and `Send`. |
 | [Effects with outcomes](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects-with-outcomes.md) | Effect handlers, answers and give-ups, for work whose result the entity decides on. |
-| [Resuming after a restart](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/resuming-after-a-restart.md) | What happens to work that was in flight when the process stopped. |
 | [Talking to other entities](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/talking-to-other-entities.md) | `Send` and `Accepts`, for one entity that drives another. |
 | [Starting a workflow from an entity](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/starting-a-workflow-from-an-entity.md) | `Uses`, and `Start`, `Notify` and `Cancel` from a decision. |
 | [Serialization](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/serialization.md) | What is serialized, and how to change stored types safely. |
