@@ -133,6 +133,19 @@ internal sealed class SqlCheckoutRig : IDisposable
         return listed.Reminders;
     }
 
+    /// <summary>Waits until the workflow has one reminder that <paramref name="accept"/> takes, and returns it.</summary>
+    public static async Task<ScheduledReminder> AwaitReminder(IHost host, Func<ScheduledReminder, bool> accept)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            var reminders = await Reminders(host);
+            if (reminders.Count == 1 && accept(reminders[0])) return reminders[0];
+            Assert.True(DateTime.UtcNow < deadline, $"Timed out waiting for the reminder. Stored: {reminders.Count}.");
+            await Task.Delay(20, Ct);
+        }
+    }
+
     /// <summary>The delivery of each attempt at the effect <typeparamref name="TEffect"/>, in order.</summary>
     public static EffectDelivery[] Deliveries<TEffect>(CheckoutServices services) =>
         [.. services.Issued.Zip(services.Deliveries).Where(pair => pair.Item1 is TEffect).Select(pair => pair.Item2)];
@@ -159,7 +172,11 @@ internal sealed class SqlCheckoutRig : IDisposable
         return command.ExecuteNonQuery();
     }
 
-    public long Rows(string table) => Scalar($"SELECT COUNT(*) FROM {table}");
+    /// <summary>The rows in <paramref name="table"/>; 0 before the plugin has created the table, which it does on first use.</summary>
+    public long Rows(string table) =>
+        Scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @name", ("@name", table)) == 0
+            ? 0
+            : Scalar($"SELECT COUNT(*) FROM {table}");
 
     public void Dispose()
     {

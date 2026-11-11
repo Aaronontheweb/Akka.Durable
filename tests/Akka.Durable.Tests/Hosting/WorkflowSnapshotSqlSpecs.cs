@@ -10,8 +10,6 @@ namespace Akka.Durable.Tests.Hosting;
 /// </summary>
 public sealed class WorkflowSnapshotSqlSpecs
 {
-    private static readonly TimeSpan Fuzz = TimeSpan.FromMilliseconds(250);
-
     private static CancellationToken Ct => SqlCheckoutRig.Ct;
 
     /// <summary>Waits for the snapshot of the given sequence number, stops the host, and removes the events it covers.</summary>
@@ -50,7 +48,9 @@ public sealed class WorkflowSnapshotSqlSpecs
             await StopAfterSnapshotAndDeleteEvents(rig, one, 5);
         }
 
-        Assert.True(secondNext >= firstNext + SqlCheckoutRig.Minute, "The second wait is longer than the first.");
+        // Backoff: the wait after attempt 2 is 2 minutes, counted from its failure, which came after its journaled start.
+        var secondStart = WorkAttempts.Find(((WfRunning)before.State.Value).Attempts, 0)!.StartedAt;
+        Assert.True(secondNext >= secondStart + 2 * SqlCheckoutRig.Minute, "The second wait is shorter than 2 minutes.");
 
         var second = new CheckoutServices();
         using var two = await rig.StartAsync(second);
@@ -66,8 +66,7 @@ public sealed class WorkflowSnapshotSqlSpecs
         Assert.Null(running.Delayed);
 
         // The reminder is stored again for the date in the snapshot, and nothing runs before it.
-        var reminder = Assert.Single(await SqlCheckoutRig.Reminders(two));
-        Assert.InRange(reminder.DueTimeUtc, secondNext - Fuzz, secondNext + Fuzz);
+        (await SqlCheckoutRig.AwaitReminder(two, r => r.StoredFor() == secondNext)).IsWakeFor(secondNext);
         SqlCheckoutRig.Wake(two, secondNext - TimeSpan.FromSeconds(1));
         Assert.Equal(5, (await SqlCheckoutRig.HostedState(two)).SequenceNr);
         Assert.Empty(second.Issued);
@@ -98,11 +97,11 @@ public sealed class WorkflowSnapshotSqlSpecs
         DateTimeOffset repeatAt;
         using (var one = await rig.StartAsync(first))
         {
-            var started = DateTimeOffset.UtcNow;
             await SqlCheckoutRig.Ref(one).Start(new PlaceOrder("w1", 100), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
             before = await SqlCheckoutRig.AwaitState(one, r => r.Delayed is not null);
             repeatAt = ((WfRunning)before.State.Value).Delayed!.Value;
-            Assert.InRange(repeatAt, started + SqlCheckoutRig.UndoDelay, DateTimeOffset.UtcNow + SqlCheckoutRig.UndoDelay);
+            // The repeat is due its delay after the decision that asked for it, which is when the new entry was issued.
+            Assert.Equal(((WfRunning)before.State.Value).IssuedAt + SqlCheckoutRig.UndoDelay, repeatAt);
             Assert.Equal(4, before.SequenceNr);
             await StopAfterSnapshotAndDeleteEvents(rig, one, 4);
         }
@@ -121,8 +120,7 @@ public sealed class WorkflowSnapshotSqlSpecs
         Assert.IsType<Undoing>(((CheckoutState)running.State).Value);
 
         // The reminder is stored again for the pending date, and the work is not issued before it.
-        var reminder = Assert.Single(await SqlCheckoutRig.Reminders(two));
-        Assert.InRange(reminder.DueTimeUtc, repeatAt - Fuzz, repeatAt + Fuzz);
+        (await SqlCheckoutRig.AwaitReminder(two, r => r.StoredFor() == repeatAt)).IsWakeFor(repeatAt);
         SqlCheckoutRig.Wake(two, repeatAt - TimeSpan.FromSeconds(1));
         Assert.Equal(4, (await SqlCheckoutRig.HostedState(two)).SequenceNr);
         Assert.Empty(second.Issued);

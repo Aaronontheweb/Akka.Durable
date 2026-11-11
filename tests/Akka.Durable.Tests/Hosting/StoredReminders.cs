@@ -11,6 +11,25 @@ namespace Akka.Durable.Tests.Hosting;
 internal static class StoredReminders
 {
     /// <summary>
+    /// The date the workflow stored its reminder for: the one its wake carries. The reminder's <c>DueTimeUtc</c> is
+    /// counted from a later reading of the clock, so it is never earlier than this date, and not equal to it.
+    /// </summary>
+    public static DateTimeOffset StoredFor(this ScheduledReminder stored) =>
+        stored.Message is WfCommand { Value: WfWake { At: { } at } }
+            ? at
+            : throw new InvalidOperationException($"The reminder {stored.Key} does not carry a workflow wake: {stored.Message}.");
+
+    /// <summary>
+    /// Asserts that <paramref name="stored"/> is the workflow's wake for <paramref name="date"/>: it carries that date
+    /// exactly, and it is due no earlier.
+    /// </summary>
+    public static void IsWakeFor(this ScheduledReminder stored, DateTimeOffset date)
+    {
+        Xunit.Assert.Equal(date, stored.StoredFor());
+        Xunit.Assert.True(stored.DueTimeUtc >= date, $"The reminder is due at {stored.DueTimeUtc:O}, before {date:O}.");
+    }
+
+    /// <summary>
     /// Delivers <paramref name="stored"/>. With <paramref name="asIfStoredFor"/> the delivery is one that comes before the
     /// reminder is due: a wake that says it was stored for that time.
     /// </summary>

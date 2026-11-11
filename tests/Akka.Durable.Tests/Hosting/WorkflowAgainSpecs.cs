@@ -13,8 +13,6 @@ namespace Akka.Durable.Tests.Hosting;
 public abstract class CampaignRetryKit(ITestOutputHelper output) : CampaignWorkflowKit(output)
 {
     protected static readonly TimeSpan Minute = TimeSpan.FromMinutes(1);
-    protected static readonly TimeSpan Slack = TimeSpan.FromSeconds(5);
-    protected static readonly TimeSpan Fuzz = TimeSpan.FromMilliseconds(100);
     protected static readonly TimeSpan TimerFires = TimeSpan.FromSeconds(10);
 
     /// <summary>Null: no policy.</summary>
@@ -49,15 +47,26 @@ public abstract class CampaignRetryKit(ITestOutputHelper output) : CampaignWorkf
     protected Task AwaitCount<TEffect>(int count) => AwaitAssertAsync(
         () => Assert.Equal(count, Count<TEffect>()), TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
 
-    protected async Task<DateTimeOffset> AwaitReminderDue(string id, Func<DateTimeOffset, bool> accept)
+    /// <summary>
+    /// Waits until the workflow's one reminder is its wake for <paramref name="date"/>: it carries that date exactly,
+    /// and it is due no earlier.
+    /// </summary>
+    protected async Task AwaitWakeFor(string id, DateTimeOffset date)
     {
-        var found = default(DateTimeOffset);
-        await AwaitAssertAsync(async () =>
-        {
-            found = Assert.Single(await RemindersOf(id)).DueTimeUtc;
-            Assert.True(accept(found), $"The reminder is due at {found:O}.");
-        }, TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
-        return found;
+        await AwaitAssertAsync(async () => Assert.Equal(date, Assert.Single(await RemindersOf(id)).StoredFor()),
+            TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
+        Assert.Single(await RemindersOf(id)).IsWakeFor(date);
+    }
+
+    /// <summary>
+    /// Waits until the workflow has journaled a delayed repeat, and returns its date. The date is the delay after the
+    /// decision that asked for it, which is also when the repeated entry was issued.
+    /// </summary>
+    private protected async Task<DateTimeOffset> AwaitRepeat(string id, TimeSpan after)
+    {
+        var repeated = await AwaitRunning(id, running => Assert.NotNull(running.Delayed));
+        Assert.Equal(repeated.IssuedAt + after, repeated.Delayed);
+        return repeated.Delayed!.Value;
     }
 
     /// <summary>A campaign that has sent its one reminder and is in <see cref="Escalating"/>, with the grace period given.</summary>
@@ -89,8 +98,10 @@ public sealed class WorkflowRetryTimerSpecs(ITestOutputHelper output) : Campaign
         var entered = await EscalatingWith("m1", grace: 5 * Minute);
 
         // The reminder is due at the earlier of the pending retry (10 minutes) and the grace period (5 minutes).
-        var due = await AwaitReminderDue("m1", d => d > DateTimeOffset.UtcNow + Minute);
-        Assert.InRange(due, entered.EnteredAt + 5 * Minute - Fuzz, entered.EnteredAt + 5 * Minute + Slack);
+        var waiting = await AwaitRunning("m1", running => Assert.NotNull(WorkAttempts.Find(running.Attempts, 0)?.NextAt));
+        Assert.True(WorkAttempts.Find(waiting.Attempts, 0)!.NextAt >= entered.EnteredAt + 10 * Minute, "The retry is due less than 10 minutes after the work was issued.");
+        var due = entered.EnteredAt + 5 * Minute;
+        await AwaitWakeFor("m1", due);
 
         // Nothing is in flight, so the timer is decided at once, with no answer to wait for.
         Wake("m1", due);
@@ -111,18 +122,20 @@ public sealed class WorkflowRetryTimerSpecs(ITestOutputHelper output) : Campaign
             : Task.FromResult<CampaignFact>(new CollectionsNotified());
         var entered = await EscalatingWith("m2", grace: 30 * Minute);
         await AwaitCount<NotifyCollections>(1);
-        var failedAt = DateTimeOffset.UtcNow;
 
         // The earlier date wins: the retry in 10 minutes, not the grace period in 30.
-        var due = await AwaitReminderDue("m2", d => d > failedAt + 5 * Minute);
-        Assert.InRange(due, entered.EnteredAt + 10 * Minute - Fuzz, failedAt + 10 * Minute + Slack);
+        var waiting = await AwaitRunning("m2", running => Assert.NotNull(WorkAttempts.Find(running.Attempts, 0)?.NextAt));
+        var due = WorkAttempts.Find(waiting.Attempts, 0)!.NextAt!.Value;
+        Assert.True(due >= entered.EnteredAt + 10 * Minute, "The retry is due less than 10 minutes after the work was issued.");
+        Assert.True(due < entered.EnteredAt + 30 * Minute, "The retry is not due before the grace period ends.");
+        await AwaitWakeFor("m2", due);
 
         Wake("m2", due);
         await AwaitCount<NotifyCollections>(2);
 
         // Answered: the workflow stays in Escalating, and its timer is still due 30 minutes after it entered the state.
-        var grace = await AwaitReminderDue("m2", d => d > failedAt + 20 * Minute);
-        Assert.InRange(grace, entered.EnteredAt + 30 * Minute - Fuzz, entered.EnteredAt + 30 * Minute + Fuzz);
+        var grace = entered.EnteredAt + 30 * Minute;
+        await AwaitWakeFor("m2", grace);
         Wake("m2", grace);
         Assert.Equal(new SentToCollections(), (await CampaignRef("m2").WaitForOutcome(Poll, AskCancellation())).Value);
         Assert.Equal(2, Count<NotifyCollections>());
@@ -148,8 +161,9 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
 
         // The first check found nothing: the second is due 10 minutes later, and the grace period is an hour away.
         await AwaitCount<CheckPayment>(1);
-        var due = await AwaitReminderDue("a1", d => d >= starts[0] + 10 * Minute - Fuzz);
-        Assert.InRange(due, starts[0] + 10 * Minute - Fuzz, starts[0] + 10 * Minute + Slack);
+        var due = await AwaitRepeat("a1", 10 * Minute);
+        Assert.True(due >= starts[0] + 10 * Minute, "The repeat is due less than 10 minutes after the first check ran.");
+        await AwaitWakeFor("a1", due);
 
         // Until then nothing is in flight: a fact from outside is decided, not held.
         Assert.IsType<Delivered>((await CampaignRef("a1").Notify(new PaymentClaimed(), AskCancellation())).Value);
@@ -177,8 +191,9 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         await AwaitCount<CheckPayment>(1);
 
         // The timer is due before the repeat: the reminder is due then.
-        var due = await AwaitReminderDue("a2", d => d > DateTimeOffset.UtcNow + Minute);
-        Assert.InRange(due, entered.EnteredAt + 5 * Minute - Fuzz, entered.EnteredAt + 5 * Minute + Slack);
+        Assert.True(await AwaitRepeat("a2", 10 * Minute) > entered.EnteredAt + 5 * Minute, "The repeat is due before the timer.");
+        var due = entered.EnteredAt + 5 * Minute;
+        await AwaitWakeFor("a2", due);
 
         Wake("a2", due);
         await AwaitRunning("a2", running => Assert.Equal(new Pausing(0), StateOf(running)));
@@ -203,15 +218,17 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         };
         await VerifyingWith("a3", grace: TimeSpan.FromHours(1));
         await AwaitCount<CheckPayment>(1);
-        var due = await AwaitReminderDue("a3", d => d >= asked[0] + 10 * Minute - Fuzz && d <= asked[0] + 10 * Minute + Slack);
+        var due = await AwaitRepeat("a3", 10 * Minute);
+        Assert.True(due >= asked[0] + 10 * Minute, "The repeat is due less than 10 minutes after the first check ran.");
+        await AwaitWakeFor("a3", due);
 
         // Nothing is sent to the workflow: the reminder it stored is delivered to a workflow that is not running, first
         // before it is due. The workflow starts, takes the date from its journal and stores its reminder again for it.
         await StopWorkflow("a3");
         await DeliverReminder("a3", asIfStoredFor: due - TimeSpan.FromSeconds(1));
         var recovered = await AwaitRunning("a3", running => Assert.NotNull(running.Delayed));
-        Assert.InRange(recovered.Delayed!.Value, due - Fuzz, due + Fuzz);
-        await AwaitReminderDue("a3", d => d >= due - Fuzz && d <= due + Fuzz);
+        Assert.Equal(due, recovered.Delayed);
+        await AwaitWakeFor("a3", due);
         Assert.Equal(1, Count<CheckPayment>());
 
         // Delivered when it is due, it issues the work.
@@ -238,7 +255,9 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         ReminderStorage.Failing = false;
 
         // The next recovery stores the reminder again, for the date in the journal: nothing is sent to the workflow.
-        await AwaitReminderDue("a5", d => d >= asked[0] + 10 * Minute - Fuzz && d <= asked[0] + 10 * Minute + Slack);
+        var due = await AwaitRepeat("a5", 10 * Minute);
+        Assert.True(due >= asked[0] + 10 * Minute, "The repeat is due less than 10 minutes after the first check ran.");
+        await AwaitWakeFor("a5", due);
         Assert.Equal(1, Count<CheckPayment>());
 
         await DeliverReminder("a5");
@@ -254,7 +273,8 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         var entered = await VerifyingWith("a4", grace: 5 * Minute);
         await AwaitCount<CheckPayment>(1);
         var timer = entered.EnteredAt + 5 * Minute;
-        await AwaitReminderDue("a4", d => d >= timer - Fuzz);
+        await AwaitRepeat("a4", 10 * Minute);
+        await AwaitWakeFor("a4", timer);
 
         // The repeat moved nothing: a wake a moment before the limit leaves the workflow where it is, and a wake at the
         // limit counted from when the state was entered, not from the repeat, ends it.

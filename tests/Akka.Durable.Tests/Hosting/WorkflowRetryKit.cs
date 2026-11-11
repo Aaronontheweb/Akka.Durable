@@ -20,13 +20,6 @@ public abstract class WorkflowRetryKit(ITestOutputHelper output) : CheckoutWorkf
 {
     protected static readonly TimeSpan Minute = TimeSpan.FromMinutes(1);
 
-    // The clock of the host is real: a date read from a reminder is never earlier than the attempt's failure, and
-    // never later than the failure plus the wait and this much.
-    protected static readonly TimeSpan Slack = TimeSpan.FromSeconds(5);
-
-    // The reminder is stored for a moment and a sleeping timer can fire a moment early.
-    protected static readonly TimeSpan Fuzz = TimeSpan.FromMilliseconds(100);
-
     /// <summary>The policy of the charge's handler. Null: no policy.</summary>
     protected virtual RetryPolicy? ChargePolicy => Retry.Backoff(Minute, 5 * Minute, 6);
 
@@ -89,16 +82,15 @@ public abstract class WorkflowRetryKit(ITestOutputHelper output) : CheckoutWorkf
         return listed.Reminders;
     }
 
-    /// <summary>Waits until the workflow's one reminder is due at a time <paramref name="accept"/> takes.</summary>
-    protected async Task<DateTimeOffset> AwaitReminderDue(string id, Func<DateTimeOffset, bool> accept)
+    /// <summary>
+    /// Waits until the workflow's one reminder is its wake for <paramref name="date"/>: it carries that date exactly,
+    /// and it is due no earlier.
+    /// </summary>
+    protected async Task AwaitWakeFor(string id, DateTimeOffset date)
     {
-        var found = default(DateTimeOffset);
-        await AwaitAssertAsync(async () =>
-        {
-            found = Assert.Single(await RemindersOf(id)).DueTimeUtc;
-            Assert.True(accept(found), $"The reminder is due at {found:O}.");
-        }, TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
-        return found;
+        await AwaitAssertAsync(async () => Assert.Equal(date, Assert.Single(await RemindersOf(id)).StoredFor()),
+            TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
+        Assert.Single(await RemindersOf(id)).IsWakeFor(date);
     }
 
     /// <summary>When attempt <paramref name="attempt"/> at the charge started, once it has.</summary>
@@ -111,12 +103,39 @@ public abstract class WorkflowRetryKit(ITestOutputHelper output) : CheckoutWorkf
     protected Task AwaitCharges(int count) => AwaitAssertAsync(
         () => Assert.Equal(count, Charges.Count), TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
 
-    /// <summary>Waits until the reminder is due at least <paramref name="wait"/> after <paramref name="failedAt"/>, and returns it.</summary>
-    protected async Task<DateTimeOffset> AwaitRetryDue(string id, DateTimeOffset failedAt, TimeSpan wait)
+    /// <summary>
+    /// Waits until attempt <paramref name="attempt"/> at the charge (position 0) is in flight, and returns its start as
+    /// the workflow journaled it: before its handler ran.
+    /// </summary>
+    private protected async Task<DateTimeOffset> JournaledStartOf(string id, int attempt)
     {
-        var due = await AwaitReminderDue(id, d => d >= failedAt + wait - Fuzz);
-        Assert.InRange(due, failedAt + wait - Fuzz, failedAt + wait + Slack);
-        return due;
+        var running = await AwaitRunning(id, r =>
+        {
+            Assert.IsType<Charging>(((CheckoutState)r.State).Value);
+            if (attempt == 1) Assert.Null(WorkAttempts.Find(r.Attempts, 0));
+            else Assert.Equal((attempt, (DateTimeOffset?)null), (WorkAttempts.Find(r.Attempts, 0)?.Attempt, WorkAttempts.Find(r.Attempts, 0)?.NextAt));
+        });
+        return attempt == 1 ? running.IssuedAt : WorkAttempts.Find(running.Attempts, 0)!.StartedAt;
+    }
+
+    /// <summary>
+    /// Waits until attempt <paramref name="failed"/> at the charge has failed and the workflow waits for the next, and
+    /// returns the journaled date of the next attempt. The failure is not journaled on its own, so the date is checked
+    /// by order: the failure came after the attempt's journaled start and before the spec saw it, so the date is
+    /// <paramref name="wait"/> after a moment between the two. The reminder is the wake for that date exactly.
+    /// </summary>
+    protected async Task<DateTimeOffset> AwaitRetry(string id, int failed, TimeSpan wait)
+    {
+        var running = await AwaitRunning(id, r =>
+            Assert.Equal((failed, true), (WorkAttempts.Find(r.Attempts, 0)?.Attempt, WorkAttempts.Find(r.Attempts, 0)?.NextAt is not null)));
+        var seenBy = DateTimeOffset.UtcNow;
+        var attempt = WorkAttempts.Find(running.Attempts, 0)!;
+        var next = attempt.NextAt!.Value;
+        Assert.True(next >= attempt.StartedAt + wait,
+            $"Attempt {failed + 1} is due at {next:O}, less than {wait} after attempt {failed} started at {attempt.StartedAt:O}.");
+        Assert.True(next <= seenBy + wait, $"Attempt {failed + 1} is due at {next:O}, more than {wait} after {seenBy:O}.");
+        await AwaitWakeFor(id, next);
+        return next;
     }
 
     /// <summary>The facts the workflow decided, in order.</summary>
