@@ -27,7 +27,7 @@ internal sealed record EffectIssued(
     [property: AkkaField(0)] object Effect,
     [property: AkkaField(1)] DateTimeOffset IssuedAt,
     [property: AkkaField(2)] StoredPolicy? Policy = null,
-    [property: AkkaField(3)] DateTimeOffset NextAt = default) : IDurableEntityProtocol;
+    [property: AkkaField(3)] DateTimeOffset NextAt = default) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>Attempt <paramref name="Attempt"/> of the effect <paramref name="Id"/> starts. Journaled before it runs.</summary>
 /// <param name="Id">The sequence number of the effect's <see cref="EffectIssued"/>.</param>
@@ -37,7 +37,7 @@ internal sealed record EffectIssued(
 internal sealed record EffectRetried(
     [property: AkkaField(0)] long Id,
     [property: AkkaField(1)] int Attempt,
-    [property: AkkaField(2)] DateTimeOffset NextAt) : IDurableEntityProtocol;
+    [property: AkkaField(2)] DateTimeOffset NextAt) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>
 /// The effect <paramref name="Id"/> was answered. Written with the decision on the answer, or alone for a handler with
@@ -45,7 +45,7 @@ internal sealed record EffectRetried(
 /// </summary>
 /// <param name="Id">The sequence number of the effect's <see cref="EffectIssued"/>.</param>
 [AkkaSerializable(Manifest = "durable-effect-acknowledged-v1")]
-internal sealed record EffectAcknowledged([property: AkkaField(0)] long Id) : IDurableEntityProtocol;
+internal sealed record EffectAcknowledged([property: AkkaField(0)] long Id) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>The effect <paramref name="Id"/> got no answer. Written with the decision on its give-up command.</summary>
 /// <param name="Id">The sequence number of the effect's <see cref="EffectIssued"/>.</param>
@@ -55,7 +55,7 @@ internal sealed record EffectAcknowledged([property: AkkaField(0)] long Id) : ID
 internal sealed record EffectGaveUp(
     [property: AkkaField(0)] long Id,
     [property: AkkaField(1)] int Attempts,
-    [property: AkkaField(2)] int Reason) : IDurableEntityProtocol
+    [property: AkkaField(2)] int Reason) : IDurableEntityProtocol, IDurableJournalRecord
 {
     public EffectGaveUp(long id, int attempts, GaveUpReason reason) : this(id, attempts, (int)reason)
     {
@@ -140,7 +140,7 @@ internal sealed record RecordedCancel(
 [AkkaSerializable(Manifest = "durable-entity-snapshot-v1")]
 internal sealed record EntitySnapshot(
     [property: AkkaField(0)] object State,
-    [property: AkkaField(1)] ImmutableArray<object> Pending) : IDurableEntityProtocol;
+    [property: AkkaField(1)] ImmutableArray<object> Pending) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>Test-only query: the effects an entity has pending. Answered with <see cref="PendingEffectsReply"/>.</summary>
 [AkkaSerializable(Manifest = "durable-get-pending-effects-v1", AllowEmpty = true)]

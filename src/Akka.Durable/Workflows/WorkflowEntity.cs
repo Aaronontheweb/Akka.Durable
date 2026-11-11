@@ -96,7 +96,7 @@ internal readonly union WfState(WfNotStarted, WfRunning, WfFinished) : IDurableE
 internal sealed record WfStarted(
     [property: AkkaField(0)] object Input,
     [property: AkkaField(1)] object First,
-    [property: AkkaField(2)] DateTimeOffset At) : IDurableEntityProtocol;
+    [property: AkkaField(2)] DateTimeOffset At) : IDurableEntityProtocol, IDurableJournalRecord;
 
 [AkkaSerializable(Manifest = "durable-wf-moved-v1")]
 internal sealed record WfMoved([property: AkkaField(0)] object Next) : IDurableEntityProtocol;
@@ -130,12 +130,12 @@ internal sealed record WfFactRecorded(
     [property: AkkaField(1)] int? Answered,
     [property: AkkaField(2)] DateTimeOffset At,
     [property: AkkaField(3)] WfStep Step,
-    [property: AkkaField(4)] bool FromHeld) : IDurableEntityProtocol;
+    [property: AkkaField(4)] bool FromHeld) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>A fact arrived while work was in flight. It is held, not decided.</summary>
 /// <param name="Fact">The author's fact.</param>
 [AkkaSerializable(Manifest = "durable-wf-held-v1")]
-internal sealed record WfHeld([property: AkkaField(0)] object Fact) : IDurableEntityProtocol;
+internal sealed record WfHeld([property: AkkaField(0)] object Fact) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>
 /// Attempt <paramref name="Attempt"/> of the work at <paramref name="Index"/> starts. Journaled before it runs: for
@@ -150,7 +150,7 @@ internal sealed record WfAttemptStarted(
     [property: AkkaField(0)] int Entry,
     [property: AkkaField(1)] int Index,
     [property: AkkaField(2)] int Attempt,
-    [property: AkkaField(3)] DateTimeOffset At) : IDurableEntityProtocol;
+    [property: AkkaField(3)] DateTimeOffset At) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>
 /// Attempt <paramref name="Attempt"/> of the work at <paramref name="Index"/> failed, or was cut off by a restart, and
@@ -165,11 +165,11 @@ internal sealed record WfAttemptFailed(
     [property: AkkaField(0)] int Entry,
     [property: AkkaField(1)] int Index,
     [property: AkkaField(2)] int Attempt,
-    [property: AkkaField(3)] DateTimeOffset NextAt) : IDurableEntityProtocol;
+    [property: AkkaField(3)] DateTimeOffset NextAt) : IDurableEntityProtocol, IDurableJournalRecord;
 
 [AkkaSerializable(Manifest = "durable-wf-event-v1")]
 internal readonly union WfEvent(WfStarted, WfFactRecorded, WfHeld, WfAttemptStarted, WfAttemptFailed)
-    : IDurableEntityProtocol;
+    : IDurableEntityProtocol, IDurableJournalRecord;
 
 // ---- Commands and replies ----
 
