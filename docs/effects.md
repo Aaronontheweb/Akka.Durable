@@ -101,7 +101,7 @@ What the library does:
 
 - Each attempt after the first is journaled before it runs, so a restart does not reset the count.
 - While the entity runs, the wait between attempts is a timer. Between attempts the effect is not in flight: the entity handles other commands, and it can be passivated.
-- One durable reminder for each entity wakes it after a crash, a passivation or a shard move, so the next attempt happens without anyone sending it a message. It is stored before the write that leaves the first effect pending. If it cannot be stored, nothing is written and the command fails. It is removed when nothing is pending.
+- One durable reminder for each entity wakes it after a crash, a passivation or a shard move, so the next attempt happens without anyone sending it a message. It is stored before the write that leaves the first effect pending, and again before a write whose effect is due earlier than the stored wake. If it cannot be stored, nothing is written and the command fails. It is removed when nothing is pending.
 - When a limited policy runs out, `Decide` gets the effect's give-up with `GaveUpReason.RetriesExhausted`. `WorkGaveUp.Attempts` says how many attempts were made, and `Error` holds the last failure.
 - An answer from an earlier attempt that arrives late is dropped. `Decide` gets one answer or one give-up for each effect.
 - `delivery.Id` is the same on every attempt. `delivery.Attempt` counts from 1.
