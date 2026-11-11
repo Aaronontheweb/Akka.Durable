@@ -1,3 +1,6 @@
+using Akka.Reminders.Storage;
+using Akka.Reminders;
+using Akka.Hosting;
 using Akka.Actor;
 using Akka.Durable.TestKit;
 using Akka.Durable.Tests.Fixtures;
@@ -26,6 +29,15 @@ public sealed class RecordedExecuteSpecs(ITestOutputHelper output) : Persistence
 
     protected override void ConfigureServices(HostBuilderContext context, IServiceCollection services) =>
         services.AddProbe(_world);
+
+    // An Execute stores the wake reminder before its write.
+    protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
+    {
+        base.ConfigureAkka(builder, provider);
+        builder.WithLocalReminders(reminders => reminders
+            .WithStorage(_ => new InMemoryReminderStorage())
+            .WithResolver(system => new DirectEntityReminderResolver(system)));
+    }
 
     #region Helpers
 

@@ -1,3 +1,4 @@
+using Akka.Reminders;
 using Akka.Actor;
 using Akka.Cluster.Sharding;
 using Akka.Durable.Tests.Fixtures;
@@ -253,7 +254,8 @@ public sealed class RecordedExecuteStartupSpecs
                 handlers(services);
                 services.AddAkka("effect-startup", builder =>
                 {
-                    builder.WithCustomSerializer(CounterSerializer.CreateSerializerDetails);
+                    builder.WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
+                        .WithLocalReminders(r => r.WithResolver(system => new DurableEntityReminderResolver(system)));
                     if (probeSerializer) builder.WithCustomSerializer(ProbeSerializer.CreateSerializerDetails);
                     builder.WithDurableEntity(Counter.Definition);
                 });
@@ -399,6 +401,7 @@ public sealed class RecordedExecuteSqlMixedSpecs : IDisposable
                 services.AddProbe(world);
                 services.AddAkka("recorded-execute-sql-mixed", builder => builder
                     .WithSqlPersistence(connectionString: $"Data Source={_databasePath}", providerName: ProviderName.SQLiteMS)
+                    .WithLocalReminders(r => r.WithResolver(system => new DurableEntityReminderResolver(system)))
                     .WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
                     .WithCustomSerializer(ProbeSerializer.CreateSerializerDetails)
                     .WithDurableEntity(ProbeEntity.Definition(world, options)));
