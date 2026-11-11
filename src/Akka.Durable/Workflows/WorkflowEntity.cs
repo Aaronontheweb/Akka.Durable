@@ -460,13 +460,18 @@ internal sealed class WorkflowEntity<TInput, TState, TFact, TOutcome>(
             return Advance(running, [(answer.Fact, answer.Index)], reached, ctx, ctx.None());
         }
 
-        // A late answer of work with a retry policy, for a state the workflow has left: the move ended its retries.
-        if (answer.Attempt > 0) return ctx.Ignore();
-
-        // A late answer, to work of an earlier entry. It settles nothing, so it is treated like a fact from outside.
-        return InFlight(running, ctx)
-            ? ctx.Persist(new WfHeld(answer.Fact))
-            : Advance(running, [(answer.Fact, null)], reached, ctx, ctx.None());
+        // A late answer, to work of an entry the workflow has left: the move or the repeat ended that work and its
+        // retries. It is dropped, not decided and not held, so that a fact type several pieces of work share is not
+        // taken as the answer to the current work.
+        var (type, id, current) = (definition.TypeName.Value, ctx.EntityId.Value, running.Entry);
+        return ctx.None().Run<ILoggerFactory>((loggers, _) =>
+        {
+            loggers.CreateLogger("Akka.Durable.Workflow").LogDebug(
+                "Workflow [{WorkflowType}/{WorkflowId}] dropped the answer {Fact} to work {Index} of entry {Entry}: " +
+                "it is in entry {Current}, so that work has ended.", type, id, answer.Fact, answer.Index, answer.Entry,
+                current);
+            return Task.CompletedTask;
+        });
     }
 
     /// <summary>A fact from outside: held while work is in flight, otherwise decided at once.</summary>
