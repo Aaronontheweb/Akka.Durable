@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="TypedRequestSpecs.fs" />
     <Compile Include="WorkflowStateNameSpecs.fs" />
+    <Compile Include="CheckoutWorkflowSpecs.fs" />
     <ProjectReference Include="../../src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
   </ItemGroup>
   <ItemGroup>

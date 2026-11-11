@@ -521,6 +521,23 @@ Register a serializer for your own four types: input, state, fact and outcome. Y
 
 Mark each type with `[AkkaSerializable(Manifest = "...")]`, and each union as well as its cases. The rules for how to do this, and for how to change the types later, are in [Serialization](serialization.md).
 
+## F#
+
+A workflow can be written in F#, with discriminated unions for the states, the facts and the outcomes. The functions of the definition are plain F# functions, and an incomplete `match` in `decide` fails the build in a project that treats warnings as errors. Three things differ from C#.
+
+**One piece of work needs `ToWorkList()`.** C# converts one piece of work to a work list without a call. F# has no implicit conversions:
+
+```fsharp
+let work (state: CheckoutState) (ctx: WorkContext<PlaceOrder, CheckoutFact>) : WorkList<CheckoutFact> =
+    match state with
+    | Reserving -> ctx.Execute({ ReserveStock.Order = ctx.Input.Order }).ToWorkList()
+    | Charging _ -> ctx.Execute({ ChargeCard.Order = ctx.Input.Order; Total = ctx.Input.Total }).ToWorkList()
+```
+
+**Match on the typed state to read it.** A status read gives the state as the F# value, so a caller matches on it. Do not use the state's name for this. `WorkflowRunning.StateName` is the name of the state's type, and an F# case that has no fields has no type of its own: it is reported by the name of the union, "CheckoutState" for `Reserving`.
+
+**The types need a serializer you write.** The serializer generator described in [Serialization](serialization.md) reads C# only. An F# workflow needs its own Akka.NET serializer for its four types before it can be hosted. Akka.Durable's F# tests call the definition's functions directly and do not host the workflow.
+
 ## Not available yet
 
 These are not in Akka.Durable today:
