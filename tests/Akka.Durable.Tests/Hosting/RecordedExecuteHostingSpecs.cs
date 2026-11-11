@@ -489,8 +489,9 @@ public sealed class RecordedExecuteSqlMixedSpecs : IDisposable
         CounterRef(host).Tell(new NoHandler("issue:a"));
         while (!world.Decided.Contains("issue:a")) await Task.Delay(20, Ct);
 
-        // Whatever the entity does next, no incarnation sees the event, and no handler ran.
-        Execute("DROP TRIGGER refuse_effect");
+        // The trigger stays: the write can reach the journal after the decision, so dropping it here would race. Nothing
+        // later in this spec writes the third row. Whatever the entity does next, no incarnation sees the event, and no
+        // handler ran.
         await host.StopAsync(Ct);
         var second = new ProbeWorld();
         using var reader = await StartHost(second, EntityOptions.Default);
