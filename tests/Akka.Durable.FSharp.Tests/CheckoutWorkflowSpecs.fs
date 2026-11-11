@@ -1,10 +1,7 @@
 module Akka.Durable.FSharp.Tests.CheckoutWorkflowSpecs
 
-// F# reports every use of an implicit conversion (FS3391), and this project treats warnings as errors.
-// Work<_> converts to WorkList<_> only by the C# implicit operator, so this file opts out of that warning.
-#nowarn "3391"
-
 open System
+open System.Collections.Immutable
 open Akka.Durable
 open Xunit
 
@@ -38,7 +35,7 @@ type CheckoutFact =
     | UndoRefused
     | WorkStuck of what: string * reason: GaveUpReason
     | TicketOpened
-    | CancelRequested of reason: string
+    | CancelRequested of reason: string * by: string
     | OperatorSaidRetry
     | OperatorSaidAbandon
 
@@ -52,14 +49,14 @@ module Checkout =
 
     let start (_: PlaceOrder) : CheckoutState = Reserving
 
-    /// The work each state needs. ctx.Execute returns a single piece of work; the WorkList<_> is built by
-    /// the implicit conversion, which F# applies because the declared return type is known.
+    /// The work each state needs. ctx.Execute returns a single piece of work.
     let work (state: CheckoutState) (ctx: WorkContext<PlaceOrder, CheckoutFact>) : WorkList<CheckoutFact> =
         match state with
-        | Reserving -> ctx.Execute({ ReserveStock.Order = ctx.Input.Order })
-        | Charging _ -> ctx.Execute({ ChargeCard.Order = ctx.Input.Order; Total = ctx.Input.Total })
-        | Undoing _ -> ctx.Execute({ UndoOrder.Order = ctx.Input.Order })
-        | NeedsAttention (_, why) -> ctx.Execute({ OpenSupportTicket.Checkout = ctx.Id.Value; Why = why })
+        // F# has no implicit conversions, so one piece of work becomes the list with ToWorkList().
+        | Reserving -> ctx.Execute({ ReserveStock.Order = ctx.Input.Order }).ToWorkList()
+        | Charging _ -> ctx.Execute({ ChargeCard.Order = ctx.Input.Order; Total = ctx.Input.Total }).ToWorkList()
+        | Undoing _ -> ctx.Execute({ UndoOrder.Order = ctx.Input.Order }).ToWorkList()
+        | NeedsAttention (_, why) -> ctx.Execute({ OpenSupportTicket.Checkout = ctx.Id.Value; Why = why }).ToWorkList()
 
     /// The fact table. No wildcard arm: a new state or fact is an FS0025 warning, and this project
     /// treats warnings as errors, so it does not compile until the pair is placed.
@@ -89,7 +86,7 @@ module Checkout =
         | NeedsAttention (_, why), OperatorSaidAbandon -> ctx.Next(Undoing(OrderFailed why))
 
         // A cancel undoes the order, unless it is already being undone or waits for a person.
-        | (Reserving | Charging _), CancelRequested reason -> ctx.Next(Undoing(OrderCancelled reason))
+        | (Reserving | Charging _), CancelRequested (reason, _) -> ctx.Next(Undoing(OrderCancelled reason))
         | (Undoing _ | NeedsAttention _), CancelRequested _ -> ctx.Stay()
 
         // Pairs that should not happen, written out so that a new state or fact does not compile until placed.
@@ -100,19 +97,13 @@ module Checkout =
             ctx.Unexpected()
         | (Reserving | Charging _ | Undoing _), (OperatorSaidRetry | OperatorSaidAbandon) -> ctx.Unexpected()
 
-    let kind (outcome: CheckoutOutcome) : OutcomeKind =
-        match outcome with
-        | OrderPlaced _ -> OutcomeKind.Succeeded
-        | OrderFailed _ -> OutcomeKind.Failed
-        | OrderCancelled _ -> OutcomeKind.Cancelled
-
-    let cancel (request: CancelRequest) : CheckoutFact = CancelRequested request.Reason
+    let cancel (request: CancelRequest) : CheckoutFact = CancelRequested(request.Reason, request.By)
 
     let gaveUp (failure: WorkGaveUp) : CheckoutFact = WorkStuck(failure.What, failure.Reason)
 
     let definition =
         WorkflowDefinition<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
-            WorkflowTypeName "checkouts", start, work, decide, kind, cancel, gaveUp)
+            WorkflowTypeName "checkouts", start, work, decide, cancel, gaveUp)
 
 // Reading the C# union Transition<_,_> from F#: its Value is the case record. This turns it into an
 // F# active pattern so tests can match on it.
@@ -135,7 +126,10 @@ let private decideCtx =
     DecideContext<PlaceOrder, CheckoutState, CheckoutOutcome>(workflowId, input, at, at)
 
 let private effectsOf (list: WorkList<CheckoutFact>) : obj list =
-    [ for w in list.Items -> w.Effect ]
+    [ for w in list.Items ->
+        match w with
+        | :? ExecuteWork<CheckoutFact> as execute -> execute.Effect
+        | other -> failwithf "Not a call to a handler: %A" other ]
 
 let private workOf state = Checkout.definition.Work.Invoke(state, workCtx)
 let private decideOf state fact = Checkout.definition.Decide.Invoke(state, fact, decideCtx)
@@ -189,13 +183,13 @@ let ``Decide sends a working state that got no answer to NeedsAttention`` () =
 
 [<Fact>]
 let ``Decide undoes the order on a cancel in a working state`` () =
-    match decideOf (Charging "res-1") (CancelRequested "changed my mind") with
+    match decideOf (Charging "res-1") (CancelRequested("changed my mind", "u-1")) with
     | Next (Undoing (OrderCancelled "changed my mind")) -> ()
     | other -> failwithf "unexpected %A" other
 
 [<Fact>]
 let ``Decide stays on a cancel in NeedsAttention`` () =
-    match decideOf (NeedsAttention(Reserving, "w")) (CancelRequested "late") with
+    match decideOf (NeedsAttention(Reserving, "w")) (CancelRequested("late", "u-1")) with
     | Stay -> ()
     | other -> failwithf "unexpected %A" other
 
@@ -218,24 +212,32 @@ let ``Decide flags a pair that should not happen`` () =
     | other -> failwithf "unexpected %A" other
 
 [<Fact>]
-let ``Kind classifies each outcome`` () =
-    let kind = Checkout.definition.Kind
-    Assert.Equal(OutcomeKind.Succeeded, kind.Invoke(OrderPlaced "ch-1"))
-    Assert.Equal(OutcomeKind.Failed, kind.Invoke(OrderFailed "x"))
-    Assert.Equal(OutcomeKind.Cancelled, kind.Invoke(OrderCancelled "x"))
-
-[<Fact>]
 let ``Cancel and GaveUp map to facts`` () =
-    Assert.Equal(CancelRequested "why", Checkout.definition.Cancel.Invoke(CancelRequest("why")))
+    Assert.Equal(CancelRequested("why", "u-1"), Checkout.definition.Cancel.Invoke(CancelRequest("why", "u-1")))
 
     let stuck = WorkGaveUp({ ReserveStock.Order = "o-1" }, GaveUpReason.Failed)
     Assert.Equal(WorkStuck("ReserveStock", GaveUpReason.Failed), Checkout.definition.GaveUp.Invoke stuck)
 
 [<Fact>]
-let ``The status read names a state with fields by its case but a state without fields by its union`` () =
-    // WorkflowRef names a state with IUnion, else GetType().Name. An F# case with fields is its own nested
-    // class; a case without fields is an instance of the union class. This pins the current behavior: a
-    // status read of a Reserving workflow says "CheckoutState", not "Reserving".
-    let name (state: CheckoutState) = state.GetType().Name
-    Assert.Equal("Charging", name (Charging "r"))
-    Assert.Equal("CheckoutState", name Reserving)
+let ``ToWorkList makes a work list of one piece of work`` () =
+    let one = workCtx.Execute({ ReserveStock.Order = "o-1" })
+    let list = one.ToWorkList()
+    Assert.Equal<obj list>([ ({ ReserveStock.Order = "o-1" } :> obj) ], effectsOf list)
+
+    // It is the same list as the implicit conversion in C# gives.
+    Assert.Equal(WorkList<CheckoutFact>([ one :> Work<CheckoutFact> ].ToImmutableArray()), list)
+
+[<Fact>]
+let ``A status names an F# case without fields by its union, so a caller matches on the typed state`` () =
+    // An F# case that has fields is its own nested class. A case without fields is an instance of the union
+    // class, so the name a status reports for it is the name of the union.
+    Assert.Equal("Charging", WorkflowRunning<CheckoutState>(Charging "r", at).StateName)
+    Assert.Equal("CheckoutState", WorkflowRunning<CheckoutState>(Reserving, at).StateName)
+
+    // The state itself is the typed F# value, so the caller reads the case with a match.
+    let running = WorkflowRunning<CheckoutState>(Reserving, at)
+    match running.State with
+    | Reserving -> ()
+    | Charging _
+    | Undoing _
+    | NeedsAttention _ -> failwithf "Expected Reserving, got %A" running.State

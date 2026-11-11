@@ -166,6 +166,12 @@ public abstract record Work<TFact>
     internal abstract bool IsWait { get; }
 
     public static implicit operator WorkList<TFact>(Work<TFact> work) => new([work]);
+
+    /// <summary>
+    /// The implicit conversion to a work list as a method, for F# and other callers without implicit
+    /// conversions.
+    /// </summary>
+    public WorkList<TFact> ToWorkList() => this;
 }
 
 /// <summary>
