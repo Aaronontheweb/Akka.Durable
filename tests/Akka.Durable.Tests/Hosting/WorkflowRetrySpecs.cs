@@ -377,30 +377,34 @@ public sealed class ShardedWorkflowRetryRestartSpecs(ITestOutputHelper output) :
     protected override bool Sharded => true;
 }
 
-/// <summary>Real time: Every(1.5 s, 3 attempts), with the reminder delivering the wake. The effect time-out is 30 s.</summary>
-public sealed class WorkflowRetryRealTimeSpecs(ITestOutputHelper output) : WorkflowRetryKit(output)
+/// <summary>A workflow that is stopped while its work waits for the next attempt: its reminder is what starts it.</summary>
+public sealed class WorkflowRetryPassivationSpecs(ITestOutputHelper output) : WorkflowRetryKit(output)
 {
-    protected override RetryPolicy? ChargePolicy => Retry.Every(TimeSpan.FromMilliseconds(1500), attempts: 3);
-
-    protected override TimeSpan EffectTimeout => TimeSpan.FromSeconds(30);
-
     [Fact]
-    public async Task A_passivated_workflow_is_woken_by_its_reminder_for_the_next_attempt_which_is_not_early()
+    public async Task A_stopped_workflow_is_started_by_the_delivery_of_its_reminder_and_attempts_again_only_when_the_reminder_is_due()
     {
         ChargeFailsFirst(1);
         var checkout = CheckoutRef("t1");
         await checkout.Start(new PlaceOrder("t1", 100), AskCancellation());
-        var firstAt = await StartOf(1);
-        await AwaitReminderDue("t1", d => d > firstAt + TimeSpan.FromSeconds(1));
-        Assert.True(DateTimeOffset.UtcNow < firstAt + TimeSpan.FromSeconds(1.2), "The retry was almost due when the workflow stopped.");
+        var failedAt = await StartOf(1);
+        var due = await AwaitRetryDue("t1", failedAt, Minute);
 
-        // Nothing is sent to the workflow: its reminder activates it.
+        // Nothing is sent to the workflow: the reminder that it stored is delivered to a workflow that is not running,
+        // first before it is due. The workflow starts, takes the attempt and the date from its journal, stores its
+        // reminder again for that date, and does not attempt.
         await StopWorkflow("t1");
+        await DeliverReminder("t1", asIfStoredFor: due - TimeSpan.FromSeconds(1));
+        var recovered = await AwaitRunning("t1", running => Assert.NotNull(WorkAttempts.Find(running.Attempts, 0)));
+        var attempt = WorkAttempts.Find(recovered.Attempts, 0)!;
+        Assert.Equal(1, attempt.Attempt);
+        Assert.InRange(attempt.NextAt!.Value, due - Fuzz, due + Fuzz);
+        await AwaitReminderDue("t1", d => d >= due - Fuzz && d <= due + Fuzz);
+        Assert.Single(Charges);
 
-        Assert.Equal(new OrderPlaced("charge-t1"), (await checkout.WaitForOutcome(Poll, AskCancellation(TimeSpan.FromSeconds(30)))).Value);
-        var secondAt = await StartOf(2);
-        Assert.True(secondAt >= firstAt + TimeSpan.FromMilliseconds(1500) - TimeSpan.FromMilliseconds(250),
-            $"Attempt 2 started {secondAt - firstAt} after attempt 1.");
+        // Delivered when it is due, it makes the attempt.
+        await DeliverReminder("t1");
+        Assert.Equal(new OrderPlaced("charge-t1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
         Assert.Equal([1, 2], Charges.Select(c => c.Attempt));
+        Assert.Equal(Charges[0].Id, Charges[1].Id);
     }
 }

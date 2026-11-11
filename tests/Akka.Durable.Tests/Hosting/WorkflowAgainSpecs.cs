@@ -39,6 +39,13 @@ public abstract class CampaignRetryKit(ITestOutputHelper output) : CampaignWorkf
 
     protected int Count<TEffect>() => Services.Issued.OfType<TEffect>().Count();
 
+    /// <summary>
+    /// Delivers the workflow's stored reminder as Akka.Reminders would, to a workflow that may be stopped. With
+    /// <paramref name="asIfStoredFor"/> the delivery comes before the reminder is due.
+    /// </summary>
+    protected async Task DeliverReminder(string id, DateTimeOffset? asIfStoredFor = null) =>
+        StoredReminders.Deliver(Sys, Assert.Single(await RemindersOf(id)), asIfStoredFor);
+
     protected Task AwaitCount<TEffect>(int count) => AwaitAssertAsync(
         () => Assert.Equal(count, Count<TEffect>()), TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
 
@@ -183,17 +190,11 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         Assert.Equal(1, Count<CheckPayment>());
     }
 
-}
-
-/// <summary>Real time: <c>Again(after)</c> of 2 seconds, with the reminder delivering the wake.</summary>
-public sealed class WorkflowAgainRealTimeSpecs(ITestOutputHelper output) : CampaignRetryKit(output)
-{
-    protected override TimeSpan? AgainAfter => TimeSpan.FromSeconds(2);
 
     [Fact]
-    public async Task Again_after_a_delay_is_woken_by_its_reminder_after_a_restart_with_nothing_sent_to_the_workflow()
+    public async Task A_stopped_workflow_with_a_delayed_Again_is_started_by_the_delivery_of_its_reminder_and_issues_the_work_when_it_is_due()
     {
-        // The first check finds nothing, and the repeat is due 2 seconds later. The second finds the payment.
+        // The first check finds nothing, and the repeat is due 10 minutes later. The second finds the payment.
         var asked = new List<DateTimeOffset>();
         Services.Check = (_, _) =>
         {
@@ -202,20 +203,26 @@ public sealed class WorkflowAgainRealTimeSpecs(ITestOutputHelper output) : Campa
         };
         await VerifyingWith("a3", grace: TimeSpan.FromHours(1));
         await AwaitCount<CheckPayment>(1);
-        await AwaitReminderDue("a3", d => d >= asked[0] + TimeSpan.FromSeconds(2) - Fuzz && d <= asked[0] + TimeSpan.FromSeconds(2) + Slack);
-        Assert.True(DateTimeOffset.UtcNow < asked[0] + TimeSpan.FromSeconds(1.5), "The repeat was almost due when the workflow stopped.");
+        var due = await AwaitReminderDue("a3", d => d >= asked[0] + 10 * Minute - Fuzz && d <= asked[0] + 10 * Minute + Slack);
 
+        // Nothing is sent to the workflow: the reminder it stored is delivered to a workflow that is not running, first
+        // before it is due. The workflow starts, takes the date from its journal and stores its reminder again for it.
         await StopWorkflow("a3");
+        await DeliverReminder("a3", asIfStoredFor: due - TimeSpan.FromSeconds(1));
+        var recovered = await AwaitRunning("a3", running => Assert.NotNull(running.Delayed));
+        Assert.InRange(recovered.Delayed!.Value, due - Fuzz, due + Fuzz);
+        await AwaitReminderDue("a3", d => d >= due - Fuzz && d <= due + Fuzz);
+        Assert.Equal(1, Count<CheckPayment>());
 
-        // Its reminder activates it and the work is issued again, no sooner than 2 seconds after the first check.
+        // Delivered when it is due, it issues the work.
+        await DeliverReminder("a3");
         await AwaitCount<CheckPayment>(2);
-        Assert.True(asked[1] >= asked[0] + TimeSpan.FromSeconds(2) - TimeSpan.FromMilliseconds(250),
-            $"The second check came {asked[1] - asked[0]} after the first.");
         Assert.Equal(new PaidInFull(), (await CampaignRef("a3").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(2, Count<CheckPayment>());
     }
 
     [Fact]
-    public async Task Again_after_a_delay_that_was_journaled_but_whose_reminder_could_not_be_stored_is_woken_after_the_next_recovery()
+    public async Task Again_after_a_delay_that_was_journaled_but_whose_reminder_could_not_be_stored_gets_its_reminder_at_the_next_recovery()
     {
         // The first check finds nothing; the decision is journaled, and then the reminder cannot be stored.
         var asked = new List<DateTimeOffset>();
@@ -231,24 +238,32 @@ public sealed class WorkflowAgainRealTimeSpecs(ITestOutputHelper output) : Campa
         ReminderStorage.Failing = false;
 
         // The next recovery stores the reminder again, for the date in the journal: nothing is sent to the workflow.
+        await AwaitReminderDue("a5", d => d >= asked[0] + 10 * Minute - Fuzz && d <= asked[0] + 10 * Minute + Slack);
+        Assert.Equal(1, Count<CheckPayment>());
+
+        await DeliverReminder("a5");
         await AwaitCount<CheckPayment>(2);
-        Assert.True(asked[1] >= asked[0] + TimeSpan.FromSeconds(2) - TimeSpan.FromMilliseconds(250),
-            $"The second check came {asked[1] - asked[0]} after the first.");
         Assert.Equal(new PaidInFull(), (await CampaignRef("a5").WaitForOutcome(Poll, AskCancellation())).Value);
     }
 
     [Fact]
-    public async Task Repeating_the_work_does_not_move_the_states_timers_which_count_from_when_the_state_was_entered()
+    public async Task Repeating_the_work_does_not_move_the_states_timer_which_counts_from_when_the_state_was_entered()
     {
-        // A check that never finds the payment, asked again every 2 seconds, in a state whose time limit is 5 seconds.
+        // A check that never finds the payment, asked again after 10 minutes, in a state whose time limit is 5.
         Services.Check = (_, _) => Task.FromResult<CampaignFact>(new NotYetPaid());
-        var entered = await VerifyingWith("a4", grace: TimeSpan.FromSeconds(5));
+        var entered = await VerifyingWith("a4", grace: 5 * Minute);
+        await AwaitCount<CheckPayment>(1);
+        var timer = entered.EnteredAt + 5 * Minute;
+        await AwaitReminderDue("a4", d => d >= timer - Fuzz);
 
-        var pausing = await AwaitRunning("a4", running => Assert.Equal(new Pausing(0), StateOf(running)), TimeSpan.FromSeconds(30));
-
-        // The limit fired 5 seconds after Verifying was entered, not 5 seconds after the last repeat.
-        Assert.InRange(pausing.EnteredAt, entered.EnteredAt + TimeSpan.FromSeconds(5) - Fuzz, entered.EnteredAt + TimeSpan.FromSeconds(5) + Slack);
-        Assert.InRange(Count<CheckPayment>(), 2, 4);
+        // The repeat moved nothing: a wake a moment before the limit leaves the workflow where it is, and a wake at the
+        // limit counted from when the state was entered, not from the repeat, ends it.
+        Wake("a4", timer - TimeSpan.FromMilliseconds(1));
+        Assert.Equal(new Verifying(0), StateOf(Assert.IsType<WfRunning>((await HostedState("a4")).State.Value)));
+        Wake("a4", timer);
+        var pausing = await AwaitRunning("a4", running => Assert.Equal(new Pausing(0), StateOf(running)));
+        Assert.True(pausing.EnteredAt > entered.EnteredAt);
+        Assert.Equal(1, Count<CheckPayment>());
     }
 }
 

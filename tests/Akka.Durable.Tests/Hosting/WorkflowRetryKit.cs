@@ -75,6 +75,13 @@ public abstract class WorkflowRetryKit(ITestOutputHelper output) : CheckoutWorkf
     protected void Wake(string id, DateTimeOffset at) =>
         Region.Tell(new ShardingEnvelope(id, (WfCommand)new WfWake(at)), ActorRefs.NoSender);
 
+    /// <summary>
+    /// Delivers the workflow's stored reminder as Akka.Reminders would, to a workflow that may be stopped. With
+    /// <paramref name="asIfStoredFor"/> the delivery comes before the reminder is due.
+    /// </summary>
+    protected async Task DeliverReminder(string id, DateTimeOffset? asIfStoredFor = null) =>
+        StoredReminders.Deliver(Sys, Assert.Single(await RemindersOf(id)), asIfStoredFor);
+
     protected async Task<IReadOnlyList<ScheduledReminder>> RemindersOf(string id)
     {
         var listed = await Sys.ReminderClient().CreateClient(Definition.TypeName.Value, id).ListRemindersAsync(TestCancellation);
