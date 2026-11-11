@@ -136,7 +136,7 @@ public class WorkflowEngineSpecs
     // ---- What a fact leads to ----
 
     [Fact]
-    public void Held_facts_that_remain_when_the_workflow_finishes_are_not_decided()
+    public void A_held_fact_that_moves_the_workflow_on_replaces_the_finish_of_the_answer()
     {
         var outcome = Scenario()
             .Given([
@@ -145,15 +145,22 @@ public class WorkflowEngineSpecs
                 Held(new OperatorSaidRetry()),
             ])
             .When(Answer(entry: 2, index: 0, new Charged("c1")))
-            .ThenPersisted(Recorded(
-                new Charged("c1"), answered: 0, Ended(new OrderPlaced("c1"))))
+            .ThenPersisted(
+                Recorded(new Charged("c1"), answered: 0, new WfFinishing((CheckoutOutcome)new OrderPlaced("c1"))),
+                Recorded(new CancelRequested("changed my mind", "user-17"), answered: null,
+                    MovedTo(new Undoing(new OrderCancelled("changed my mind"))), fromHeld: true),
+                // The undo has not been issued yet, so the second held fact is decided in the new state, as before.
+                Recorded(new OperatorSaidRetry(), answered: null, Unexpected(), fromHeld: true))
             .ThenState(state =>
             {
-                var finished = Assert.IsType<WfFinished>(state.Value);
-                Assert.Equal<CheckoutOutcome>(new OrderPlaced("c1"), (CheckoutOutcome)finished.Outcome);
+                // The cancel moved the workflow on; the first finish did not happen.
+                var running = RunningState(state);
+                Assert.Equal<CheckoutState>(new Undoing(new OrderCancelled("changed my mind")), (CheckoutState)running.State);
+                Assert.Equal(3, running.Entry);
+                Assert.Empty(running.Held);
             });
 
-        Assert.Empty(IssuedWork(outcome));
+        Assert.Equal(new UndoOrder("o1"), Assert.Single(IssuedWork(outcome)).Effect);
     }
 
     [Fact]
