@@ -43,7 +43,8 @@ public sealed class WorkflowAndEntityRetrySpecs(ITestOutputHelper output) : Work
         var checkout = CheckoutRef("w1");
         await checkout.Start(new PlaceOrder("w1", 100), AskCancellation());
         await AwaitCharges(1);
-        var due = await AwaitRetryDue("w1", await StartOf(1), Minute);
+        var due = await AwaitRetry("w1", 1, Minute);
+        var stored = Assert.Single(await RemindersOf("w1"));
 
         // The entity's retries run on their own schedule, in real time, while the workflow waits.
         EntityRef<CounterCommand>("e1").Tell(new NoHandler("issue:a"));
@@ -54,7 +55,8 @@ public sealed class WorkflowAndEntityRetrySpecs(ITestOutputHelper output) : Work
 
         // The workflow was not touched by them: still on its first attempt, with its reminder where it was.
         Assert.Single(Charges);
-        Assert.Equal(due, Assert.Single(await RemindersOf("w1")).DueTimeUtc);
+        var still = Assert.Single(await RemindersOf("w1"));
+        Assert.Equal((due, stored.DueTimeUtc), (still.StoredFor(), still.DueTimeUtc));
 
         // And the workflow's retry does not run the entity's effect again.
         Wake("w1", due);

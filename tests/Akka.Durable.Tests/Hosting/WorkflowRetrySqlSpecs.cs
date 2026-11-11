@@ -11,8 +11,6 @@ namespace Akka.Durable.Tests.Hosting;
 /// </summary>
 public sealed class WorkflowRetrySqlSpecs
 {
-    private static readonly TimeSpan Fuzz = TimeSpan.FromMilliseconds(250);
-
     private static CancellationToken Ct => SqlCheckoutRig.Ct;
 
     [Fact]
@@ -24,6 +22,7 @@ public sealed class WorkflowRetrySqlSpecs
 
         // Attempt 1 fails, attempt 2 hangs, and the host stops with attempt 2 in flight.
         var started = new ConcurrentQueue<DateTimeOffset>();
+        var attemptTwoStart = default(DateTimeOffset);
         var first = new CheckoutServices();
         first.Charge = (_, _) =>
         {
@@ -38,10 +37,15 @@ public sealed class WorkflowRetrySqlSpecs
             var failed = Assert.IsType<WfRunning>((await SqlCheckoutRig.AwaitState(one, r => WorkAttempts.Find(r.Attempts, 0) is { NextAt: not null })).State.Value);
             SqlCheckoutRig.Wake(one, Assert.IsType<WfAttempt>(Assert.Single(WorkAttempts.Of(failed.Attempts))).NextAt!.Value);
             await SqlCheckoutRig.Until(() => started.Count == 2, "attempt 2");
+
+            // The start of attempt 2 as the workflow journaled it, before its handler ran.
+            var inFlight = Assert.IsType<WfRunning>((await SqlCheckoutRig.AwaitState(one, r => WorkAttempts.Find(r.Attempts, 0) is { Attempt: 2, NextAt: null })).State.Value);
+            attemptTwoStart = Assert.IsType<WfAttempt>(WorkAttempts.Find(inFlight.Attempts, 0)).StartedAt;
             await one.StopAsync(Ct);
         }
 
-        var attemptTwoAt = started.ElementAt(1);
+        // The journaled start is real: it comes before the handler ran.
+        Assert.True(attemptTwoStart <= started.ElementAt(1), "Attempt 2 was journaled as started after its handler ran.");
         var attemptTwo = SqlCheckoutRig.Deliveries<ChargeCard>(first)[1];
 
         // The new system reads the attempt count and the policy from the journal. Attempt 2 counts as failed, and
@@ -50,10 +54,11 @@ public sealed class WorkflowRetrySqlSpecs
         using (var two = await rig.StartAsync(second))
         {
             var checkout = SqlCheckoutRig.Ref(two);
-            var due = attemptTwoAt + timeout + SqlCheckoutRig.Minute;
+            var due = attemptTwoStart + timeout + SqlCheckoutRig.Minute;
             var running = Assert.IsType<WfRunning>((await SqlCheckoutRig.AwaitState(two, r => WorkAttempts.Find(r.Attempts, 0) is { NextAt: not null })).State.Value);
-            Assert.InRange(Assert.IsType<WfAttempt>(Assert.Single(WorkAttempts.Of(running.Attempts))).NextAt!.Value, due - Fuzz, due + Fuzz);
-            Assert.InRange(Assert.Single(await SqlCheckoutRig.Reminders(two)).DueTimeUtc, due - Fuzz, due + Fuzz);
+            var waiting = Assert.IsType<WfAttempt>(Assert.Single(WorkAttempts.Of(running.Attempts)));
+            Assert.Equal(new WfAttempt(0, 2, attemptTwoStart, due), waiting);
+            (await SqlCheckoutRig.AwaitReminder(two, r => r.StoredFor() == due)).IsWakeFor(due);
             SqlCheckoutRig.Wake(two, due - TimeSpan.FromSeconds(1));
             await SqlCheckoutRig.HostedState(two);
             Assert.Empty(second.Issued);

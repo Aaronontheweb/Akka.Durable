@@ -10,21 +10,20 @@ namespace Akka.Durable.Tests.Hosting;
 public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : WorkflowRetryKit(output)
 {
     [Theory]
-    [InlineData("throws", 0)]
-    [InlineData("faults", 0)]
-    [InlineData("empty", 0)]
-    [InlineData("times out", 300)]
-    public async Task A_failed_attempt_is_attempted_again_at_the_time_it_failed_plus_the_policys_wait(string how, int runsMs)
+    [InlineData("throws")]
+    [InlineData("faults")]
+    [InlineData("empty")]
+    [InlineData("times out")]
+    public async Task A_failed_attempt_is_attempted_again_at_the_time_it_failed_plus_the_policys_wait(string how)
     {
         ChargeFailsFirst(1, how);
         var checkout = CheckoutRef("s1");
 
         await checkout.Start(new PlaceOrder("s1", 100), AskCancellation());
 
-        // The first attempt failed after runsMs: the next one is due a minute later, and not before.
+        // The first attempt failed: the next one is due a minute after the failure.
         await AwaitCharges(1);
-        var failedAt = await StartOf(1) + TimeSpan.FromMilliseconds(runsMs);
-        var due = await AwaitRetryDue("s1", failedAt, Minute);
+        var due = await AwaitRetry("s1", 1, Minute);
         var before = await HostedState("s1");
 
         Wake("s1", due - TimeSpan.FromSeconds(1));
@@ -50,14 +49,10 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
 
         // After attempts 1 to 5: 1, 2, 4 minutes, then 8 and 16 capped at 5.
         TimeSpan[] waits = [Minute, 2 * Minute, 4 * Minute, 5 * Minute, 5 * Minute];
-        var previous = DateTimeOffset.MinValue;
         for (var n = 1; n <= 5; n++)
         {
             await AwaitCharges(n);
-            var failedAt = await StartOf(n);
-            var due = await AwaitReminderDue("s2", d => d > previous && d >= failedAt + waits[n - 1] - Fuzz);
-            Assert.InRange(due, failedAt + waits[n - 1] - Fuzz, failedAt + waits[n - 1] + Slack);
-            previous = due;
+            var due = await AwaitRetry("s2", n, waits[n - 1]);
             Wake("s2", due);
         }
 
@@ -80,7 +75,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         };
         var checkout = CheckoutRef("s3");
         await checkout.Start(new PlaceOrder("s3", 100), AskCancellation());
-        var due = await AwaitReminderDue("s3", d => d > DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30));
+        var due = await AwaitRetry("s3", 1, Minute);
 
         // The work waits for its next attempt, so it is not in flight: the cancel is decided at once.
         var cancelled = await checkout.Cancel("customer asked", "user-17", AskCancellation());
@@ -113,7 +108,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         };
         var checkout = CheckoutRef("s5");
         await checkout.Start(new PlaceOrder("s5", 100), AskCancellation());
-        var due = await AwaitReminderDue("s5", d => d > DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30));
+        var due = await AwaitRetry("s5", 1, Minute);
         Wake("s5", due);
         await AwaitCharges(2);
 
@@ -153,7 +148,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         var checkout = CheckoutRef("s4");
         await checkout.Start(new PlaceOrder("s4", 100), AskCancellation());
         await AwaitCharges(1);
-        var due = await AwaitRetryDue("s4", await StartOf(1), Minute);
+        var due = await AwaitRetry("s4", 1, Minute);
 
         // The table says Unexpected for this fact in Charging: the state stays, so the retry stays.
         Assert.IsType<Delivered>((await checkout.Notify(new OperatorSaidRetry(), AskCancellation())).Value);
@@ -185,14 +180,10 @@ public sealed class WorkflowRetryExhaustionSpecs(ITestOutputHelper output) : Wor
 
         // Waits of 1 and 2 minutes, and no third wait.
         TimeSpan[] waits = [Minute, 2 * Minute];
-        var previous = DateTimeOffset.MinValue;
         for (var n = 1; n <= 2; n++)
         {
             await AwaitCharges(n);
-            var startedAt = await StartOf(n);
-            var due = await AwaitReminderDue("x1", d => d > previous && d >= startedAt + waits[n - 1] - Fuzz);
-            previous = due;
-            Wake("x1", due);
+            Wake("x1", await AwaitRetry("x1", n, waits[n - 1]));
         }
 
         var running = await SettledIn<NeedsAttention>("x1");
@@ -215,17 +206,26 @@ public sealed class WorkflowRetryExhaustionSpecs(ITestOutputHelper output) : Wor
         ChargeFailsFirst(1);
         await CheckoutRef("x2").Start(new PlaceOrder("x2", 100), AskCancellation());
         await AwaitCharges(1);
-        var due = await AwaitRetryDue("x2", await StartOf(1), Minute);
+        var due = await AwaitRetry("x2", 1, Minute);
 
         // Attempt 2, the second of three, is in flight when the workflow stops: nothing is left to wait for but
-        // one more attempt, which is due a while after the cut-off.
-        Services.Charge = (_, ct) => Never(ct);
+        // one more attempt, due after attempt 2's time limit (30 s) and the policy's wait after it (2 minutes),
+        // counted from attempt 2's journaled start.
+        Services.Charge = (_, ct) =>
+        {
+            ChargeStarts.Enqueue(DateTimeOffset.UtcNow);
+            return Never(ct);
+        };
         Wake("x2", due);
         await AwaitCharges(2);
+        var secondStart = await JournaledStartOf("x2", 2);
+        Assert.True(secondStart <= await StartOf(2), "Attempt 2 was journaled as started after its handler ran.");
         await RestartWorkflow("x2");
 
-        var after = await AwaitReminderDue("x2", d => d > DateTimeOffset.UtcNow + Minute);
-        Assert.InRange(after, due, due + TimeSpan.FromMinutes(10));
+        var after = secondStart + EffectTimeout + 2 * Minute;
+        var waiting = await AwaitRunning("x2", r => Assert.NotNull(WorkAttempts.Find(r.Attempts, 0)?.NextAt));
+        Assert.Equal(new WfAttempt(0, 2, secondStart, after), WorkAttempts.Find(waiting.Attempts, 0));
+        await AwaitWakeFor("x2", after);
         Assert.Equal(2, Charges.Count);
 
         // Attempt 3 is the last: this one is cut off too, and the policy has run out.
@@ -254,18 +254,19 @@ public abstract class WorkflowRetryRestartSpecs(ITestOutputHelper output) : Work
         var checkout = CheckoutRef("r1");
         await checkout.Start(new PlaceOrder("r1", 100), AskCancellation());
         await AwaitCharges(1);
-        var due1 = await AwaitRetryDue("r1", await StartOf(1), Minute);
+        var due1 = await AwaitRetry("r1", 1, Minute);
 
         // The restart keeps the date: the workflow is not asked again early, and its reminder is the same.
         await RestartWorkflow("r1");
-        var kept = Assert.Single(await RemindersOf("r1")).DueTimeUtc;
-        Assert.InRange(kept, due1 - TimeSpan.FromSeconds(1), due1 + TimeSpan.FromSeconds(1));
+        var recovered = await AwaitRunning("r1", r => Assert.NotNull(WorkAttempts.Find(r.Attempts, 0)?.NextAt));
+        Assert.Equal((1, (DateTimeOffset?)due1), (WorkAttempts.Find(recovered.Attempts, 0)!.Attempt, WorkAttempts.Find(recovered.Attempts, 0)!.NextAt));
+        await AwaitWakeFor("r1", due1);
         Assert.Single(Charges);
 
         // Attempt 2 is attempt 2, so its wait is two minutes, not one.
         Wake("r1", due1);
         await AwaitCharges(2);
-        var due2 = await AwaitRetryDue("r1", await StartOf(2), 2 * Minute);
+        var due2 = await AwaitRetry("r1", 2, 2 * Minute);
         await RestartWorkflow("r1");
         Assert.Single(Charges.Skip(1));
 
@@ -286,13 +287,17 @@ public abstract class WorkflowRetryRestartSpecs(ITestOutputHelper output) : Work
         var checkout = CheckoutRef("r2");
         await checkout.Start(new PlaceOrder("r2", 100), AskCancellation());
         await AwaitCharges(1);
-        var started = await StartOf(1);
+        var started = await JournaledStartOf("r2", 1);
+        Assert.True(started <= await StartOf(1), "The work was journaled as issued after its handler ran.");
 
         await RestartWorkflow("r2");
 
-        // Not issued at once: attempt 1 may have run up to its time limit, and the policy's minute follows.
-        var due = await AwaitReminderDue("r2", d => d > DateTimeOffset.UtcNow + TimeSpan.FromSeconds(45));
-        Assert.InRange(due, started + TimeSpan.FromSeconds(90) - Fuzz, started + TimeSpan.FromSeconds(90) + Slack);
+        // Not issued at once: attempt 1 may have run up to its time limit (30 s), and the policy's minute follows,
+        // counted from the attempt's journaled start.
+        var due = started + EffectTimeout + Minute;
+        var waiting = await AwaitRunning("r2", r => Assert.NotNull(WorkAttempts.Find(r.Attempts, 0)?.NextAt));
+        Assert.Equal(new WfAttempt(0, 1, started, due), WorkAttempts.Find(waiting.Attempts, 0));
+        await AwaitWakeFor("r2", due);
         Assert.Single(Charges);
 
         Wake("r2", due - TimeSpan.FromSeconds(1));
@@ -329,9 +334,9 @@ public sealed class WorkflowRetryUntilAcknowledgedSpecs(ITestOutputHelper output
         for (var n = 1; n <= 7; n++)
         {
             await AwaitCharges(n);
-            var failedAt = await StartOf(n);
-            var due = await AwaitReminderDue("u1", d => d >= failedAt + waits[n - 1] - Fuzz);
+            var due = await AwaitRetry("u1", n, waits[n - 1]);
             await RestartWorkflow("u1");
+            await AwaitWakeFor("u1", due);
             Assert.Equal(n, Charges.Count);
             Wake("u1", due);
         }
@@ -386,8 +391,8 @@ public sealed class WorkflowRetryPassivationSpecs(ITestOutputHelper output) : Wo
         ChargeFailsFirst(1);
         var checkout = CheckoutRef("t1");
         await checkout.Start(new PlaceOrder("t1", 100), AskCancellation());
-        var failedAt = await StartOf(1);
-        var due = await AwaitRetryDue("t1", failedAt, Minute);
+        await AwaitCharges(1);
+        var due = await AwaitRetry("t1", 1, Minute);
 
         // Nothing is sent to the workflow: the reminder that it stored is delivered to a workflow that is not running,
         // first before it is due. The workflow starts, takes the attempt and the date from its journal, stores its
@@ -396,9 +401,8 @@ public sealed class WorkflowRetryPassivationSpecs(ITestOutputHelper output) : Wo
         await DeliverReminder("t1", asIfStoredFor: due - TimeSpan.FromSeconds(1));
         var recovered = await AwaitRunning("t1", running => Assert.NotNull(WorkAttempts.Find(running.Attempts, 0)));
         var attempt = WorkAttempts.Find(recovered.Attempts, 0)!;
-        Assert.Equal(1, attempt.Attempt);
-        Assert.InRange(attempt.NextAt!.Value, due - Fuzz, due + Fuzz);
-        await AwaitReminderDue("t1", d => d >= due - Fuzz && d <= due + Fuzz);
+        Assert.Equal((1, (DateTimeOffset?)due), (attempt.Attempt, attempt.NextAt));
+        await AwaitWakeFor("t1", due);
         Assert.Single(Charges);
 
         // Delivered when it is due, it makes the attempt.

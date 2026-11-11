@@ -21,8 +21,6 @@ public sealed class WorkflowAlpha4DataSpecs
 
     private static CancellationToken Ct => SqlCheckoutRig.Ct;
 
-    private static readonly TimeSpan Fuzz = TimeSpan.FromMilliseconds(250);
-
     private delegate void Write(ref MessagePackWriter writer);
 
     private static byte[] Bytes(Write write)
@@ -173,13 +171,12 @@ public sealed class WorkflowAlpha4DataSpecs
         var running = (WfRunning)recovered.State.Value;
         var attempt = Assert.IsType<WfAttempt>(Assert.Single(WorkAttempts.Of(running.Attempts)));
         var next = issuedAt + TimeSpan.FromSeconds(30) + SqlCheckoutRig.Minute;
-        Assert.Equal(new WfAttempt(0, 1, issuedAt, attempt.NextAt), attempt);
-        Assert.InRange(attempt.NextAt!.Value, next - Fuzz, next + Fuzz);
+        Assert.Equal(new WfAttempt(0, 1, issuedAt, next), attempt);
         Assert.Equal(2, running.Entry);
         Assert.Empty(second.Issued);
 
         // At its time attempt 2 runs and the workflow decides its fact.
-        SqlCheckoutRig.Wake(two, attempt.NextAt.Value);
+        SqlCheckoutRig.Wake(two, next);
         var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
         Assert.Equal(new OrderPlaced("charge-w1"), outcome.Value);
         Assert.Equal(2, Assert.Single(SqlCheckoutRig.Deliveries<ChargeCard>(second)).Attempt);
@@ -229,12 +226,11 @@ public sealed class WorkflowAlpha4DataSpecs
         Assert.Null(running.Delayed);
         var attempt = Assert.IsType<WfAttempt>(Assert.Single(WorkAttempts.Of(running.Attempts)));
         var next = repeatedAt + TimeSpan.FromSeconds(30) + SqlCheckoutRig.Minute;
-        Assert.Equal(new WfAttempt(0, 1, repeatedAt, attempt.NextAt), attempt);
-        Assert.InRange(attempt.NextAt!.Value, next - Fuzz, next + Fuzz);
+        Assert.Equal(new WfAttempt(0, 1, repeatedAt, next), attempt);
         Assert.Empty(second.Issued);
 
         // At its time attempt 2 of the undo runs, and the workflow ends with the outcome it carried.
-        SqlCheckoutRig.Wake(two, attempt.NextAt.Value);
+        SqlCheckoutRig.Wake(two, next);
         var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
         Assert.Equal(new OrderFailed("card declined"), outcome.Value);
         Assert.Equal([new UndoOrder("w1")], second.Issued);
