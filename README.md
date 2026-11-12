@@ -35,12 +35,15 @@ public static class Invoice
         new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
 
     public static Decision<InvoiceCommand, InvoiceEvent> Decide(
-        InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
+        InvoiceState state,
+        InvoiceCommand command,
+        InvoiceContext ctx) =>
         (state, command) switch
         {
             // Needs an outside answer: remember that we asked, then ask.
             (Draft, IssueInvoice c) when c.Total > 0 =>
-                ctx.Persist(new VerificationStarted(c)).Execute(new VerifyRecipient(c.Recipient)),
+                ctx.Persist(new VerificationStarted(c))
+                    .Execute(new VerifyRecipient(c.Recipient)),
 
             // The answer arrives as a command. The request kept in state fixes the reply type.
             (Verifying v, RecipientVerified) =>
@@ -48,7 +51,8 @@ public static class Invoice
                     .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
                     .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
             (Verifying v, RecipientRejected r) =>
-                ctx.Persist(new VerificationFailed(r.Reason)).Reply(v.Request, new InvoiceRejected(r.Reason)),
+                ctx.Persist(new VerificationFailed(r.Reason))
+                    .Reply(v.Request, new InvoiceRejected(r.Reason)),
             (_, RecipientVerified or RecipientRejected) => ctx.Ignore(),
 
             (Issued s, RecordPayment p) when p.Amount == s.Total =>
@@ -57,11 +61,14 @@ public static class Invoice
                     .Reply(p, new PaymentAccepted()),
 
             // A lost reminder mail is acceptable, so the light, unrecorded Run is enough.
-            (Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
+            (Issued, SendReminder) =>
+                ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
             (_, SendReminder) => ctx.Ignore(),
 
-            (_, IssueInvoice c) => ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
-            (_, RecordPayment p) => ctx.None().Reply(p, new InvoiceRejected("Invalid invoice operation")),
+            (_, IssueInvoice c) =>
+                ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
+            (_, RecordPayment p) =>
+                ctx.None().Reply(p, new InvoiceRejected("Invalid invoice operation")),
         };
 
     public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
@@ -80,9 +87,11 @@ public static class Invoice
 
 ```csharp
 [AkkaSerializable(Manifest = "verify-recipient-v1")]
-public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient) : IInvoiceProtocol, IEffect<InvoiceCommand>
+public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient)
+    : IInvoiceProtocol, IEffect<InvoiceCommand>
 {
-    public InvoiceCommand GaveUp(WorkGaveUp g) => new RecipientRejected($"directory: {g.Reason}");
+    public InvoiceCommand GaveUp(WorkGaveUp g) =>
+        new RecipientRejected($"directory: {g.Reason}");
 }
 ```
 
@@ -92,7 +101,10 @@ The only impure code is its handler, which Akka.Durable resolves from a fresh DI
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
     : IEffectHandler<VerifyRecipient, InvoiceCommand>
 {
-    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, EffectDelivery delivery, CancellationToken ct) =>
+    public async Task<InvoiceCommand> HandleAsync(
+        VerifyRecipient effect,
+        EffectDelivery delivery,
+        CancellationToken ct) =>
         await directory.LookupAsync(effect.Recipient, ct) switch
         {
             Known => new RecipientVerified(),
@@ -115,7 +127,8 @@ public interface IEntityRef<in TCommand>
 
     void Tell(TCommand command, IActorRef? sender = null);
 
-    Task<TReply> Ask<TReply>(IReplies<TCommand, TReply> command,
+    Task<TReply> Ask<TReply>(
+        IReplies<TCommand, TReply> command,
         CancellationToken cancellationToken = default) where TReply : notnull;
 }
 
@@ -123,9 +136,12 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
 {
     Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
 
-    Task<StateSnapshot<TState>> WaitForStateAsync(Func<TState, bool> until, CancellationToken cancellationToken);
+    Task<StateSnapshot<TState>> WaitForStateAsync(
+        Func<TState, bool> until,
+        CancellationToken cancellationToken);
 
-    IAsyncEnumerable<StateSnapshot<TState>> WatchStateAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<StateSnapshot<TState>> WatchStateAsync(
+        CancellationToken cancellationToken = default);
 }
 ```
 
@@ -137,7 +153,9 @@ To react to a change, do not read the state in a loop. Wait for the state, or wa
 // In a request handler: wait at most five seconds for the payment.
 using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
 limit.CancelAfter(TimeSpan.FromSeconds(5));
-var paid = await invoices.Get(id).WaitForStateAsync(s => s is Paid, limit.Token); // OperationCanceledException at the limit
+
+// Throws OperationCanceledException at the limit.
+var paid = await invoices.Get(id).WaitForStateAsync(s => s is Paid, limit.Token);
 
 // In a status stream: the current state first, then each new one.
 await foreach (var snapshot in invoices.Get(id).WatchStateAsync(ct))
@@ -149,9 +167,20 @@ You get the current state first, then a snapshot after each write that holds eve
 ## You do not need to build an outbox. Akka.Durable has one.
 
 ```csharp
-ctx.Persist(new PaymentRecorded(p.Amount)).Execute(new PublishPayment(ctx.EntityId, p.Amount));    // in Decide
-services.AddEffectHandler<PublishPayment, PublishPaymentHandler>(Retry.UntilAcknowledged(TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(5)));
-public sealed class PublishPaymentHandler(IBus bus) : IEffectHandler<PublishPayment> { /* ... */ }
+// In Decide:
+ctx.Persist(new PaymentRecorded(p.Amount))
+    .Execute(new PublishPayment(ctx.EntityId, p.Amount));
+
+services.AddEffectHandler<PublishPayment, PublishPaymentHandler>(
+    Retry.UntilAcknowledged(
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromMinutes(5)));
+
+public sealed class PublishPaymentHandler(IBus bus)
+    : IEffectHandler<PublishPayment>
+{
+    /* ... */
+}
 ```
 
 `PublishPayment` is recorded in the same journal write as `PaymentRecorded`, and its handler runs at least once, after a crash too, until it returns without throwing; it can run more than once, so it must be safe to repeat.

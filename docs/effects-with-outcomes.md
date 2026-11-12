@@ -30,10 +30,14 @@ The [invoice in the README](../README.md#define-its-behavior) does this for reci
 The second type argument of the handler is the entity's command type. The answer goes through `Decide` like any other command, so `Decide` can decline it, ask again, or ignore it. Register exactly one handler per effect type with `AddEffectHandler`. A second registration fails at startup. An effect with no handler is a deployment mistake: it is refused before anything is written, an error is logged that names the `AddEffectHandler<...>` call to add, and the entity restarts under its supervisor. `VerifyRecipientHandler` is one:
 
 ```csharp
+// The handler's second type argument says the answer is a command.
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
-    : IEffectHandler<VerifyRecipient, InvoiceCommand>       // the answer is a command
+    : IEffectHandler<VerifyRecipient, InvoiceCommand>
 {
-    public async Task<InvoiceCommand> HandleAsync(VerifyRecipient effect, EffectDelivery delivery, CancellationToken ct) =>
+    public async Task<InvoiceCommand> HandleAsync(
+        VerifyRecipient effect,
+        EffectDelivery delivery,
+        CancellationToken ct) =>
         await directory.LookupAsync(effect.Recipient, ct) switch
         {
             Known => new RecipientVerified(),
