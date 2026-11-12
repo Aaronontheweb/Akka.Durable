@@ -73,7 +73,7 @@ public sealed class WorkflowSnapshotSqlSpecs
 
         // At its time attempt 3 runs, once, and is answered.
         SqlCheckoutRig.Wake(two, secondNext);
-        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
+        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
         Assert.Equal(new OrderPlaced("charge-w1"), outcome.Value);
         Assert.Equal([new ChargeCard("w1", 100)], second.Issued);
         var delivery = Assert.Single(SqlCheckoutRig.Deliveries<ChargeCard>(second));
@@ -126,7 +126,7 @@ public sealed class WorkflowSnapshotSqlSpecs
         Assert.Empty(second.Issued);
 
         SqlCheckoutRig.Wake(two, repeatAt);
-        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
+        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
         Assert.Equal(new OrderFailed("card declined"), outcome.Value);
         Assert.Equal([new UndoOrder("w1")], second.Issued);
         await two.StopAsync(Ct);

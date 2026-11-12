@@ -137,11 +137,50 @@ public interface IWorkflowRef<in TInput, TState, in TFact, TOutcome>
     Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> GetStateAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Reads the workflow with <see cref="GetStateAsync"/> every <paramref name="pollEvery"/> until the workflow has finished, and returns its
-    /// outcome. The waiting happens in the caller, not in the workflow. For a workflow that takes seconds.
+    /// Waits until the workflow's condition satisfies <paramref name="until"/>, and returns that snapshot. Returns
+    /// after one round trip when the current condition already satisfies it. Activates the workflow if needed.
     /// </summary>
+    /// <remarks>
+    /// The predicate runs in this process, once for each snapshot that reaches the wait, in order: the current
+    /// condition first, then the condition after each later write that holds events. It is never sent to the
+    /// workflow. This is a live push held in memory, not durable delivery: when the workflow stops, restarts or moves,
+    /// the wait subscribes again by itself and goes on from the condition the workflow has then.
+    /// </remarks>
+    /// <param name="until">The condition on the workflow's status.</param>
+    /// <param name="cancellationToken">The time limit of the wait. Required.</param>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired first.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The journal holds a state or an outcome of another type, as for <see cref="GetStateAsync"/>.
+    /// </exception>
+    Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> WaitForStateAsync(
+        Func<WorkflowStatus<TState, TOutcome>, bool> until, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The workflow's current snapshot, then a snapshot after each later write that holds events. It ends after the
+    /// <see cref="WorkflowFinished{TOutcome}"/> snapshot, because a finished workflow does not change.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A slow reader gets the newest snapshot it has not read: it can skip conditions, but it never reads an older
+    /// one after a newer one, and it always reads the finished one. A fact that keeps the state still gives a snapshot,
+    /// with the same status and a higher <see cref="StateSnapshot{TState}.SequenceNr"/>.
+    /// </para>
+    /// <para>
+    /// This is a live push held in memory, not durable delivery. When the workflow stops, restarts or moves, the
+    /// stream subscribes again by itself and goes on from the condition the workflow has then.
+    /// </para>
+    /// </remarks>
+    IAsyncEnumerable<StateSnapshot<WorkflowStatus<TState, TOutcome>>> WatchStateAsync(
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Waits until the workflow has finished, and returns its outcome. The wait is a state subscription: the
+    /// workflow sends its new condition after each change, and nothing is read again and again.
+    /// </summary>
+    /// <param name="cancellationToken">The time limit of the wait. Required.</param>
     /// <exception cref="InvalidOperationException">The workflow has not been started.</exception>
-    Task<TOutcome> WaitForOutcome(TimeSpan pollEvery, CancellationToken cancellationToken = default);
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired first.</exception>
+    Task<TOutcome> WaitForOutcome(CancellationToken cancellationToken);
 
     /// <summary>
     /// Asks the workflow to stop. The definition's <c>Cancel</c> function turns the request into a fact, and
@@ -178,7 +217,7 @@ public interface IWorkflowRefs<in TInput, TState, in TFact, TOutcome>
 }
 
 internal sealed class WorkflowRefs<TInput, TState, TFact, TOutcome>(
-    IRequiredActor<WorkflowRegion<TInput, TState, TFact, TOutcome>> region)
+    IRequiredActor<WorkflowRegion<TInput, TState, TFact, TOutcome>> region, ActorSystem system)
     : IWorkflowRefs<TInput, TState, TFact, TOutcome>
     where TInput : notnull
     where TState : notnull
@@ -202,18 +241,18 @@ internal sealed class WorkflowRefs<TInput, TState, TFact, TOutcome>(
                 error);
         }
 
-        return new WorkflowRef<TInput, TState, TFact, TOutcome>(id, actor);
+        return new WorkflowRef<TInput, TState, TFact, TOutcome>(id, actor, system);
     }
 }
 
-internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id, IActorRef region)
+internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id, IActorRef region, ActorSystem system)
     : IWorkflowRef<TInput, TState, TFact, TOutcome>
     where TInput : notnull
     where TState : notnull
     where TFact : notnull
     where TOutcome : notnull
 {
-    private EntityRef<WfCommand, WfState, WfEvent> Entity { get; } = new(new EntityId(id.Value), region);
+    private EntityRef<WfCommand, WfState, WfEvent> Entity { get; } = new(new EntityId(id.Value), region, system);
 
     public WorkflowId Id => id;
 
@@ -253,9 +292,35 @@ internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id
     }
 
     public async Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> GetStateAsync(
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        StatusOf(await Entity.GetStateAsync(cancellationToken));
+
+    public Task<StateSnapshot<WorkflowStatus<TState, TOutcome>>> WaitForStateAsync(
+        Func<WorkflowStatus<TState, TOutcome>, bool> until, CancellationToken cancellationToken) =>
+        StateSubscription.WaitAsync(system, region, Entity.Id, Read, until, cancellationToken);
+
+    public IAsyncEnumerable<StateSnapshot<WorkflowStatus<TState, TOutcome>>> WatchStateAsync(
+        CancellationToken cancellationToken = default) =>
+        StateSubscription.WatchAsync(system, region, Entity.Id, Read,
+            last: status => status.Value is WorkflowFinished<TOutcome>, cancellationToken);
+
+    public async Task<TOutcome> WaitForOutcome(CancellationToken cancellationToken)
     {
-        var snapshot = await Entity.GetStateAsync(cancellationToken);
+        // A workflow never goes back to not started, so not started can only be the first snapshot.
+        var snapshot = await WaitForStateAsync(
+            status => status.Value is WorkflowFinished<TOutcome> or WorkflowNotStarted, cancellationToken);
+        return snapshot.State.Value is WorkflowFinished<TOutcome> finished
+            ? finished.Outcome
+            : throw new InvalidOperationException(
+                $"Workflow [{id.Value}] has not been started, so it has no outcome to wait for. Call Start first.");
+    }
+
+    private StateSnapshot<WorkflowStatus<TState, TOutcome>> Read(EntityStateReply reply) =>
+        StatusOf(new StateSnapshot<WfState>((WfState)reply.State, reply.SequenceNr));
+
+    /// <summary>The hosting entity's state as the condition of the workflow.</summary>
+    private StateSnapshot<WorkflowStatus<TState, TOutcome>> StatusOf(StateSnapshot<WfState> snapshot)
+    {
         WorkflowStatus<TState, TOutcome> status = snapshot.State switch
         {
             WfNotStarted => new WorkflowNotStarted(),
@@ -269,27 +334,6 @@ internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id
     private T Stored<T>(object value) => value is T typed ? typed : throw new InvalidOperationException(
         $"Workflow [{id.Value}] holds a value of type {value.GetType().FullName}, but its ref reads the type " +
         $"{typeof(T).FullName}. The journal was written with another type.");
-
-    public async Task<TOutcome> WaitForOutcome(TimeSpan pollEvery, CancellationToken cancellationToken = default)
-    {
-        if (pollEvery <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(pollEvery), pollEvery, "The poll interval must be positive.");
-
-        while (true)
-        {
-            switch ((await GetStateAsync(cancellationToken)).State)
-            {
-                case WorkflowFinished<TOutcome> finished:
-                    return finished.Outcome;
-
-                case WorkflowNotStarted:
-                    throw new InvalidOperationException(
-                        $"Workflow [{id.Value}] has not been started, so it has no outcome to wait for. Call Start first.");
-            }
-
-            await Task.Delay(pollEvery, cancellationToken);
-        }
-    }
 
 }
 

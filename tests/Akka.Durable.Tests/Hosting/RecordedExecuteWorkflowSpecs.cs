@@ -31,7 +31,7 @@ public sealed class RecordedExecuteWorkflowSpecs(ITestOutputHelper output) : Che
         await checkout.Start(new PlaceOrder("both", 100), AskCancellation());
         await counter.Ask(new Announce("hi"), AskCancellation());
 
-        Assert.Equal(new OrderPlaced("charge-both"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-both"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         await AwaitAssertAsync(
             async () => Assert.Empty(await PendingEffects<CounterCommand>("both")), cancellationToken: TestCancellation);
         Assert.Contains(Host.Services.GetRequiredService<EffectRecorder>().Entries, e => e.StartsWith("announce:hi:counter/both/", StringComparison.Ordinal));

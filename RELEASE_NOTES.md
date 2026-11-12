@@ -1,3 +1,17 @@
+#### 0.1.0-alpha.6 November 12th 2026 ####
+
+Sixth alpha release of Akka.Durable. A caller can now wait for an entity's or a workflow's state, and watch it, without polling. `WaitForOutcome` is built on this and no longer polls. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **`WaitForStateAsync(until, cancellationToken)`** on `IDurableEntityRef` and `IWorkflowRef`. It returns the first snapshot whose state satisfies `until`. The token is required: it is the time limit, and when it fires the wait throws `OperationCanceledException`. When the state already satisfies `until`, it returns after one round trip. The predicate runs in the caller's process; the entity never sees it.
+* **`WatchStateAsync(cancellationToken)`** on the same refs. An `IAsyncEnumerable` of snapshots: the current state first, then one after each later write that holds events. A slow reader gets the newest snapshot it has not read. For a workflow, the stream ends after the finished snapshot.
+* **The guarantee.** On subscribing you get the current state, and then one snapshot after each later write that holds events, in order, each with the sequence number `GetStateAsync` would return at that moment. A snapshot is sent only after its events are journaled and its `Run` effects have finished. When the entity stops, passivates, restarts or moves, the subscription registers again by itself and goes on from the state the entity has then, so states in that time can be missed. This is a live, best-effort push held in memory, not durable delivery: nothing is journaled or sent again, and a reaction that must happen belongs in an effect.
+* **`WaitForOutcome(cancellationToken)`** no longer polls. It waits on the subscription. `pollEvery` is removed, and the token is required.
+* **Removed: `CommittedEvent<TEvent>` and `EntityUpdate<TState, TEvent>`.** Nothing used them. The event type stays on `IDurableEntityRef`.
+
+**What you change from 0.1.0-alpha.5:** `WaitForOutcome(pollEvery, token)` becomes `WaitForOutcome(token)`, and a call without a token now needs one. Remove any use of `CommittedEvent<TEvent>` or `EntityUpdate<TState, TEvent>`. A loop that reads `GetStateAsync` until the state changes can become one `WaitForStateAsync`. Nothing stored changes: a subscription writes nothing to the journal, the snapshot store or the reminder store. During a rolling upgrade, a subscription to an entity on a node that still runs 0.1.0-alpha.5 does not connect until that node is upgraded, so a wait runs to its token. Upgrade every node before you rely on a subscription.
+
+Not yet implemented: delivery of a workflow's outcome to the entity or workflow that started it, child workflows, a scenario test kit for workflows, event subscriptions, entity contracts and proxies, source generation, and snapshot retention tests.
+
 #### 0.1.0-alpha.5 November 11th 2026 ####
 
 Fifth alpha release of Akka.Durable. A workflow's work can now be retried by a policy, as an entity's effects are, and `Again` can wait before it repeats the work. Akka.Durable is still a proof of concept, not an official Akka.NET project.

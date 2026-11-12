@@ -42,7 +42,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         Assert.IsType<Delivered>((await checkout.Notify(new OperatorSaidRetry(), AskCancellation())).Value);
 
         // Back to the charge, which is issued again and goes through this time.
-        Assert.Equal(new OrderPlaced("charge-f1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-f1"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(
             [new ReserveStock("f1"), new ChargeCard("f1", 100), new OpenSupportTicket("f1", "ChargeCard Failed"), new ChargeCard("f1", 100)],
             Services.Issued);
@@ -59,7 +59,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
         reserved.SetResult(new Reserved("res-f2"));
 
-        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         var finished = Assert.IsType<WorkflowFinished<CheckoutOutcome>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
         Assert.Equal(new OrderCancelled("customer asked"), finished.Outcome.Value);
 
@@ -79,7 +79,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         Assert.IsType<Held>((await checkout.Cancel("second", "user-17", AskCancellation())).Value);
         reserved.SetResult(new Reserved("res-f3"));
 
-        Assert.Equal(new OrderCancelled("first"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderCancelled("first"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Single(Services.Issued.OfType<UndoOrder>());
     }
 
@@ -116,7 +116,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
     {
         var checkout = CheckoutWithFacts("f6");
         await checkout.Start(new PlaceOrder("f6", 100), AskCancellation());
-        await checkout.WaitForOutcome(Poll, AskCancellation());
+        await checkout.WaitForOutcome(AskCancellation());
         var before = await HostedState("f6");
 
         var notified = Assert.IsType<AlreadyFinished<CheckoutOutcome>>(
@@ -164,7 +164,7 @@ public abstract class WorkflowFactsFromOutsideSpecs(ITestOutputHelper output) : 
         // An operator tool sends its own message type to the workflow's address.
         region.Tell(new ShardingEnvelope("f8", new OperatorDecision(Retry: false)), TestActor);
 
-        Assert.Equal(new OrderFailed("ChargeCard Failed"), (await CheckoutWithFacts("f8").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderFailed("ChargeCard Failed"), (await CheckoutWithFacts("f8").WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(new UndoOrder("f8"), Services.Issued[^1]);
 
         // The sender did not ask, so it gets no reply.

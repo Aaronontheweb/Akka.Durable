@@ -126,7 +126,7 @@ public abstract class WorkflowHeldFactsSpecs(ITestOutputHelper output) : Workflo
         Assert.IsType<Charging>(running.State.Value);
 
         second.SetResult(new Charged("second"));
-        Assert.Equal(new OrderPlaced("second"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("second"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(["Charged", "OperatorSaidRetry", "Charged"], DecidedFacts().Skip(1));
     }
 
@@ -161,7 +161,7 @@ public abstract class WorkflowHeldFactsSpecs(ITestOutputHelper output) : Workflo
         Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
         undo.SetResult(new Undone());
 
-        Assert.Equal(new OrderFailed("no funds"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderFailed("no funds"), (await checkout.WaitForOutcome(AskCancellation())).Value);
 
         // The answer, then the held facts in the order they arrived, each once.
         Assert.Equal(["Declined", "Undone", "OperatorSaidRetry", "CancelRequested"], DecidedFacts().Skip(1));
@@ -205,7 +205,7 @@ public abstract class WorkflowHeldFactsSpecs(ITestOutputHelper output) : Workflo
         Assert.IsType<WorkflowRunning<CheckoutState>>((await checkout.GetStateAsync(AskCancellation())).State.Value);
 
         undo.SetResult(new Undone());
-        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([new ReserveStock("h5"), new ChargeCard("h5", 100), new UndoOrder("h5")], Services.Issued);
     }
 
@@ -218,7 +218,7 @@ public abstract class WorkflowHeldFactsSpecs(ITestOutputHelper output) : Workflo
         Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
         undo.SetResult(new Undone());
 
-        Assert.Equal(new OrderFailed("no funds"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderFailed("no funds"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(1, Decisions.Count(d => d.Fact.Value is CancelRequested));
     }
 
@@ -228,7 +228,7 @@ public abstract class WorkflowHeldFactsSpecs(ITestOutputHelper output) : Workflo
         var checkout = CheckoutRef("h7");
         await checkout.Start(new PlaceOrder("h7", 100), AskCancellation());
 
-        Assert.Equal(new OrderPlaced("charge-h7"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-h7"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(["Reserved", "Charged"], DecidedFacts());
     }
 }
@@ -292,7 +292,7 @@ public sealed class WorkflowLateAnswerSpecs(ITestOutputHelper output) : Workflow
 
         // A real Charged, from outside, is decided as usual.
         Assert.IsType<Delivered>((await checkout.Notify(new Charged("real"), AskCancellation())).Value);
-        Assert.Equal(new OrderPlaced("real"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("real"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(["Reserved", "Charged"], DecidedFacts());
     }
 }
@@ -372,7 +372,7 @@ public sealed class WorkflowHeldFactsSqlSpecs
         var region = host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>>>().ActorRef;
         while (true)
         {
-            var state = await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(Id), region).GetStateAsync(Soon);
+            var state = await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(Id), region, host.Services.GetRequiredService<ActorSystem>()).GetStateAsync(Soon);
             if (state.State.Value is WfRunning { Held.Length: > 0 }) return;
             await Task.Yield();
         }
@@ -402,7 +402,7 @@ public sealed class WorkflowHeldFactsSqlSpecs
         var second = new CheckoutServices();
         using (var two = await rig.StartAsync(second))
         {
-            Assert.Equal(new OrderCancelled("customer asked"), (await Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), Soon)).Value);
+            Assert.Equal(new OrderCancelled("customer asked"), (await Ref(two).WaitForOutcome(Soon)).Value);
             Assert.Equal([new UndoOrder("w1")], second.Issued);
             Assert.Equal(1, rig.Decisions.Count(d => d.Fact.Value is CancelRequested));
             await two.StopAsync(Ct);
@@ -412,7 +412,7 @@ public sealed class WorkflowHeldFactsSqlSpecs
         var decided = rig.Decisions.Count;
         var third = new CheckoutServices();
         using var last = await rig.StartAsync(third);
-        Assert.Equal(new OrderCancelled("customer asked"), (await Ref(last).WaitForOutcome(TimeSpan.FromMilliseconds(20), Soon)).Value);
+        Assert.Equal(new OrderCancelled("customer asked"), (await Ref(last).WaitForOutcome(Soon)).Value);
         Assert.Empty(third.Issued);
         Assert.Equal(decided, rig.Decisions.Count);
         await last.StopAsync(Ct);
@@ -440,7 +440,7 @@ public sealed class WorkflowHeldFactsSqlSpecs
         var second = new CheckoutServices();
         using (var two = await rig.StartAsync(second))
         {
-            Assert.Equal(new OrderFailed("no funds"), (await Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), Soon)).Value);
+            Assert.Equal(new OrderFailed("no funds"), (await Ref(two).WaitForOutcome(Soon)).Value);
             Assert.Empty(second.Issued);
             Assert.Equal(1, rig.Decisions.Count(d => d.Fact.Value is OperatorSaidRetry));
             Assert.Equal(1, rig.Decisions.Count(d => d.Fact.Value is CancelRequested));
@@ -450,7 +450,7 @@ public sealed class WorkflowHeldFactsSqlSpecs
         var decided = rig.Decisions.Count;
         var third = new CheckoutServices();
         using var last = await rig.StartAsync(third);
-        Assert.Equal(new OrderFailed("no funds"), (await Ref(last).WaitForOutcome(TimeSpan.FromMilliseconds(20), Soon)).Value);
+        Assert.Equal(new OrderFailed("no funds"), (await Ref(last).WaitForOutcome(Soon)).Value);
         Assert.Empty(third.Issued);
         Assert.Equal(decided, rig.Decisions.Count);
         await last.StopAsync(Ct);

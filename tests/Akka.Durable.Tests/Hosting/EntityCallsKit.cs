@@ -105,8 +105,15 @@ internal sealed class ControlledRef(CampaignRef inner, CallControl control) : Ca
     public Task<StateSnapshot<WorkflowStatus<CampaignState, CampaignOutcome>>> GetStateAsync(CancellationToken ct = default) =>
         inner.GetStateAsync(ct);
 
-    public Task<CampaignOutcome> WaitForOutcome(TimeSpan pollEvery, CancellationToken ct = default) =>
-        inner.WaitForOutcome(pollEvery, ct);
+    public Task<StateSnapshot<WorkflowStatus<CampaignState, CampaignOutcome>>> WaitForStateAsync(
+        Func<WorkflowStatus<CampaignState, CampaignOutcome>, bool> until, CancellationToken ct) =>
+        inner.WaitForStateAsync(until, ct);
+
+    public IAsyncEnumerable<StateSnapshot<WorkflowStatus<CampaignState, CampaignOutcome>>> WatchStateAsync(
+        CancellationToken ct = default) =>
+        inner.WatchStateAsync(ct);
+
+    public Task<CampaignOutcome> WaitForOutcome(CancellationToken ct) => inner.WaitForOutcome(ct);
 }
 
 /// <summary>
@@ -143,7 +150,8 @@ public abstract class EntityCallsKit(ITestOutputHelper output) : DurableEntityTe
         services.AddSingleton<CallControl>();
         services.AddSingleton<CampaignRefs>(provider => new ControlledRefs(
             new WorkflowRefs<Invoice, CampaignState, CampaignFact, CampaignOutcome>(
-                provider.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignState, CampaignFact, CampaignOutcome>>>()),
+                provider.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignState, CampaignFact, CampaignOutcome>>>(),
+                provider.GetRequiredService<ActorSystem>()),
             provider.GetRequiredService<CallControl>()));
     }
 
@@ -180,7 +188,7 @@ public abstract class EntityCallsKit(ITestOutputHelper output) : DurableEntityTe
 
     /// <summary>The campaign of a bill, reached without the control: the test acts as an outside caller.</summary>
     protected CampaignRef Campaigns(string bill) =>
-        new WorkflowRefs<Invoice, CampaignState, CampaignFact, CampaignOutcome>(RegionActor()).Get(Billing.CampaignOf(new EntityId(bill)));
+        new WorkflowRefs<Invoice, CampaignState, CampaignFact, CampaignOutcome>(RegionActor(), Sys).Get(Billing.CampaignOf(new EntityId(bill)));
 
     protected async Task<WorkflowStatus<CampaignState, CampaignOutcome>> CampaignOf(string bill) =>
         (await Campaigns(bill).GetStateAsync(AskCancellation(FirstAsk))).State;

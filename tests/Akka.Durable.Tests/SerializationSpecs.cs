@@ -89,6 +89,27 @@ public sealed class SerializationSpecs : IAsyncLifetime
     }
 
     [Fact]
+    public void Framework_subscribe_message_round_trips_through_the_framework_serializer()
+    {
+        var serializer = Serialization.FindSerializerFor(SubscribeToState.Instance);
+
+        Assert.Equal(22560, serializer.Identifier);
+        Assert.Equal(
+            "durable-subscribe-state-v1",
+            Akka.Serialization.Serialization.ManifestFor(serializer, SubscribeToState.Instance));
+        Assert.IsType<SubscribeToState>(RoundTrip(SubscribeToState.Instance));
+    }
+
+    [Fact]
+    public void Sharding_envelope_carries_the_subscribe_message()
+    {
+        var envelope = (ShardingEnvelope)RoundTrip(new ShardingEnvelope("a", SubscribeToState.Instance));
+
+        Assert.Equal("a", envelope.EntityId);
+        Assert.IsType<SubscribeToState>(envelope.Message);
+    }
+
+    [Fact]
     public void Reminder_envelope_carries_a_union_command_payload()
     {
         // How a scheduled TCommand travels from reminder storage to the entity.

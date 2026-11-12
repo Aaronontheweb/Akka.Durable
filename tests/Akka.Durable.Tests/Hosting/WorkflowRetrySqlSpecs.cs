@@ -64,7 +64,7 @@ public sealed class WorkflowRetrySqlSpecs
             Assert.Empty(second.Issued);
 
             SqlCheckoutRig.Wake(two, due);
-            Assert.Equal(new OrderPlaced("charge-w1"), (await checkout.WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)))).Value);
+            Assert.Equal(new OrderPlaced("charge-w1"), (await checkout.WaitForOutcome(SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)))).Value);
 
             var attemptThree = Assert.Single(SqlCheckoutRig.Deliveries<ChargeCard>(second));
             Assert.Equal(3, attemptThree.Attempt);
@@ -75,7 +75,7 @@ public sealed class WorkflowRetrySqlSpecs
         // A third system finds the work answered: the workflow is finished and nothing is attempted.
         var third = new CheckoutServices();
         using var last = await rig.StartAsync(third);
-        Assert.Equal(new OrderPlaced("charge-w1"), (await SqlCheckoutRig.Ref(last).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)))).Value);
+        Assert.Equal(new OrderPlaced("charge-w1"), (await SqlCheckoutRig.Ref(last).WaitForOutcome(SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)))).Value);
         Assert.Empty(third.Issued);
         await last.StopAsync(Ct);
     }

@@ -8,6 +8,7 @@ Working today:
 - Reminders.
 - Local and sharded hosting.
 - Per-command typed entity refs and state reads.
+- State subscriptions, for entities and workflows: `WaitForStateAsync` waits until the state satisfies a condition, and `WatchStateAsync` streams each new state. They are live and best effort, held in memory, and never journaled. `WaitForOutcome` is built on them and no longer polls. See [Reading state](reading-state.md#waiting-for-a-state-and-watching-it).
 - `Execute`, recorded in the same journal write as the decision's events. Without a retry policy it is attempted once and `Decide` gets the answer or a give-up (`Failed`, `TimedOut`, `Interrupted`). With `Retry.Every`, `Retry.Backoff` or `Retry.UntilAcknowledged` on its handler it is delivered again, also after a crash, until acknowledged or the policy runs out (`RetriesExhausted`): the outbox. One wake reminder per entity brings it back after a crash or a passivation. Handlers are registered with `AddEffectHandler`, with an answer or without one; the host checks at startup that each entity effect has a serializer and one handler. The snapshot keeps the effects that are pending. See [Effects](effects.md).
 - `Send` and `Accepts` between entities; `Run` and `Tell`, light and not recorded.
 - An entity that starts, notifies and cancels a workflow from a decision: `Uses`, checked when the host starts, with `told` and `gaveUp` for the answers; `Start`, recorded and delivered until the workflow answers; `Notify` and `Cancel`, recorded and attempted once. See [Starting a workflow from an entity](starting-a-workflow-from-an-entity.md).
@@ -18,7 +19,7 @@ Working today:
 
 Not done yet:
 - **Snapshot retention tests.** Snapshots are written and recovered, but pruning old snapshots and deleting covered events aren't covered by tests yet.
-- **Subscriptions.** State can be read on demand, but there are no state or event subscriptions yet.
+- **Event subscriptions.** You can wait for a state and watch the state, but you cannot subscribe to an entity's events. Events are changes, so a missed one loses information. A stream of them would have to replay from the journal, not push from memory.
 - **Entity contracts and proxies.** `Send` resolves the target by command type in the same actor system; addressing an entity type hosted only on other nodes, without its definition, is tracked in [#30](https://github.com/Aaronontheweb/Akka.Durable/issues/30).
 - **Workflow features.** A scenario test kit for workflows.
 - **A durable `Send`.** `Send` and `Tell` are not recorded. Use `Execute` with a handler that sends, for a message that must not be lost.

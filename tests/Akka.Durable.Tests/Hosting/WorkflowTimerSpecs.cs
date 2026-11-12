@@ -49,7 +49,7 @@ public abstract class WorkflowTimerSpecs(ITestOutputHelper output) : CampaignWor
         // Waiting is a date, Pausing a duration, and Escalating does work and waits a duration.
         await campaign.Start(new Invoice("t2", DateTimeOffset.UtcNow + Short, Short, Short, Reminders: 2), AskCancellation());
 
-        Assert.Equal(new SentToCollections(), (await campaign.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new SentToCollections(), (await campaign.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(
             [new SendReminder("t2", 1), new SendReminder("t2", 2), new NotifyCollections("t2")],
             Services.Issued);
@@ -105,7 +105,7 @@ public abstract class WorkflowTimerSpecs(ITestOutputHelper output) : CampaignWor
 
         // Collections' fact keeps the state, so the workflow is at rest there and the grace period is decided:
         // two facts in one write.
-        Assert.Equal(new SentToCollections(), (await CampaignRef("t4").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new SentToCollections(), (await CampaignRef("t4").WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(before.SequenceNr + 2, (await HostedState("t4")).SequenceNr);
         var journal = await JournalOf("t4");
         Assert.Equal<object>((CampaignFact)new CollectionsNotified(), Assert.IsType<WfFactRecorded>(journal[^2]).Fact);
@@ -178,7 +178,7 @@ public abstract class WorkflowTimerSpecs(ITestOutputHelper output) : CampaignWor
         // A wait holds nothing: the payment is decided, not held.
         Assert.IsType<Delivered>((await campaign.Notify(new Paid(), AskCancellation())).Value);
 
-        Assert.Equal(new PaidInFull(), (await campaign.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new PaidInFull(), (await campaign.WaitForOutcome(AskCancellation())).Value);
         Assert.Empty(Services.Issued);
 
         // A wake for a finished workflow is ignored.

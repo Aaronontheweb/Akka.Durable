@@ -106,7 +106,7 @@ public sealed class WorkflowRetryTimerSpecs(ITestOutputHelper output) : Campaign
         // Nothing is in flight, so the timer is decided at once, with no answer to wait for.
         Wake("m1", due);
 
-        Assert.Equal(new SentToCollections(), (await CampaignRef("m1").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new SentToCollections(), (await CampaignRef("m1").WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(1, Count<NotifyCollections>());
 
         // The finished workflow has no reminder, so the retry that was pending cannot wake it.
@@ -137,7 +137,7 @@ public sealed class WorkflowRetryTimerSpecs(ITestOutputHelper output) : Campaign
         var grace = entered.EnteredAt + 30 * Minute;
         await AwaitWakeFor("m2", grace);
         Wake("m2", grace);
-        Assert.Equal(new SentToCollections(), (await CampaignRef("m2").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new SentToCollections(), (await CampaignRef("m2").WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(2, Count<NotifyCollections>());
     }
 }
@@ -179,7 +179,7 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         Assert.Equal(2, Count<CheckPayment>());
 
         second.SetResult(new Paid());
-        Assert.Equal(new PaidInFull(), (await CampaignRef("a1").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new PaidInFull(), (await CampaignRef("a1").WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(2, Count<CheckPayment>());
     }
 
@@ -234,7 +234,7 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
         // Delivered when it is due, it issues the work.
         await DeliverReminder("a3");
         await AwaitCount<CheckPayment>(2);
-        Assert.Equal(new PaidInFull(), (await CampaignRef("a3").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new PaidInFull(), (await CampaignRef("a3").WaitForOutcome(AskCancellation())).Value);
         Assert.Equal(2, Count<CheckPayment>());
     }
 
@@ -262,7 +262,7 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
 
         await DeliverReminder("a5");
         await AwaitCount<CheckPayment>(2);
-        Assert.Equal(new PaidInFull(), (await CampaignRef("a5").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new PaidInFull(), (await CampaignRef("a5").WaitForOutcome(AskCancellation())).Value);
     }
 
     [Fact]

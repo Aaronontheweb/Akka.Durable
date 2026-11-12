@@ -59,7 +59,7 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
     private protected async Task<StateSnapshot<WfState>> HostedState(string id)
     {
         var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>>>().ActorRef;
-        return await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region).GetStateAsync(AskCancellation());
+        return await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region, Sys).GetStateAsync(AskCancellation());
     }
 
     private protected async Task<WfRunning> AwaitRunning(string id, Action<WfRunning> assert)
@@ -96,7 +96,7 @@ public abstract class CheckoutWorkflowKit(ITestOutputHelper output) : DurableEnt
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(TestCancellation);
             attempt.CancelAfter(TimeSpan.FromMilliseconds(500));
             var region = Host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>>>().ActorRef;
-            await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region).GetStateAsync(attempt.Token);
+            await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), region, Sys).GetStateAsync(attempt.Token);
         }, TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
     }
 

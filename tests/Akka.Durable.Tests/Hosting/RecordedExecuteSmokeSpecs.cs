@@ -118,7 +118,7 @@ public sealed class WorkflowEffectDeliverySpecs(ITestOutputHelper output) : Chec
     {
         var checkout = CheckoutRef("c-9");
         await checkout.Start(new PlaceOrder("o9", 100), AskCancellation());
-        await checkout.WaitForOutcome(Poll, AskCancellation());
+        await checkout.WaitForOutcome(AskCancellation());
 
         Assert.Equal(
             [new EffectDelivery(new EffectId("checkouts/c-9/1.0", 1), 1), new EffectDelivery(new EffectId("checkouts/c-9/2.0", 2), 1)],

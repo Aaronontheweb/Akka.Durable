@@ -445,7 +445,7 @@ public sealed class CheckoutService(IWorkflowRefs<PlaceOrder, CheckoutState, Che
         if (started.Value is AlreadyFinished<CheckoutOutcome> finished)
             return finished.Outcome;
 
-        return await checkout.WaitForOutcome(TimeSpan.FromMilliseconds(250), ct);
+        return await checkout.WaitForOutcome(ct);
     }
 }
 ```
@@ -500,7 +500,17 @@ If you remove the `NeedsAttention` arm, the compiler reports CS8509: the switch 
 
 `StateName` is the name of the record the state holds. For a union, it is the name of the case it holds, also when that case is a union itself. Use it for logs and simple displays, not to read the state's data.
 
-`WaitForOutcome(pollEvery)` reads the workflow every `pollEvery` until the workflow has finished, then returns the outcome. The waiting happens in the caller, not in the workflow. Use it for a workflow that takes seconds. It throws `InvalidOperationException` when the workflow has not been started.
+`WaitForOutcome(cancellationToken)` waits until the workflow has finished, then returns the outcome. The token is required: it is the time limit, and when it fires the wait throws `OperationCanceledException`. The wait does not read the workflow again and again. It subscribes, and the workflow sends its new condition after each change. It throws `InvalidOperationException` when the workflow has not been started.
+
+`WaitForStateAsync(until, cancellationToken)` and `WatchStateAsync(cancellationToken)` work as they do for an entity, with the `WorkflowStatus<TState, TOutcome>` that `GetStateAsync` gives. `WatchStateAsync` ends after the `WorkflowFinished<TOutcome>` snapshot, because a finished workflow does not change. A fact that keeps the state still gives a snapshot, with the same status and a higher `SequenceNr`. The guarantee, and what it is not, are in [Reading state](reading-state.md#waiting-for-a-state-and-watching-it).
+
+```csharp
+await foreach (var snapshot in checkouts.Get(new WorkflowId(order)).WatchStateAsync(ct))
+{
+    if (snapshot.State.Value is WorkflowRunning<CheckoutState> running)
+        await ShowProgressAsync(running.StateName, ct);
+}
+```
 
 `DurableEntityTestKit` has a `WorkflowRef<TInput, TState, TFact, TOutcome>(id)` helper that returns the same ref in a test.
 

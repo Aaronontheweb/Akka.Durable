@@ -52,8 +52,8 @@ public interface IEntityRefs<in TCommand>
 /// entity's state from an ID or a plain <see cref="IEntityRef{TCommand}"/>, get a state-aware ref with
 /// <see cref="IDurableEntityRefs{TCommand,TState,TEvent}.Get"/>.
 /// <para>
-/// <typeparamref name="TEvent"/> is part of the type now so that event subscriptions can be added to this
-/// interface without changing its signature.
+/// No member uses <typeparamref name="TEvent"/> yet. It is part of the type so that event subscriptions can be added
+/// later without changing the signature.
 /// </para>
 /// </remarks>
 /// <typeparam name="TCommand">The command protocol of the entity type.</typeparam>
@@ -71,6 +71,45 @@ public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCo
     /// read may return while one is in flight.
     /// </remarks>
     Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Waits until the entity's state satisfies <paramref name="until"/>, and returns that snapshot. Returns after
+    /// one round trip when the current state already satisfies it. Activates the entity if needed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The predicate runs in this process, once for each snapshot that reaches the wait, in order: the current
+    /// state first, then the state after each later write that holds events. It is never sent to the entity. Keep it
+    /// short and do not block in it.
+    /// </para>
+    /// <para>
+    /// Each snapshot is one that <see cref="GetStateAsync"/> could return: it is sent after the write's events are
+    /// committed and its Run effects have finished. This is a live push held in memory, not durable delivery. When
+    /// the entity stops, passivates, restarts or moves, the wait subscribes again by itself and goes on from the state
+    /// the entity has then, so a state that held only in between is not seen.
+    /// </para>
+    /// </remarks>
+    /// <param name="until">The condition on the state.</param>
+    /// <param name="cancellationToken">The time limit of the wait. Required.</param>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired first.</exception>
+    Task<StateSnapshot<TState>> WaitForStateAsync(Func<TState, bool> until, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The entity's current snapshot, then a snapshot after each later write that holds events. Activates the
+    /// entity if needed. The subscription starts when the enumeration starts and ends when the reader stops.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A slow reader gets the newest snapshot it has not read: it can skip states, but it never reads an older
+    /// state after a newer one. <see cref="StateSnapshot{TState}.SequenceNr"/> grows from one snapshot to the next.
+    /// </para>
+    /// <para>
+    /// This is a live push held in memory, not durable delivery. When the entity stops, passivates, restarts or
+    /// moves, the stream subscribes again by itself and goes on from the state the entity has then. A reaction that
+    /// must happen belongs in an effect.
+    /// </para>
+    /// </remarks>
+    IAsyncEnumerable<StateSnapshot<TState>> WatchStateAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -93,12 +132,3 @@ public interface IDurableEntityRefs<in TCommand, TState, TEvent>
 public sealed record StateSnapshot<TState>(
     [property: AkkaField(0)] TState State,
     [property: AkkaField(1)] long SequenceNr);
-
-[AkkaSerializable]
-public sealed record CommittedEvent<TEvent>(
-    [property: AkkaField(0)] TEvent Event,
-    [property: AkkaField(1)] long SequenceNr);
-
-public readonly union EntityUpdate<TState, TEvent>(
-    StateSnapshot<TState>,
-    CommittedEvent<TEvent>);
