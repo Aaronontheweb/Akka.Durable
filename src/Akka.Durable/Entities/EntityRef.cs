@@ -25,7 +25,11 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEnti
 /// <summary>
 /// <see cref="EntityRef{TCommand}"/> that can also read the entity's state.
 /// </summary>
-internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef region) : IDurableEntityRef<TCommand, TState, TEvent>
+/// <param name="id">The entity.</param>
+/// <param name="region">The entity type's shard region or local host.</param>
+/// <param name="system">The actor system this ref is used in. State subscriptions run a watcher actor in it.</param>
+internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef region, ActorSystem system)
+    : IDurableEntityRef<TCommand, TState, TEvent>
 {
     private readonly EntityRef<TCommand> _ref = new(id, region);
 
@@ -41,6 +45,14 @@ internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef
     {
         var reply = await region.Ask<EntityStateReply>(
             new ShardingEnvelope(id.Value, GetEntityState.Instance), cancellationToken);
-        return new StateSnapshot<TState>((TState)reply.State, reply.SequenceNr);
+        return Read(reply);
     }
+
+    public Task<StateSnapshot<TState>> WaitForStateAsync(Func<TState, bool> until, CancellationToken cancellationToken) =>
+        StateSubscription.WaitAsync(system, region, id, Read, until, cancellationToken);
+
+    public IAsyncEnumerable<StateSnapshot<TState>> WatchStateAsync(CancellationToken cancellationToken = default) =>
+        StateSubscription.WatchAsync<TState>(system, region, id, Read, last: null, cancellationToken);
+
+    private static StateSnapshot<TState> Read(EntityStateReply reply) => new((TState)reply.State, reply.SequenceNr);
 }

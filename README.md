@@ -3,7 +3,7 @@
 > [!NOTE]
 > Akka.Durable is a proof of concept, not an official Akka.NET project. It is published as `Aaron.Akka.Durable` because the `Akka.*` NuGet prefix is reserved for official Akka.NET packages. Expect breaking changes between releases.
 
-Akka.Durable gives you event-sourced entities on Akka.NET. Define their behavior with pure `Decide` and `Evolve` functions, keep the impure work in effect handlers, then send commands through typed references. The runtime handles persistence, recovery, and routing in local or clustered deployments.
+Akka.Durable gives you event-sourced entities on Akka.NET. Define their behavior with pure `Decide` and `Evolve` functions, keep the impure work in effect handlers, then send commands through typed references. The runtime handles persistence, recovery, and routing in local or clustered deployments. Callers can wait for an entity's state, or watch it, without polling.
 
 ## Inject it. Send a message.
 
@@ -122,10 +122,29 @@ public interface IEntityRef<in TCommand>
 public interface IDurableEntityRef<in TCommand, TState, TEvent> : IEntityRef<TCommand>
 {
     Task<StateSnapshot<TState>> GetStateAsync(CancellationToken cancellationToken = default);
+
+    Task<StateSnapshot<TState>> WaitForStateAsync(Func<TState, bool> until, CancellationToken cancellationToken);
+
+    IAsyncEnumerable<StateSnapshot<TState>> WatchStateAsync(CancellationToken cancellationToken = default);
 }
 ```
 
 `Ask` infers its reply type from the command. `GetStateAsync` returns the committed state and its journal sequence number. **Both reference factories can be injected:** use `IEntityRefs<InvoiceCommand>` for messaging, or `IDurableEntityRefs<InvoiceCommand, InvoiceState, InvoiceEvent>` for messaging plus state reads. Both are registered by `AddDurableEntities()`. The registry is keyed by command type, so each entity type must have its own command type.
+
+To react to a change, do not read the state in a loop. Wait for the state, or watch it:
+
+```csharp
+// In a request handler: wait at most five seconds for the payment.
+using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+limit.CancelAfter(TimeSpan.FromSeconds(5));
+var paid = await invoices.Get(id).WaitForStateAsync(s => s is Paid, limit.Token); // OperationCanceledException at the limit
+
+// In a status stream: the current state first, then each new one.
+await foreach (var snapshot in invoices.Get(id).WatchStateAsync(ct))
+    await WriteStatusAsync(snapshot.State, snapshot.SequenceNr, ct);
+```
+
+You get the current state first, then a snapshot after each write that holds events, once its `Run` effects have finished. Every snapshot carries the journal's sequence number as the version of the state, and a slow reader of the stream gets the newest one. This is a live, best-effort push held in memory: nothing is journaled, a state can be missed while the entity restarts or moves, and a reaction that must happen belongs in an effect. Workflow refs have the same two calls, and `WaitForOutcome` is built on the wait. See [Waiting for a state, and watching it](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md#waiting-for-a-state-and-watching-it).
 
 ## You do not need to build an outbox. Akka.Durable has one.
 
@@ -171,6 +190,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Hosting](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/hosting.md) | Local and sharded hosting, passivation and shard count. |
 | [Sending commands](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/sending-commands.md) | Entity refs, `Ask` and `Tell`, and entity IDs inside messages. |
 | [Reading state](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md) | State-aware refs, and what a state read sees. |
+| [Waiting for a state, and watching it](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md#waiting-for-a-state-and-watching-it) | `WaitForStateAsync` and `WatchStateAsync`, and what a state subscription guarantees. |
 | [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, retry policies on work, the fact table, and workflow refs. |
 | [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |

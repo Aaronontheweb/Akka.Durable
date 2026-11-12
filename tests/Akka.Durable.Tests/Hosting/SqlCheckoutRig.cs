@@ -94,7 +94,7 @@ internal sealed class SqlCheckoutRig : IDisposable
 
     /// <summary>The state of the entity that hosts the workflow, with its sequence number.</summary>
     public static async Task<StateSnapshot<WfState>> HostedState(IHost host) =>
-        await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(WorkflowId), Region(host)).GetStateAsync(Within(TimeSpan.FromSeconds(30)));
+        await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(WorkflowId), Region(host), host.Services.GetRequiredService<ActorSystem>()).GetStateAsync(Within(TimeSpan.FromSeconds(30)));
 
     /// <summary>Waits until the hosted state is a <see cref="WfRunning"/> that <paramref name="accept"/> takes.</summary>
     public static async Task<StateSnapshot<WfState>> AwaitState(IHost host, Func<WfRunning, bool> accept)

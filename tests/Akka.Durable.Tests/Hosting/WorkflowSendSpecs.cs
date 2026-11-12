@@ -113,7 +113,7 @@ public abstract class WorkflowSendSpecs(ITestOutputHelper output) : BumpWorkflow
             serviceFails is null ? Task.FromResult(value) : Task.FromException<int>(new InvalidOperationException(serviceFails));
 
         await W1.Start(new BumpInput(by, plan), AskCancellation());
-        var last = (await W1.WaitForOutcome(TimeSpan.FromMilliseconds(20), AskCancellation())).Last;
+        var last = (await W1.WaitForOutcome(AskCancellation())).Last;
 
         Assert.Equal(Plain(expected), Plain(last));
         if (last.Value is BumpGaveUp gaveUp) Assert.Contains(errorNames, gaveUp.Error);

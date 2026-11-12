@@ -177,7 +177,7 @@ public sealed class WorkflowAlpha4DataSpecs
 
         // At its time attempt 2 runs and the workflow decides its fact.
         SqlCheckoutRig.Wake(two, next);
-        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
+        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
         Assert.Equal(new OrderPlaced("charge-w1"), outcome.Value);
         Assert.Equal(2, Assert.Single(SqlCheckoutRig.Deliveries<ChargeCard>(second)).Attempt);
         await two.StopAsync(Ct);
@@ -231,7 +231,7 @@ public sealed class WorkflowAlpha4DataSpecs
 
         // At its time attempt 2 of the undo runs, and the workflow ends with the outcome it carried.
         SqlCheckoutRig.Wake(two, next);
-        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(TimeSpan.FromMilliseconds(20), SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
+        var outcome = await SqlCheckoutRig.Ref(two).WaitForOutcome(SqlCheckoutRig.Within(TimeSpan.FromSeconds(30)));
         Assert.Equal(new OrderFailed("card declined"), outcome.Value);
         Assert.Equal([new UndoOrder("w1")], second.Issued);
         Assert.Equal(2, Assert.Single(SqlCheckoutRig.Deliveries<UndoOrder>(second)).Attempt);

@@ -71,6 +71,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // first decision that leaves nothing in flight.
     private bool _stopRequested;
 
+    // The watchers that subscribed to this entity's state. Each gets the state after every write that holds events.
+    // Kept in memory only: never journaled or snapshotted. Created on the first subscribe, so an entity that nobody
+    // watches allocates nothing.
+    private HashSet<IActorRef>? _subscribers;
+
     public EntityActor(
         EntityId entityId,
         EntityDefinition<TState, TCommand, TEvent> definition,
@@ -295,6 +300,12 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // answered only once that command's events are committed and its Run effects have finished.
         // Must precede Command<TCommand> for the same reason as ReminderEnvelope.
         Command<GetEntityState>(_ => Sender.Tell(new EntityStateReply(State!, LastSequenceNr)));
+
+        // A state subscription. Registering and the first snapshot are one message, so no write falls between them.
+        // Stashed like the read, so the first snapshot is the state the read would return.
+        Command<SubscribeToState>(_ => Subscribe(Sender));
+        Command<Terminated>(terminated => _subscribers?.Remove(terminated.ActorRef));
+
         Command<GetPendingEffects>(_ =>
             Sender.Tell(new PendingEffectsReply([.. _pending.Values.Select(pending => PublicForm(pending.Effect))])));
 
@@ -691,6 +702,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // Execute. Matched by order, not by reference: a journal may hand back a copy of the entry.
         var next = 0;
 
+        // True once one of the decision's events is journaled and applied. Only then do the subscribers get a snapshot.
+        var applied = false;
+
         // An empty batch is fine here: PersistAll routes onCompleteAsync through the internal
         // *stashing* Defer, so no further commands are processed until the effects are dispatched.
         // (Public DeferAsync does NOT stash - don't swap it in.)
@@ -716,12 +730,17 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     break;
                 default:
                     Apply((TEvent)entry);
+                    applied = true;
                     break;
             }
         }, onCompleteAsync: async () =>
         {
             if (batch.Count > 0) MaybeSnapshot();
             await ExecuteEffectsAsync(effects, origin, issued);
+
+            // After the effects, so a subscriber sees what a read would see now: Run effects finished, Reply sent.
+            if (applied) Publish();
+
             if (reminder is not null) AckReminder(reminder);
 
             // Nothing is pending any more: the wake is not needed. Removed best effort, before the next command, so
@@ -1393,6 +1412,34 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
     #endregion
 
+    #region State subscriptions
+
+    /// <summary>
+    /// Adds a watcher to the subscribers, watches it, and sends it the current state. A second subscribe from the
+    /// same watcher only sends the state again.
+    /// </summary>
+    private void Subscribe(IActorRef subscriber)
+    {
+        if (subscriber.IsNobody() || subscriber.Equals(Context.System.DeadLetters)) return;
+
+        if ((_subscribers ??= []).Add(subscriber))
+            Context.Watch(subscriber);
+        subscriber.Tell(new EntityStateReply(State!, LastSequenceNr), Self);
+    }
+
+    /// <summary>Sends the state to each subscriber. One message for all of them.</summary>
+    /// <remarks>Sender is explicit: this runs inside an async persistence callback.</remarks>
+    private void Publish()
+    {
+        if (_subscribers is not { Count: > 0 }) return;
+
+        var snapshot = new EntityStateReply(State!, LastSequenceNr);
+        foreach (var subscriber in _subscribers)
+            subscriber.Tell(snapshot, Self);
+    }
+
+    #endregion
+
     #region Snapshots
 
     private void MaybeSnapshot()
@@ -1423,6 +1470,13 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     {
         // A deferred stop must outlive a restart: the host buffers this entity's messages until it stops.
         if (_stopRequested) Self.Tell(StopEntity.Instance, ActorRefs.NoSender);
+
+        // A restart sends no Terminated, so the watchers would not know to subscribe again. Each subscribe is sent
+        // again, from its watcher, and the next instance answers it with its recovered state.
+        if (_subscribers is not null)
+            foreach (var subscriber in _subscribers)
+                Self.Tell(SubscribeToState.Instance, subscriber);
+
         base.PreRestart(reason, message);
     }
 

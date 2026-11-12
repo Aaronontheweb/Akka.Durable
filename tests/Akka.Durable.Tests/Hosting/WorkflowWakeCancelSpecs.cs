@@ -54,7 +54,7 @@ public abstract class WorkflowWakeCancelSpecs(ITestOutputHelper output) : Campai
                 break;
         }
 
-        Assert.Equal(expected, (await campaign.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(expected, (await campaign.WaitForOutcome(AskCancellation())).Value);
         Assert.IsType<WorkflowFinished<CampaignOutcome>>((await campaign.GetStateAsync(AskCancellation())).State.Value);
 
         // The decision that finished the workflow cancelled its reminder.
@@ -80,7 +80,7 @@ public abstract class WorkflowWakeCancelSpecs(ITestOutputHelper output) : Campai
         // The caller gets its reply and the workflow ends up finished; the leftover wake is harmless.
         Assert.IsType<Delivered>(reply.Value);
         object expected = finisher == Finisher.Fact ? new PaidInFull() : new CampaignStopped("customer asked");
-        Assert.Equal(expected, (await campaign.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(expected, (await campaign.WaitForOutcome(AskCancellation())).Value);
         Assert.IsType<WorkflowFinished<CampaignOutcome>>((await campaign.GetStateAsync(AskCancellation())).State.Value);
         await AwaitAssertAsync(() => Assert.True(ReminderStorage.RefusedCancels >= 1), cancellationToken: TestCancellation);
 

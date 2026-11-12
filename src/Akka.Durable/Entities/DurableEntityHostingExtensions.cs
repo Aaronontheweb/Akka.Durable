@@ -416,8 +416,10 @@ internal sealed class EntityRefs<TCommand>(IRequiredActor<EntityRegion<TCommand>
     public IEntityRef<TCommand> Get(EntityId id) => new EntityRef<TCommand>(id, region.ActorRef);
 }
 
-internal sealed class DurableEntityRefs<TCommand, TState, TEvent>(IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region)
+internal sealed class DurableEntityRefs<TCommand, TState, TEvent>(
+    IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region, ActorSystem system)
     : IDurableEntityRefs<TCommand, TState, TEvent>
 {
-    public IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id) => new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef);
+    public IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id) =>
+        new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef, system);
 }

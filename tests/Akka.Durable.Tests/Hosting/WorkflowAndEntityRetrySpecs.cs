@@ -60,7 +60,7 @@ public sealed class WorkflowAndEntityRetrySpecs(ITestOutputHelper output) : Work
 
         // And the workflow's retry does not run the entity's effect again.
         Wake("w1", due);
-        Assert.Equal(new OrderPlaced("charge-w1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-w1"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([1, 2], Charges.Select(c => c.Attempt));
         Assert.StartsWith("checkouts/w1/", Charges[0].Id.Value, StringComparison.Ordinal);
         Assert.Equal(2, _world.ProbeCalls.Count);
@@ -73,7 +73,7 @@ public sealed class WorkflowAndEntityRetrySpecs(ITestOutputHelper output) : Work
         _world.OnProbe = (_, _) => Task.FromResult<CounterCommand>(new NoHandler("answer:a"));
         var checkout = CheckoutRef("k1");
         await checkout.Start(new PlaceOrder("k1", 100), AskCancellation());
-        await checkout.WaitForOutcome(Poll, AskCancellation());
+        await checkout.WaitForOutcome(AskCancellation());
 
         // The entity writes an event of its own, the record of the effect, and the record of its answer.
         EntityRef<CounterCommand>("k2").Tell(new NoHandler("issue:a"));

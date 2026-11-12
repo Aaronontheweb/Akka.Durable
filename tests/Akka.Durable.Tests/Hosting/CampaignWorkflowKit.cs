@@ -61,7 +61,7 @@ public abstract class CampaignWorkflowKit(ITestOutputHelper output) : DurableEnt
 
     /// <summary>The state of the entity that hosts a campaign: the author's state and what the library tracks.</summary>
     private protected async Task<StateSnapshot<WfState>> HostedState(string id) =>
-        await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), Region).GetStateAsync(AskCancellation());
+        await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), Region, Sys).GetStateAsync(AskCancellation());
 
     private protected async Task<WfRunning> AwaitRunning(string id, Action<WfRunning> assert, TimeSpan? duration = null)
     {
@@ -120,7 +120,7 @@ public abstract class CampaignWorkflowKit(ITestOutputHelper output) : DurableEnt
         {
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(TestCancellation);
             attempt.CancelAfter(TimeSpan.FromMilliseconds(500));
-            await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), Region).GetStateAsync(attempt.Token);
+            await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(id), Region, Sys).GetStateAsync(attempt.Token);
         }, TimeSpan.FromSeconds(15), cancellationToken: TestCancellation);
 
     /// <summary>

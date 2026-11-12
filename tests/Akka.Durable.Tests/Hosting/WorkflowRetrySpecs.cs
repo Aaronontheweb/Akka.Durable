@@ -31,7 +31,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         Assert.Single(Charges);
 
         Wake("s1", due);
-        Assert.Equal(new OrderPlaced("charge-s1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-s1"), (await checkout.WaitForOutcome(AskCancellation())).Value);
 
         // One piece of work: the same id on both attempts, and the attempt number counts.
         Assert.Equal([1, 2], Charges.Select(c => c.Attempt));
@@ -56,7 +56,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
             Wake("s2", due);
         }
 
-        Assert.Equal(new OrderPlaced("charge-s2"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-s2"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([1, 2, 3, 4, 5, 6], Charges.Select(c => c.Attempt));
         Assert.Single(Charges.Select(c => c.Id).Distinct());
     }
@@ -87,7 +87,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         late.SetResult(new Charged("late"));
         undoGate.SetResult();
 
-        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Single(Charges);
         Assert.Equal<object?>(
             [new Reserved("res-s3"), new CancelRequested("customer asked", "user-17"), new Undone()],
@@ -116,7 +116,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         first.SetResult(new Charged("late"));
         second.SetResult(new Charged("fresh"));
 
-        Assert.Equal(new OrderPlaced("fresh"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("fresh"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal<object?>([new Reserved("res-s5"), new Charged("fresh")], [.. await FactsOf("s5")]);
     }
 
@@ -136,7 +136,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         Assert.IsType<Held>((await checkout.Cancel("customer asked", "user-17", AskCancellation())).Value);
 
         // The attempt runs out of time: the cancel is decided, and the work that would have been attempted again is gone.
-        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderCancelled("customer asked"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Wake("s6", DateTimeOffset.UtcNow + 10 * Minute);
         Assert.Single(Charges);
         await AwaitAssertAsync(async () => Assert.Empty(await RemindersOf("s6")), cancellationToken: TestCancellation);
@@ -155,7 +155,7 @@ public sealed class WorkflowRetryScheduleSpecs(ITestOutputHelper output) : Workf
         Assert.Single(Charges);
 
         Wake("s4", due);
-        Assert.Equal(new OrderPlaced("charge-s4"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-s4"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([1, 2], Charges.Select(c => c.Attempt));
         Assert.Equal<object?>([new Reserved("res-s4"), new OperatorSaidRetry(), new Charged("charge-s4")], [.. await FactsOf("s4")]);
     }
@@ -271,7 +271,7 @@ public abstract class WorkflowRetryRestartSpecs(ITestOutputHelper output) : Work
         Assert.Single(Charges.Skip(1));
 
         Wake("r1", due2);
-        Assert.Equal(new OrderPlaced("charge-r1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-r1"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([1, 2, 3], Charges.Select(c => c.Attempt));
         Assert.Single(Charges.Select(c => c.Id).Distinct());
     }
@@ -304,7 +304,7 @@ public abstract class WorkflowRetryRestartSpecs(ITestOutputHelper output) : Work
         Assert.Single(Charges);
         Wake("r2", due);
 
-        Assert.Equal(new OrderPlaced("c2"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("c2"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([1, 2], Charges.Select(c => c.Attempt));
         Assert.Equal(Charges[0].Id, Charges[1].Id);
     }
@@ -341,7 +341,7 @@ public sealed class WorkflowRetryUntilAcknowledgedSpecs(ITestOutputHelper output
             Wake("u1", due);
         }
 
-        Assert.Equal(new OrderPlaced("acknowledged"), (await CheckoutRef("u1").WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("acknowledged"), (await CheckoutRef("u1").WaitForOutcome(AskCancellation())).Value);
 
         Assert.Equal(Enumerable.Range(1, 8), Charges.Select(c => c.Attempt));
         Assert.Single(Charges.Select(c => c.Id).Distinct());
@@ -407,7 +407,7 @@ public sealed class WorkflowRetryPassivationSpecs(ITestOutputHelper output) : Wo
 
         // Delivered when it is due, it makes the attempt.
         await DeliverReminder("t1");
-        Assert.Equal(new OrderPlaced("charge-t1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new OrderPlaced("charge-t1"), (await checkout.WaitForOutcome(AskCancellation())).Value);
         Assert.Equal([1, 2], Charges.Select(c => c.Attempt));
         Assert.Equal(Charges[0].Id, Charges[1].Id);
     }

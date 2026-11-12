@@ -40,7 +40,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         var checkout = CheckoutRef("o1");
 
         Assert.IsType<Started>((await checkout.Start(new PlaceOrder("o1", 4200), AskCancellation())).Value);
-        var outcome = await checkout.WaitForOutcome(Poll, AskCancellation());
+        var outcome = await checkout.WaitForOutcome(AskCancellation());
 
         Assert.Equal(new OrderPlaced("charge-o1"), outcome.Value);
         Assert.Equal([new ReserveStock("o1"), new ChargeCard("o1", 4200)], Services.Issued);
@@ -55,7 +55,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         var checkout = CheckoutRef("never");
 
         Assert.IsType<WorkflowNotStarted>((await checkout.GetStateAsync(AskCancellation())).State.Value);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => checkout.WaitForOutcome(Poll, AskCancellation()));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => checkout.WaitForOutcome(AskCancellation()));
     }
 
     [Fact]
@@ -73,7 +73,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         Assert.Equal(nameof(Reserving), running.StateName);
 
         reserved.SetResult(new Reserved("res-o2"));
-        await checkout.WaitForOutcome(Poll, AskCancellation());
+        await checkout.WaitForOutcome(AskCancellation());
 
         // A finished workflow is closed: its id is used once.
         var again = Assert.IsType<AlreadyFinished<CheckoutOutcome>>((await checkout.Start(order, AskCancellation())).Value);
@@ -88,7 +88,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         var checkout = CheckoutRef("o3");
 
         await checkout.Start(new PlaceOrder("o3", 100), AskCancellation());
-        var outcome = await checkout.WaitForOutcome(Poll, AskCancellation());
+        var outcome = await checkout.WaitForOutcome(AskCancellation());
 
         Assert.Equal(new OrderFailed("no funds"), outcome.Value);
         Assert.Equal([new ReserveStock("o3"), new ChargeCard("o3", 100), new UndoOrder("o3")], Services.Issued);
@@ -107,7 +107,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         var checkout = CheckoutRef("o4");
 
         await checkout.Start(new PlaceOrder("o4", 100), AskCancellation());
-        await checkout.WaitForOutcome(Poll, AskCancellation());
+        await checkout.WaitForOutcome(AskCancellation());
 
         Assert.Equal(2, Services.Issued.OfType<UndoOrder>().Count());
     }
@@ -213,7 +213,7 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
     {
         var checkout = CheckoutRef("o8");
         await checkout.Start(new PlaceOrder("o8", 100), AskCancellation());
-        await checkout.WaitForOutcome(Poll, AskCancellation());
+        await checkout.WaitForOutcome(AskCancellation());
 
         await RestartWorkflow("o8");
 
@@ -232,8 +232,8 @@ public abstract class CheckoutWorkflowSpecs(ITestOutputHelper output) : Checkout
         await echo.Start(new Shout("hello"), AskCancellation());
         await checkout.Start(new PlaceOrder("e1", 100), AskCancellation());
 
-        Assert.Equal(new Heard("hello"), await echo.WaitForOutcome(Poll, AskCancellation()));
-        Assert.Equal(new OrderPlaced("charge-e1"), (await checkout.WaitForOutcome(Poll, AskCancellation())).Value);
+        Assert.Equal(new Heard("hello"), await echo.WaitForOutcome(AskCancellation()));
+        Assert.Equal(new OrderPlaced("charge-e1"), (await checkout.WaitForOutcome(AskCancellation())).Value);
     }
 
     [Fact]
