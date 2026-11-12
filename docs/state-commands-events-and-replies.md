@@ -117,7 +117,8 @@ public readonly union PaymentReply(
 public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient)
     : IInvoiceProtocol, IEffect<InvoiceCommand>
 {
-    public InvoiceCommand GaveUp(WorkGaveUp g) => new RecipientRejected($"directory: {g.Reason}");
+    public InvoiceCommand GaveUp(WorkGaveUp g) =>
+        new RecipientRejected($"directory: {g.Reason}");
 }
 
 [AkkaSerializer<IInvoiceProtocol>("invoices", 120100)]
