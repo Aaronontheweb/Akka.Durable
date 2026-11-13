@@ -24,64 +24,31 @@ That's the caller API: choose an ID, send a command, get its declared reply type
 
 ## Define its behavior
 
-Here is the `Invoice` behind those calls. `Decide` produces events and effects; `Evolve` computes the state from each persisted event. Issuing an invoice needs an answer from a recipient directory, so `Decide` records that verification started and issues a `VerifyRecipient` effect. The directory's answer comes back as a command, `RecipientVerified` or `RecipientRejected`, and a second arm finishes the job.
+Here is the `Invoice` behind those calls. Issuing an invoice runs a `VerifyRecipient` effect, and its answer comes back as a command. This is the state that handles it:
 
 ```csharp
-using InvoiceContext = DecisionContext<InvoiceState, InvoiceCommand, InvoiceEvent>;
-
-public static class Invoice
-{
-    public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
-        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
-
-    public static Decision<InvoiceCommand, InvoiceEvent> Decide(
-        InvoiceState state,
-        InvoiceCommand command,
-        InvoiceContext ctx) =>
-        (state, command) switch
+public static InvoiceDecision Decide(InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
+    state switch
+    {
+        // ... Draft: IssueInvoice persists VerificationStarted and issues the VerifyRecipient effect.
+        Verifying v => command switch
         {
-            // Needs an outside answer: remember that we asked, then ask.
-            (Draft, IssueInvoice c) when c.Total > 0 =>
-                ctx.Persist(new VerificationStarted(c))
-                    .Execute(new VerifyRecipient(c.Recipient)),
-
-            // The answer arrives as a command. The request kept in state fixes the reply type.
-            (Verifying v, RecipientVerified) =>
+            // The answer to VerifyRecipient arrives as a command.
+            // v.Request is the IssueInvoice we are still answering.
+            RecipientVerified =>
                 ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
                     .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
                     .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
-            (Verifying v, RecipientRejected r) =>
+            RecipientRejected r =>
                 ctx.Persist(new VerificationFailed(r.Reason))
                     .Reply(v.Request, new InvoiceRejected(r.Reason)),
-            (_, RecipientVerified or RecipientRejected) => ctx.Ignore(),
-
-            (Issued s, RecordPayment p) when p.Amount == s.Total =>
-                ctx.Persist(new PaymentRecorded(p.Amount))
-                    .CancelTimer("reminder")
-                    .Reply(p, new PaymentAccepted()),
-
-            // A lost reminder mail is acceptable, so the light, unrecorded Run is enough.
-            (Issued, SendReminder) =>
-                ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
-            (_, SendReminder) => ctx.Ignore(),
-
-            (_, IssueInvoice c) =>
-                ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
-            (_, RecordPayment p) =>
-                ctx.None().Reply(p, new InvoiceRejected("Invalid invoice operation")),
-        };
-
-    public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
-        (state, @event) switch
-        {
-            (Draft, VerificationStarted e) => new Verifying(e.Request),
-            (Verifying, VerificationFailed) => new Draft(),
-            (Verifying, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
-            (Issued s, PaymentRecorded) => new Paid(s.Total),
-            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
-        };
-}
+            _ => NotHere(command, ctx),   // refused or ignored: it does not belong here
+        },
+        // ... Issued and Paid have the same shape.
+    };
 ```
+
+Every state looks like this: see the [complete invoice](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md#how-to-structure-a-decider).
 
 `VerifyRecipient` is the effect: plain data, journaled in the same write as `VerificationStarted`. It says which command `Decide` gets when the directory gives no answer:
 

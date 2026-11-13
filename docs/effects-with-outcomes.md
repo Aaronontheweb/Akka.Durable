@@ -7,21 +7,21 @@ When an external service decides what happens next, the decision is split in two
 The [invoice in the README](../README.md#define-its-behavior) does this for recipient verification. These are its two halves:
 
 ```csharp
-// First half. Remember that we asked, then ask.
-(Draft, IssueInvoice c) when c.Total > 0 =>
+// First half, in the Draft block. Remember that we asked, then ask.
+IssueInvoice c when c.Total > 0 =>
     ctx.Persist(new VerificationStarted(c)).Execute(new VerifyRecipient(c.Recipient)),
 
-// Second half. The handler's answer arrives as a command and is decided like any other.
-(Verifying v, RecipientVerified) =>
+// Second half, in the Verifying block. The handler's answer arrives as a command
+// and is decided like any other.
+RecipientVerified =>
     ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
         .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
         .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
-(Verifying v, RecipientRejected r) =>
+RecipientRejected r =>
     ctx.Persist(new VerificationFailed(r.Reason)).Reply(v.Request, new InvoiceRejected(r.Reason)),
-
-// An answer that arrives in any other state has nothing to finish.
-(_, RecipientVerified or RecipientRejected) => ctx.Ignore(),
 ```
+
+An answer that arrives in any other state has nothing to finish. The blanket arm of that state ignores it, because nobody waits for a reply to it. This is the second condition of [How to structure a decider](state-commands-events-and-replies.md#how-to-structure-a-decider).
 
 `VerificationStarted` and the `Verifying` state are the memory, `VerifyRecipient` is the effect, and `RecipientVerified` and `RecipientRejected` are the outcomes. Between the two halves sits the handler, the only code that touches the directory.
 
@@ -50,26 +50,28 @@ services.AddEffectHandler<VerifyRecipient, InvoiceCommand, VerifyRecipientHandle
 
 `VerifyRecipient` itself is journaled in the same write as `VerificationStarted`, so it has a manifest, and it implements `IEffect<InvoiceCommand>` to say what its give-up means (see [the declarations](state-commands-events-and-replies.md)). `delivery` holds the effect's id, the same on every read and after a restart.
 
-To record a fact from the outside world, have the handler return a command that carries it. `Decide` persists the event, in the states that can accept it, and ignores it in the others.
+To record a fact from the outside world, have the handler return a command that carries it. The blocks of the states that can accept it persist the event, and the blanket arm of every other state ignores it.
 
 ## The entity is not blocked
 
-`Execute` starts the handler and moves on; the outcome arrives later as a message. Other commands are handled in the meantime, which is why the invoice records `Verifying`. A second `IssueInvoice` that arrives during verification matches no `Draft` arm and falls through to the rejection:
+`Execute` starts the handler and moves on; the outcome arrives later as a message. Other commands are handled in the meantime, which is why the invoice records `Verifying`. A second `IssueInvoice` that arrives during verification has no arm in the `Verifying` block. Its blanket arm refuses it, and the caller gets the rejection:
 
 ```csharp
-(_, IssueInvoice c) => ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
+// In NotHere, which the blanket arm of every state calls.
+IssueInvoice c => ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
 ```
 
-To queue it instead, stash it while verifying and release the stash from both outcome arms:
+To queue it instead, give the `Verifying` block an arm that stashes it, and release the stash from both outcome arms:
 
 ```csharp
-(Verifying, IssueInvoice) => ctx.Stash(),
+// In the Verifying block.
+IssueInvoice => ctx.Stash(),
 
-(Verifying v, RecipientVerified) =>
+RecipientVerified =>
     ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
         .Reply(v.Request, new InvoiceAccepted(ctx.EntityId))
         .UnstashAll(),
-(Verifying v, RecipientRejected r) =>
+RecipientRejected r =>
     ctx.Persist(new VerificationFailed(r.Reason))
         .Reply(v.Request, new InvoiceRejected(r.Reason))
         .UnstashAll(),
@@ -85,8 +87,8 @@ An outcome is handled on behalf of the command that issued the effect. The calle
 // The caller.
 IssueReply reply = await invoices.Get(id).Ask(new IssueInvoice(250m, "billing@example.com"), ct);
 
-// The entity, several messages later. This reply completes the caller's Ask.
-(Verifying v, RecipientRejected r) =>
+// The entity, several messages later, in the Verifying block. This reply completes the caller's Ask.
+RecipientRejected r =>
     ctx.Persist(new VerificationFailed(r.Reason)).Reply(v.Request, new InvoiceRejected(r.Reason)),
 ```
 
@@ -114,13 +116,14 @@ public sealed record VerificationGaveUp(GaveUpReason Reason) : IInvoiceProtocol;
 // on VerifyRecipient
 public InvoiceCommand GaveUp(WorkGaveUp g) => new VerificationGaveUp(g.Reason);
 
-// Ask once more after a crash; reject on any other give-up.
-(Verifying v, VerificationGaveUp { Reason: GaveUpReason.Interrupted }) =>
+// In the Verifying block. Ask once more after a crash; reject on any other give-up.
+VerificationGaveUp { Reason: GaveUpReason.Interrupted } =>
     ctx.None().Execute(new VerifyRecipient(v.Request.Recipient)),
-(Verifying v, VerificationGaveUp g) =>
+VerificationGaveUp g =>
     ctx.Persist(new VerificationFailed($"directory: {g.Reason}")).Reply(v.Request, new InvoiceRejected("directory unavailable")),
-(_, VerificationGaveUp) => ctx.Ignore(),
 ```
+
+In every other state, `NotHere` ignores `VerificationGaveUp`, like the other late answers.
 
 Each `Execute` is a new effect with a new id. Answers and give-ups are matched to the effect they belong to, so a late answer of an effect that already gave up is dropped.
 
