@@ -27,21 +27,14 @@ public sealed class MailReminderHandler(IInvoiceMailer mailer) : IEffectHandler<
 // At startup.
 services.AddEffectHandler<MailReminder, InvoiceCommand, MailReminderHandler>();
 
-// In Decide, the block of the Issued state.
-private static InvoiceDecision WhenIssued(Issued s, InvoiceCommand command, InvoiceContext ctx) =>
-    command switch
-    {
-        SendReminder => ctx.None().Execute(new MailReminder(s.Recipient)),
-        ReminderDelivered => ctx.None().Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
-        ReminderBounced => ctx.None(),                     // no more reminders
-        ReminderNotSent => ctx.None().Schedule("reminder", TimeSpan.FromHours(1), new SendReminder()),
-
-        // Leftover refuses a caller's command, and ignores a late answer of an effect.
-        _ => Leftover(command, ctx),
-    };
+// In Decide, in the Issued block.
+SendReminder => ctx.None().Execute(new MailReminder(s.Recipient)),
+ReminderDelivered => ctx.None().Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
+ReminderBounced => ctx.None(),                     // no more reminders
+ReminderNotSent => ctx.None().Schedule("reminder", TimeSpan.FromHours(1), new SendReminder()),
 ```
 
-The other states do not list the three answers. Their blanket arm ignores them, as a late answer of an effect needs no reply. See [How to structure a decider](state-commands-events-and-replies.md#how-to-structure-a-decider).
+In every other state a late answer is ignored. See [How to structure a decider](state-commands-events-and-replies.md#how-to-structure-a-decider).
 
 This is what `Execute` promises:
 

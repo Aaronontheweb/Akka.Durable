@@ -39,8 +39,7 @@ A decision that calls a workflow type that `Uses` does not name does not reach t
 ```csharp
 static WorkflowId CampaignOf(EntityId invoice) => new($"reminders-{invoice.Value}");
 
-// In the Verifying block.
-RecipientVerified =>
+(Verifying v, RecipientVerified) =>
     ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
         .Start(ReminderCampaign.Definition, CampaignOf(ctx.EntityId), new CampaignInput(ctx.EntityId.Value, ctx.UtcNow.AddDays(30)))
         .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
@@ -61,8 +60,7 @@ You do not keep anything in the entity's state for this.
 `Notify` sends a fact to a running workflow. The compiler checks that the fact is of the workflow's fact type:
 
 ```csharp
-// In the Issued block.
-RecordPayment p when p.Amount == s.Total =>
+(Issued s, RecordPayment p) when p.Amount == s.Total =>
     ctx.Persist(new PaymentRecorded(p.Amount))
         .Notify(ReminderCampaign.Definition, CampaignOf(ctx.EntityId), new InvoicePaid())
         .Reply(p, new PaymentAccepted()),
@@ -86,13 +84,10 @@ The library sends a fact once. It does not send it again, not after a failure an
 `Cancel` asks the workflow to stop. The workflow's `Cancel` function turns the request into a fact, and its table decides what the cancel means. `reason` and `by` are required. Use an id for `by`, not a person's name, because the value goes into the journal and the log:
 
 ```csharp
-// In the Issued block.
-WriteOff w =>
+(Issued, WriteOff w) =>
     ctx.Persist(new WrittenOff(w.Reason))
         .Cancel(ReminderCampaign.Definition, CampaignOf(ctx.EntityId), w.Reason, by: "invoices"),
 ```
-
-This page adds three commands to the invoice: `WriteOff`, and `CampaignTold` and `CampaignUnreachable`, which `Uses` builds from the workflow's answers. In the blanket arm, `Leftover` ignores the last two, as late answers of the entity's own calls. It answers a `WriteOff` outside `Issued` with `ctx.Unhandled()`, because that command has no reply. See [How to structure a decider](state-commands-events-and-replies.md#how-to-structure-a-decider).
 
 `Cancel` is answered like `Notify`, through the same `told` and `gaveUp`, and is sent once, like `Notify`. `WorkGaveUp.Work` is the `CancelWorkflow`.
 

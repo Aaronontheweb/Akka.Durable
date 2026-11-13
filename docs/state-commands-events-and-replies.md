@@ -138,154 +138,105 @@ public sealed partial class InvoiceSerializer : AkkaSerializer
 
 ## How to structure a decider
 
-Write `Decide` so that a reader sees the whole behavior of one state in one place. The [invoice in the README](../README.md#define-its-behavior) is written this way. Four points make the shape:
+Switch on the state first, then on the command. Each state then shows all of its behavior in one place. This is the complete invoice of the [README](../README.md#define-its-behavior). Each state has a nested `switch`, and each one ends with the same arm:
 
-1. **Filter by state first.** The outer `switch` is on the state. Each state has its own short block: a nested `switch` on the command, or a small function named for the state, such as `WhenIssued`. A reader finds the rules of a state in one place, and a change to a state touches one block.
-2. **A state lists only the commands that mean something in that state.** Each is one short arm. A short `when` guard is fine. A long guard is a sign that the state should be two states.
-3. **Everything else gets one blanket arm per state.** It is the last arm of that state's block, and it is visible. The block then fits on one screen, and nobody has to write out every pair of state and command to say "not here".
-4. **Helpers build decisions. They do not branch on the state again.** A helper such as `Leftover` below takes the command and builds `Persist`, `Execute` or `Reply`. If a helper looks at the state too, the rules of that state live in two places.
+```csharp
+using InvoiceContext = DecisionContext<InvoiceState, InvoiceCommand, InvoiceEvent>;
+using InvoiceDecision = Decision<InvoiceCommand, InvoiceEvent>;
 
-Two conditions make the blanket arm safe. Keep both.
+public static class Invoice
+{
+    public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
+        new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
 
-**The blanket arm must be loud for a command that someone sent on purpose.** A caller who sent a command must not be left in silence. Choose by what was sent:
+    // The state comes first. Each state lists only its own commands, then one blanket arm.
+    public static InvoiceDecision Decide(InvoiceState state, InvoiceCommand command, InvoiceContext ctx) =>
+        state switch
+        {
+            Draft => command switch
+            {
+                // Needs an outside answer: remember that we asked, then ask.
+                IssueInvoice c when c.Total > 0 =>
+                    ctx.Persist(new VerificationStarted(c)).Execute(new VerifyRecipient(c.Recipient)),
+                _ => Leftover(command, ctx),
+            },
+            Verifying v => command switch
+            {
+                // The answer arrives as a command. The request kept in state fixes the reply type.
+                RecipientVerified =>
+                    ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
+                        .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
+                        .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
+                RecipientRejected r =>
+                    ctx.Persist(new VerificationFailed(r.Reason))
+                        .Reply(v.Request, new InvoiceRejected(r.Reason)),
+                _ => Leftover(command, ctx),
+            },
+            Issued s => command switch
+            {
+                RecordPayment p when p.Amount == s.Total =>
+                    ctx.Persist(new PaymentRecorded(p.Amount))
+                        .CancelTimer("reminder")
+                        .Reply(p, new PaymentAccepted()),
+                // A lost reminder mail is acceptable, so the light, unrecorded Run is enough.
+                SendReminder => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
+                _ => Leftover(command, ctx),
+            },
+            Paid => Leftover(command, ctx),
+        };
 
-- A command that declares a reply (`IReplies`): refuse it with a typed reply, such as `InvoiceRejected`. The caller sees the refusal. This is the normal choice. `ctx.Ignore()` here is a mistake: the entity sends nothing back, so an `Ask` waits until its cancellation token fires.
-- A command that no caller should send, or one sent with `Tell` that has no reply: use `ctx.Unhandled()`. The entity sends nothing back, and the command is published to the actor system's event stream as an unhandled message. Akka.NET writes it to the log when its unhandled-message logging is on (`akka.actor.debug.unhandled`). A reminder that is unhandled is not acknowledged, so the reminder scheduler delivers it again by its own retry policy.
-- A command that is early, not wrong, such as a second `IssueInvoice` while the first one is being verified: use `ctx.Stash()` in that state, and release it with `.UnstashAll()` on the arms that leave that state. The entity holds the command in memory, with its sender, and decides it again after the release. A stashed command that is never released waits for ever, and it is lost when the entity stops. Use `Stash` only in a state that has such an exit.
+    // The blanket arm of every state. It builds a decision and does not look at the state.
+    // It has no `_` arm of its own, so a new command does not compile until it is placed here.
+    private static InvoiceDecision Leftover(InvoiceCommand command, InvoiceContext ctx) =>
+        command switch
+        {
+            // A caller sent these on purpose. Refuse them, so the caller sees the refusal.
+            IssueInvoice c =>
+                ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
+            RecordPayment p =>
+                ctx.None().Reply(p, new InvoiceRejected("Invalid invoice operation")),
 
-**A late answer of the entity's own effect is ignored, not refused.** The answer or the give-up of an effect can arrive after the entity has moved on: a lookup that answers after a cancel, a reminder that fires twice. That is expected, and nobody is waiting for a reply. Use `ctx.Ignore()`. A reminder that is ignored is acknowledged, so it is not delivered again.
+            // The entity's own effects and reminders can arrive late. Ignore them.
+            RecipientVerified or RecipientRejected or SendReminder => ctx.Ignore(),
+        };
 
-Keep these two kinds apart. If both fall into one `_ => ctx.Ignore()`, an effect answer that you forgot to handle looks exactly like a late duplicate, and a caller's mistaken command disappears without a reply. Name the effect answers in the arm that ignores them, and give the caller's commands a reply. A good way is one shared function with no `_` arm, which every state calls from its blanket arm. The compiler then makes you place each new command in one of the two kinds.
+    public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
+        (state, @event) switch
+        {
+            (Draft, VerificationStarted e) => new Verifying(e.Request),
+            (Verifying, VerificationFailed) => new Draft(),
+            (Verifying, InvoiceIssued e) => new Issued(e.Total, e.Recipient),
+            (Issued s, PaymentRecorded) => new Paid(s.Total),
+            _ => throw new InvalidOperationException($"Cannot apply {@event} to {state}."),
+        };
+}
+```
 
-**The cost.** With a blanket arm, the compiler no longer reports a pair of state and command that nobody placed. A new command can fall into the blanket arm of a state where it should have an arm, and it will be refused or ignored without a warning. A decision test is the safety net. For each state, test each command it must accept, and at least one command it must refuse.
+Every state follows the same rules:
+
+- **Filter by state first.** Each state has its own block. For a larger entity, a small function named for the state, such as `WhenIssued`, is the same shape.
+- **A block lists only the commands that mean something in that state.** Short `when` guards are fine.
+- **Each block ends with one blanket arm.** The state then fits on one screen.
+- **Helpers build decisions and do not look at the state.** Otherwise the rules of a state live in two places.
+
+A small entity whose whole table fits on one screen can be one flat `(state, command)` switch. Once the table does not fit, or most rows only say "not here", write it state first. Both are fine.
+
+`IssueInvoice` and `RecordPayment` come from callers and declare replies. `RecipientVerified`, `RecipientRejected` and `SendReminder` are the answer and the reminder of the entity's own work. This is what the blanket arm does with a leftover command:
+
+| The command is | Use | The caller sees |
+|---|---|---|
+| Sent by a caller, and declares a reply | A typed refusal, with `Reply` | The refusal |
+| Sent by a caller, with no reply, or never to be sent | `ctx.Unhandled()` | Nothing. It is logged as unhandled when Akka's unhandled logging is on. |
+| Early, and valid after a change of state | `ctx.Stash()`, and `.UnstashAll()` on the arms that leave the state | Nothing until the release |
+| A late answer or reminder of the entity's own effect | `ctx.Ignore()` | Nothing. A reminder is acknowledged. |
+
+Keep refusal and ignore apart. A caller's command that is ignored gets no reply, and an effect answer you forgot to handle looks like a late duplicate. `Leftover` has no `_` arm for this reason: the compiler makes you sort each new command into one kind.
+
+**The cost.** The compiler still checks that a new command is placed in `Leftover`, and that the outer `switch` has an arm for a new state. It no longer checks that a command has its own arm in each state where it should mean something: there it falls into the blanket arm and is refused or ignored. A decision test covers this. For each state, test each command it must accept, and at least one it must refuse.
 
 A workflow's fact table has its own rule: see [Workflow rules](workflow-rules.md).
 
-Here is a small seat reservation with three states. These are its declarations, without the serialization attributes. `Evolve` is not shown:
-
-```csharp
-public interface ISeatProtocol;
-
-public sealed record Free : ISeatProtocol;
-public sealed record Held(string By) : ISeatProtocol;
-public sealed record Booked(string By) : ISeatProtocol;
-public readonly union SeatState(Free, Held, Booked) : ISeatProtocol;
-
-public sealed record Hold(string By) : ISeatProtocol, IReplies<SeatCommand, SeatReply>
-{
-    public SeatCommand ToCommand() => new(this);
-}
-
-public sealed record Confirm(string By) : ISeatProtocol, IReplies<SeatCommand, SeatReply>
-{
-    public SeatCommand ToCommand() => new(this);
-}
-
-public sealed record Release(string By) : ISeatProtocol, IReplies<SeatCommand, SeatReply>
-{
-    public SeatCommand ToCommand() => new(this);
-}
-
-// The entity's own reminder.
-public sealed record HoldExpired : ISeatProtocol;
-public readonly union SeatCommand(Hold, Confirm, Release, HoldExpired) : ISeatProtocol;
-
-public sealed record SeatHeld(string By) : ISeatProtocol;
-public sealed record SeatBooked(string By) : ISeatProtocol;
-public sealed record SeatReleased : ISeatProtocol;
-public readonly union SeatEvent(SeatHeld, SeatBooked, SeatReleased) : ISeatProtocol;
-
-public sealed record SeatAccepted : ISeatProtocol;
-public sealed record SeatRefused(string Reason) : ISeatProtocol;
-public readonly union SeatReply(SeatAccepted, SeatRefused) : ISeatProtocol;
-```
-
-Each state has a block, and each block ends with `Leftover`:
-
-```csharp
-using SeatContext = DecisionContext<SeatState, SeatCommand, SeatEvent>;
-using SeatDecision = Decision<SeatCommand, SeatEvent>;
-
-public static class Seat
-{
-    public static SeatDecision Decide(SeatState state, SeatCommand command, SeatContext ctx) =>
-        state switch
-        {
-            Free => WhenFree(command, ctx),
-            Held h => WhenHeld(h, command, ctx),
-            Booked => Leftover(command, ctx),
-        };
-
-    private static SeatDecision WhenFree(SeatCommand command, SeatContext ctx) =>
-        command switch
-        {
-            Hold c =>
-                ctx.Persist(new SeatHeld(c.By))
-                    .Schedule("hold", TimeSpan.FromMinutes(10), new HoldExpired())
-                    .Reply(c, new SeatAccepted()),
-
-            _ => Leftover(command, ctx),
-        };
-
-    private static SeatDecision WhenHeld(Held h, SeatCommand command, SeatContext ctx) =>
-        command switch
-        {
-            Confirm c when c.By == h.By =>
-                ctx.Persist(new SeatBooked(c.By))
-                    .CancelTimer("hold")
-                    .Reply(c, new SeatAccepted()),
-            Release c when c.By == h.By =>
-                ctx.Persist(new SeatReleased())
-                    .CancelTimer("hold")
-                    .Reply(c, new SeatAccepted()),
-            HoldExpired =>
-                ctx.Persist(new SeatReleased()),
-
-            _ => Leftover(command, ctx),
-        };
-
-    // Builds a decision. It does not look at the state.
-    private static SeatDecision Leftover(SeatCommand command, SeatContext ctx) =>
-        command switch
-        {
-            // A caller sent these on purpose. Refuse them with a reply.
-            Hold c => ctx.None().Reply(c, new SeatRefused("The seat is not free.")),
-            Confirm c => ctx.None().Reply(c, new SeatRefused("The seat is not held by you.")),
-            Release c => ctx.None().Reply(c, new SeatRefused("The seat is not held by you.")),
-
-            // The entity's own reminder can arrive late. Ignore it.
-            HoldExpired => ctx.Ignore(),
-        };
-}
-```
-
-### What to avoid
-
-Do not write a flat `switch` on the command whose helpers each branch on the state and each carry their own silent default. The rules of one state are then spread over many helpers, and each default can swallow a command without anyone seeing it:
-
-```csharp
-// Do not do this.
-command switch
-{
-    Hold c => OnHold(state, c, ctx),       // OnHold checks the state, and ends with `_ => ctx.Ignore()`
-    Confirm c => OnConfirm(state, c, ctx), // so does OnConfirm
-    Release c => OnRelease(state, c, ctx), // and OnRelease
-    HoldExpired => OnExpired(state, ctx),  // and OnExpired
-}
-```
-
-Do not write one flat `(state, command)` table that lists every pair either. Most rows only say "ignored", and they hide the few rows that matter:
-
-```csharp
-// Do not do this.
-(Free, Hold c) => /* the row that matters */,
-(Free, Confirm c) => ctx.Ignore(),
-(Free, Release c) => ctx.Ignore(),
-(Free, HoldExpired) => ctx.Ignore(),
-(Held h, Confirm c) when c.By == h.By => /* the row that matters */,
-(Held, Hold c) => ctx.Ignore(),
-// ... and so on for every pair
-```
+Two things are faults at any size. A switch on the command whose helpers each branch on the state again, each with its own silent `_ => ctx.Ignore()`. And one `_ => ctx.Ignore()` that swallows both a caller's command and the answer of an effect.
 
 ---
 
