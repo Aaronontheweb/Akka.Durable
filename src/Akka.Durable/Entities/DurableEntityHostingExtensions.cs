@@ -166,7 +166,7 @@ public static class DurableEntityHostingExtensions
             var services = resolver.GetService<IServiceProvider>();
             ITimeProvider time = system.Scheduler;
             return entityId => Props.Create<EntityActor<TState, TCommand, TEvent>>(
-                new EntityId(entityId), definition, services, time);
+                new EntityId(entityId), definition, services, time, issuesEffects);
         }
 
         var options = definition.Options ?? EntityOptions.Default;
@@ -333,14 +333,15 @@ public static class DurableEntityHostingExtensions
 
     /// <summary>
     /// Checks the effects of an entity type, as far as the registrations show them. A route that answers with the
-    /// entity's command type belongs to this entity type. A route with no answer belongs to an entity type, and the
-    /// registration does not say which one, so every entity host checks it.
+    /// entity's command type belongs to this entity type, so it is checked here.
     /// </summary>
     /// <remarks>
     /// <para>Each of these effect types has a serializer of its own, because the effect is journaled with the decision
     /// that issues it.</para>
-    /// <para>An entity type that has a route for its command type has a <c>GaveUp</c> on its definition. A route
-    /// with no answer cannot be checked this way here: the first <c>Execute</c> is refused before the write.</para>
+    /// <para>An entity type that has a route for its command type has a <c>GaveUp</c> on its definition.</para>
+    /// <para>A route with no answer does not say which entity type issues its effect: it may be the effect of an entity
+    /// type that another host runs. So it is not checked here. The entity that issues it is refused before the write,
+    /// at its first <c>Execute</c> of that effect, if the effect has no serializer of its own.</para>
     /// <para>A route that answers with another type is the effect of another entity type or of a workflow, so it is
     /// not checked here. An entity that issues such an effect is refused before the write.</para>
     /// </remarks>
@@ -349,26 +350,13 @@ public static class DurableEntityHostingExtensions
     {
         var routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
         var serialization = system.Serialization;
-        var fallback = TryFindSerializer(serialization, typeof(object));
-
-        foreach (var route in routes.OfEntity(typeof(TCommand)))
+        foreach (var route in routes.AnsweringWith(typeof(TCommand)))
         {
-            if (TryFindSerializer(serialization, route.EffectType) is { } found
-                && (fallback is null || found.Identifier != fallback.Identifier))
+            if (HasOwnSerializer(serialization, route.EffectType))
                 continue;
 
-            var protocol = ProtocolOf(TryFindSerializer(serialization, typeof(TCommand)));
-            var example = protocol is null ? "" : $"make it implement {protocol.Name}";
-            var where = route.OutcomeType is not null
-                ? $"that holds {typeof(TCommand).Name}" + (protocol is null ? "" : $" (for example, {example})")
-                : "of the entity type that issues it" +
-                  (protocol is null ? "" : $" (if that is [{typeName.Value}]: {example})");
             throw new InvalidOperationException(
-                $"Durable entity [{typeName.Value}] cannot start: the effect {route.EffectType.Name}, handled by " +
-                $"{route.HandlerType.Name}, is journaled with the decision that issues it, and no serializer is " +
-                $"registered for it, so it would fall back to {fallback?.GetType().Name ?? "no serializer at all"}. " +
-                "Mark it [AkkaSerializable(Manifest = \"...\")] under the [AkkaSerializer<TProtocol>] serializer " +
-                $"{where}, and register that serializer with WithCustomSerializer.");
+                $"Durable entity [{typeName.Value}] cannot start: " + UnserializableEffect(system, typeName, route, typeof(TCommand)));
         }
 
         if (!mapsGiveUps && routes.AnsweringWith(typeof(TCommand)).FirstOrDefault() is { } unmapped)
@@ -410,6 +398,25 @@ public static class DurableEntityHostingExtensions
         }
 
         return null;
+    }
+
+    /// <summary>True when <paramref name="type"/> has a serializer of its own, not the <see cref="object"/> fallback.</summary>
+    internal static bool HasOwnSerializer(Akka.Serialization.Serialization serialization, Type type) =>
+        TryFindSerializer(serialization, type) is { } found
+        && (TryFindSerializer(serialization, typeof(object)) is not { } fallback || found.Identifier != fallback.Identifier);
+
+    /// <summary>Why an effect of <paramref name="typeName"/> with no serializer of its own is refused, and the line to add.</summary>
+    internal static string UnserializableEffect(ActorSystem system, EntityTypeName typeName, EffectRoute route, Type commandType)
+    {
+        var serialization = system.Serialization;
+        var fallback = TryFindSerializer(serialization, typeof(object));
+        var protocol = ProtocolOf(TryFindSerializer(serialization, commandType));
+        return $"the effect {route.EffectType.Name}, handled by {route.HandlerType.Name}, is journaled with the decision " +
+               $"that issues it, and no serializer is registered for it, so it would fall back to " +
+               $"{fallback?.GetType().Name ?? "no serializer at all"}. Mark it [AkkaSerializable(Manifest = \"...\")] " +
+               $"under the [AkkaSerializer<TProtocol>] serializer that holds {commandType.Name}" +
+               (protocol is null ? "" : $" (for example, make it implement {protocol.Name})") +
+               ", and register that serializer with WithCustomSerializer.";
     }
 
     private static Serializer? TryFindSerializer(Akka.Serialization.Serialization serialization, Type type)

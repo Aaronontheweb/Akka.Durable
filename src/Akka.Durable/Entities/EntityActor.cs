@@ -76,12 +76,27 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // watches allocates nothing.
     private HashSet<IActorRef>? _subscribers;
 
+    // True when the entity runs under WithDurableEntity, whose start checks it completes: an effect with no answer and
+    // no serializer of its own is refused at its first Execute. An actor created directly makes no such promise.
+    private readonly bool _checksEffectSerializers;
+
     public EntityActor(
         EntityId entityId,
         EntityDefinition<TState, TCommand, TEvent> definition,
         IServiceProvider services,
         ITimeProvider timeProvider)
+        : this(entityId, definition, services, timeProvider, checksEffectSerializers: false)
     {
+    }
+
+    public EntityActor(
+        EntityId entityId,
+        EntityDefinition<TState, TCommand, TEvent> definition,
+        IServiceProvider services,
+        ITimeProvider timeProvider,
+        bool checksEffectSerializers)
+    {
+        _checksEffectSerializers = checksEffectSerializers;
         _entityId = entityId;
         _definition = definition;
         _services = services;
@@ -815,6 +830,19 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     EntityType.Value, _entityId.Value, route.EffectType.Name, route.HandlerType.Name, outcome.Name,
                     typeof(TCommand).Name);
                 throw new EffectAnswerMismatchException(EntityType, route, typeof(TCommand));
+            }
+
+            // The host's start check covers the effects whose handler answers with this entity's command type. An
+            // effect with no answer is checked here, where the entity that issues it is known.
+            if (_checksEffectSerializers && route.OutcomeType is null
+                && !DurableEntityHostingExtensions.HasOwnSerializer(Context.System.Serialization, route.EffectType))
+            {
+                var why = DurableEntityHostingExtensions.UnserializableEffect(
+                    Context.System, EntityType, route, typeof(TCommand));
+                _log.Error("Entity type [{0}], entity [{1}], issued {2} The effect was not journaled and not run.",
+                    EntityType.Value, _entityId.Value, why);
+                throw new InvalidOperationException(
+                    $"Entity type [{EntityType.Value}] issued {why} The effect was not journaled and not run.");
             }
 
             if (_definition.GaveUp is null)
