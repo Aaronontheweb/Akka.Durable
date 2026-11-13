@@ -1,3 +1,13 @@
+#### 0.1.0-alpha.8 November 13th 2026 ####
+
+**Fix: an entity host is no longer refused at start because of another entity's effect.** This fault was new in 0.1.0-alpha.7. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **The fault.** At host start, each entity type checked every effect handler with no answer, in the whole container. A host that runs one entity type was refused when the container also held a no-answer handler for an effect of another entity type, and the host did not register that other type's serializer. The error named the entity type that was starting, not the one that issues the effect. A test host that runs one entity with a shared set of handlers hit this.
+* **At start, an entity type now checks only the effects whose handler answers with its own command type.** Their owner is certain.
+* **An effect whose handler has no answer, and that has no serializer of its own,** is refused at the issuing entity's first `Execute` of it, before anything is written. The error names that entity type, the effect and the line to add. A missing `GaveUp` is refused in the same place. This check applies to entities hosted with `WithDurableEntity`.
+
+**What you change from 0.1.0-alpha.7:** nothing. Nothing stored changes.
+
 #### 0.1.0-alpha.7 November 13th 2026 ####
 
 **Breaking change: `IEffect<TCommand>` is removed.** An effect that an entity issues with `Execute` is now a plain record. The command for a give-up comes from one function on the entity's definition, as it does for a workflow. Akka.Durable is still a proof of concept, not an official Akka.NET project.
