@@ -161,9 +161,9 @@ public sealed record Handled<TCommand, TEvent>(
     /// <para>Before the first write that leaves an effect pending, the entity stores a reminder that wakes it after a
     /// crash. If the reminder cannot be stored, nothing is written and the command fails.</para>
     /// <para>The effect is a plain record. Its type needs a serializer and a handler registered with
-    /// <c>AddEffectHandler</c>, and the entity's definition needs a <c>GaveUp</c> line. Without a handler, with a handler
-    /// that answers with another command type, or without the <c>GaveUp</c> line, the effect is refused before the
-    /// write, and the entity restarts.</para>
+    /// <c>AddEffectHandler</c>, and the entity's definition needs a <c>GaveUp</c>. Without a handler, with a handler
+    /// that answers with another command type, or without the <c>GaveUp</c>, the effect is refused before the write,
+    /// and the entity restarts.</para>
     /// </remarks>
     public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull
     {

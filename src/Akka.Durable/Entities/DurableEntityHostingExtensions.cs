@@ -186,7 +186,7 @@ public static class DurableEntityHostingExtensions
             typeof(TState), typeof(TCommand), typeof(TEvent)));
 
         // The entity's effect types are known from their routes, so they are checked here, before any entity runs.
-        var mapsGiveUps = definition.OnGaveUp is not null;
+        var mapsGiveUps = definition.GaveUp is not null;
         if (issuesEffects)
             builder.WithActors((system, _, resolver) => EnsureEffectRoutes<TCommand>(
                 system, definition.TypeName, mapsGiveUps, resolver.GetService<IServiceProvider>()));
@@ -339,7 +339,7 @@ public static class DurableEntityHostingExtensions
     /// <remarks>
     /// <para>Each of these effect types has a serializer of its own, because the effect is journaled with the decision
     /// that issues it.</para>
-    /// <para>An entity type that has a route for its command type has a <c>GaveUp</c> line on its definition. A route
+    /// <para>An entity type that has a route for its command type has a <c>GaveUp</c> on its definition. A route
     /// with no answer cannot be checked this way here: the first <c>Execute</c> is refused before the write.</para>
     /// <para>A route that answers with another type is the effect of another entity type or of a workflow, so it is
     /// not checked here. An entity that issues such an effect is refused before the write.</para>

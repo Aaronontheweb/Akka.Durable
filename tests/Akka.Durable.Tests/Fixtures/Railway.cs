@@ -66,11 +66,10 @@ public sealed partial class RailwaySerializer : AkkaSerializer
 public static class Railway
 {
     // A give-up rejects the request the calculation was for.
-    public static readonly EntityDefinition<RailwayState, RailwayCommand, RailwayEvent> Definition =
-        new EntityDefinition<RailwayState, RailwayCommand, RailwayEvent>(
-                new EntityTypeName("railway"), _ => new RailwayState(0), Decide,
-                (state, e) => e switch { Added added => state with { Count = state.Count + added.Value } })
-            .GaveUp(g => new CalculationFailed(((Calculate)g.Work).Request, $"gave up: {g.Reason}"));
+    public static readonly EntityDefinition<RailwayState, RailwayCommand, RailwayEvent> Definition = new(
+        new EntityTypeName("railway"), _ => new RailwayState(0), Decide,
+        (state, e) => e switch { Added added => state with { Count = state.Count + added.Value } },
+        GaveUp: g => new CalculationFailed(((Calculate)g.Work).Request, $"gave up: {g.Reason}"));
 
     public static Decision<RailwayCommand, RailwayEvent> Decide(RailwayState state, RailwayCommand command, RailwayContext ctx) =>
         command switch

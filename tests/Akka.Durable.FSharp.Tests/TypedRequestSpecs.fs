@@ -37,9 +37,9 @@ let definition =
             | Issue c -> ctx.None().Execute({ Request = c; Value = c.Amount }).ToDecision()
             | Computed (c, result) -> ctx.Persist(Added result).Reply(c, Accepted result).ToDecision()
             | Failed (c, reason) -> ctx.None().Reply(c, Rejected reason).ToDecision()),
-        (fun state (Added value) -> state + value))
+        (fun state (Added value) -> state + value),
         // A give-up fails the request the effect was issued for.
-        .GaveUp(fun gaveUp -> Failed((gaveUp.Work :?> Compute).Request, string gaveUp.Reason))
+        GaveUp = (fun gaveUp -> Failed((gaveUp.Work :?> Compute).Request, string gaveUp.Reason)))
 
 [<Fact>]
 let ``record command converts to its native FSharp DU without reflection`` () =

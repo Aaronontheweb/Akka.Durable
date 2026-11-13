@@ -47,9 +47,8 @@ public sealed class DeliverHandler(OutboxWorld world) : IEffectHandler<Deliver, 
 public static class Outbox
 {
     public static readonly EntityDefinition<OutboxState, OutboxCommand, OutboxEvent> Definition =
-        new EntityDefinition<OutboxState, OutboxCommand, OutboxEvent>(
-                new EntityTypeName("outbox"), _ => new OutboxState([]), Decide, Evolve)
-            .GaveUp(g => new MailGaveUp(((Deliver)g.Work).Name, g.Reason, g.Attempts, g.Error));
+        new(new EntityTypeName("outbox"), _ => new OutboxState([]), Decide, Evolve,
+            GaveUp: g => new MailGaveUp(((Deliver)g.Work).Name, g.Reason, g.Attempts, g.Error));
 
     private static Decision<OutboxCommand, OutboxEvent> Decide(OutboxState state, OutboxCommand command, OutboxContext ctx) =>
         command switch

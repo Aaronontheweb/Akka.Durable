@@ -96,11 +96,12 @@ public static class ProbeEntity
 
     public static EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition(
         ProbeWorld world, EntityOptions? options = null) =>
-        (Counter.Definition with
+        Counter.Definition with
         {
             Decide = (state, command, ctx) => Decide(world, state, command, ctx),
             Options = options ?? EntityOptions.Default,
-        }).GaveUp(GaveUp);
+            GaveUp = GaveUp,
+        };
 
     /// <summary>
     /// The give-up of a probe effect says who gave up, why, and after how many tries. The last part says that the

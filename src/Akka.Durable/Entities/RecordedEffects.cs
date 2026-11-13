@@ -274,7 +274,7 @@ internal sealed class EffectAnswerMismatchException(EntityTypeName entity, Effec
         "was not journaled and not run.");
 
 /// <summary>
-/// An entity type issues an effect, and its definition has no <c>GaveUp</c> line: <c>Decide</c> would get nothing
+/// An entity type issues an effect, and its definition has no <c>GaveUp</c>: <c>Decide</c> would get nothing
 /// when the effect gets no answer. The host refuses to start when it can see this. Otherwise the effect is refused
 /// before the write, and the entity restarts.
 /// </summary>
@@ -282,8 +282,8 @@ internal sealed class MissingGiveUpException(string message) : InvalidOperationE
 {
     /// <summary>The line to add, and where.</summary>
     internal static string Fix(EntityTypeName entity, Type commandType) =>
-        $"Add .GaveUp(gaveUp => new YourCommand(gaveUp.Reason)) to the definition of [{entity.Value}], where " +
-        $"YourCommand is a {commandType.Name}.";
+        $"Add the argument \"GaveUp: gaveUp => new YourCommand(gaveUp.Reason)\" to the EntityDefinition of " +
+        $"[{entity.Value}], where YourCommand is a {commandType.Name}.";
 
     private const string Why =
         "its definition does not say which command Decide gets when an effect gets no answer";

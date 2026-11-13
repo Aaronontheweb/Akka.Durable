@@ -47,7 +47,7 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
 
     /// <summary>
     /// Decides <paramref name="command"/> against the recovered state. Fails the test when the decision issues an
-    /// effect with <c>Execute</c> and the definition has no <c>GaveUp</c> line, or when it calls a workflow type that
+    /// effect with <c>Execute</c> and the definition has no <c>GaveUp</c>, or when it calls a workflow type that
     /// the definition does not name with <c>Uses</c>.
     /// </summary>
     public DeciderOutcome<TState, TCommand, TEvent> When(TCommand command)
@@ -61,7 +61,7 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
     /// Decides the give-up of <paramref name="effect"/>: the command the definition's <c>GaveUp</c> returns for
     /// <paramref name="reason"/>, against the recovered state. This is what the entity decides when the effect's
     /// handler fails, runs out of time, or is interrupted by a restart. Fails the test when the definition has no
-    /// <c>GaveUp</c> line.
+    /// <c>GaveUp</c>.
     /// </summary>
     /// <param name="effect">The effect that gave up, as the decision issued it.</param>
     /// <param name="reason">Why it gave up.</param>
@@ -72,14 +72,14 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
     {
         ArgumentNullException.ThrowIfNull(effect);
         ArgumentOutOfRangeException.ThrowIfLessThan(attempts, 1);
-        if (definition.OnGaveUp is not { } gaveUp) throw NoGaveUp($"The effect {effect.GetType().Name} gave up");
+        if (definition.GaveUp is not { } gaveUp) throw NoGaveUp($"The effect {effect.GetType().Name} gave up");
         return When(gaveUp(new WorkGaveUp(effect, reason, Error: null, attempts)));
     }
 
     private Xunit.Sdk.XunitException NoGaveUp(string what) => new(
         $"{what}, but the definition of entity type [{definition.TypeName.Value}] does not say which command Decide " +
-        "gets when an effect gets no answer. Add .GaveUp(gaveUp => new YourCommand(gaveUp.Reason)) to the entity " +
-        $"definition, where YourCommand is a {typeof(TCommand).Name}.");
+        "gets when an effect gets no answer. Add the argument \"GaveUp: gaveUp => new YourCommand(gaveUp.Reason)\" " +
+        $"to the EntityDefinition, where YourCommand is a {typeof(TCommand).Name}.");
 
     /// <summary>
     /// An effect or a call to a workflow that the entity would refuse at run time fails the scenario here.
@@ -92,7 +92,7 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
         {
             // Recorded: issued with Execute by an entity. A workflow's own work is not, and gives up as a fact.
             if (effect.Value is ExecuteEffect { Recorded: true, Effect: not IWorkflowCall } execute
-                && definition.OnGaveUp is null)
+                && definition.GaveUp is null)
                 throw NoGaveUp($"The decision issues the effect {execute.Effect.GetType().Name}");
 
             if (effect.Value is not ExecuteEffect { Effect: IWorkflowCall call }) continue;

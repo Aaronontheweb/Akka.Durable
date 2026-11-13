@@ -194,8 +194,7 @@ public static class Counter
     public static readonly EntityTypeName TypeName = new("counter");
 
     public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition =
-        new EntityDefinition<CounterState, CounterCommand, CounterEvent>(TypeName, _ => new CounterState(0, false), Decide, Evolve)
-            .GaveUp(GaveUp);
+        new(TypeName, _ => new CounterState(0, false), Decide, Evolve, GaveUp: GaveUp);
 
     /// <summary>The command a give-up becomes: one for <see cref="Compute"/>, and one that names any other effect.</summary>
     public static CounterCommand GaveUp(WorkGaveUp gaveUp) => gaveUp.Work switch

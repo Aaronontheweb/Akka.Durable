@@ -584,7 +584,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         var ownCall = pending.Effect is RecordedStart or RecordedNotify or RecordedCancel;
         object? command = ownCall
             ? DeliveryOf(pending.Effect)?.GaveUp?.Invoke(gaveUp)
-            : _definition.OnGaveUp is { } map ? map(gaveUp) : null;
+            : _definition.GaveUp is { } map ? map(gaveUp) : null;
 
         if (command is TCommand decided && decided is not IUnion { Value: null })
         {
@@ -592,11 +592,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             return;
         }
 
-        if (!ownCall && _definition.OnGaveUp is null)
-            // Issue refuses an Execute by a definition with no GaveUp line, so this effect was journaled by a build
-            // whose definition had one.
+        if (!ownCall && _definition.GaveUp is null)
+            // Issue refuses an Execute by a definition with no GaveUp, so this effect was journaled by a build whose
+            // definition had one.
             _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}, and the definition of [{2}] has no " +
-                       "GaveUp line any more, so Decide gets nothing. It is closed. {5}",
+                       "GaveUp any more, so Decide gets nothing. It is closed. {5}",
                 PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason,
                 MissingGiveUpException.Fix(EntityType, typeof(TCommand)));
         else
@@ -765,7 +765,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// Prepares the record of a recorded <c>Execute</c>. A call to a workflow the definition does not declare, or a
     /// notify or cancel the definition cannot map, is not journaled: it is logged and dropped. An effect type with no
     /// handler, with a handler that answers with another command type, or issued by a definition with no
-    /// <c>GaveUp</c> line, is refused before the write: a configuration error, so it goes to supervision.
+    /// <c>GaveUp</c>, is refused before the write: a configuration error, so it goes to supervision.
     /// </summary>
     private IssuedEffect Issue(ExecuteEffect execute, DateTimeOffset now)
     {
@@ -817,9 +817,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 throw new EffectAnswerMismatchException(EntityType, route, typeof(TCommand));
             }
 
-            if (_definition.OnGaveUp is null)
+            if (_definition.GaveUp is null)
             {
-                _log.Error("Entity [{0}/{1}] issued the effect {2}, and the definition of [{0}] has no GaveUp line. {3} " +
+                _log.Error("Entity [{0}/{1}] issued the effect {2}, and the definition of [{0}] has no GaveUp. {3} " +
                            "The effect was not journaled and not run.",
                     EntityType.Value, _entityId.Value, route.EffectType.Name,
                     MissingGiveUpException.Fix(EntityType, typeof(TCommand)));
