@@ -76,12 +76,27 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // watches allocates nothing.
     private HashSet<IActorRef>? _subscribers;
 
+    // True when the entity runs under WithDurableEntity, whose start checks it completes: an effect with no answer and
+    // no serializer of its own is refused at its first Execute. An actor created directly makes no such promise.
+    private readonly bool _checksEffectSerializers;
+
     public EntityActor(
         EntityId entityId,
         EntityDefinition<TState, TCommand, TEvent> definition,
         IServiceProvider services,
         ITimeProvider timeProvider)
+        : this(entityId, definition, services, timeProvider, checksEffectSerializers: false)
     {
+    }
+
+    public EntityActor(
+        EntityId entityId,
+        EntityDefinition<TState, TCommand, TEvent> definition,
+        IServiceProvider services,
+        ITimeProvider timeProvider,
+        bool checksEffectSerializers)
+    {
+        _checksEffectSerializers = checksEffectSerializers;
         _entityId = entityId;
         _definition = definition;
         _services = services;
@@ -819,7 +834,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
             // The host's start check covers the effects whose handler answers with this entity's command type. An
             // effect with no answer is checked here, where the entity that issues it is known.
-            if (route.OutcomeType is null
+            if (_checksEffectSerializers && route.OutcomeType is null
                 && !DurableEntityHostingExtensions.HasOwnSerializer(Context.System.Serialization, route.EffectType))
             {
                 var why = DurableEntityHostingExtensions.UnserializableEffect(

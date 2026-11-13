@@ -166,7 +166,7 @@ public static class DurableEntityHostingExtensions
             var services = resolver.GetService<IServiceProvider>();
             ITimeProvider time = system.Scheduler;
             return entityId => Props.Create<EntityActor<TState, TCommand, TEvent>>(
-                new EntityId(entityId), definition, services, time);
+                new EntityId(entityId), definition, services, time, issuesEffects);
         }
 
         var options = definition.Options ?? EntityOptions.Default;
