@@ -817,6 +817,19 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 throw new EffectAnswerMismatchException(EntityType, route, typeof(TCommand));
             }
 
+            // The host's start check covers the effects whose handler answers with this entity's command type. An
+            // effect with no answer is checked here, where the entity that issues it is known.
+            if (route.OutcomeType is null
+                && !DurableEntityHostingExtensions.HasOwnSerializer(Context.System.Serialization, route.EffectType))
+            {
+                var why = DurableEntityHostingExtensions.UnserializableEffect(
+                    Context.System, EntityType, route, typeof(TCommand));
+                _log.Error("Entity type [{0}], entity [{1}], issued {2} The effect was not journaled and not run.",
+                    EntityType.Value, _entityId.Value, why);
+                throw new InvalidOperationException(
+                    $"Entity type [{EntityType.Value}] issued {why} The effect was not journaled and not run.");
+            }
+
             if (_definition.GaveUp is null)
             {
                 _log.Error("Entity [{0}/{1}] issued the effect {2}, and the definition of [{0}] has no GaveUp. {3} " +
