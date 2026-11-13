@@ -1,4 +1,4 @@
-#### 0.1.0-alpha.7 Unreleased ####
+#### 0.1.0-alpha.7 November 13th 2026 ####
 
 **Breaking change: `IEffect<TCommand>` is removed.** An effect that an entity issues with `Execute` is now a plain record. The command for a give-up comes from one function on the entity's definition, as it does for a workflow. Akka.Durable is still a proof of concept, not an official Akka.NET project.
 
