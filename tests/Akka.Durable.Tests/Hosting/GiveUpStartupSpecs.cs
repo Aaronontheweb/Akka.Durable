@@ -1,5 +1,7 @@
+using Akka.Actor;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Durable.Tests.Fixtures.Checkouts;
+using Akka.Event;
 using Akka.Hosting;
 using Akka.Reminders;
 using Microsoft.Extensions.DependencyInjection;
@@ -155,7 +157,8 @@ public sealed class GiveUpStartupSpecs
 /// </summary>
 /// <remarks>
 /// That an effect with no serializer fails an entity host's start is covered for a handler with an answer by
-/// <c>RecordedExecuteStartupSpecs</c> and for a handler with no answer by <c>EffectRouteStartupSpecs</c>.
+/// <c>RecordedExecuteStartupSpecs</c>. An effect whose handler has no answer is refused at the first <c>Execute</c>
+/// of the entity that issues it, before the write; that is covered by <c>EffectRouteStartupSpecs</c>.
 /// </remarks>
 public sealed class EffectSerializerStartupSpecs
 {
@@ -196,23 +199,94 @@ public sealed class EffectSerializerStartupSpecs
         StartupProbe.AssertStarted(failure);
     }
 
-    [Fact]
-    public async Task The_same_handler_fails_the_start_once_an_entity_type_is_hosted_next_to_the_workflow()
+    /// <summary>The counter, where <see cref="NoHandler"/> writes one increment and issues a PlainEffect.</summary>
+    private static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> IssuesPlainEffect =
+        Counter.Definition with
+        {
+            Decide = (state, command, ctx) => command.Value is NoHandler
+                ? ctx.Persist(new Incremented(1)).Execute(new EffectRouteStartupSpecs.PlainEffect(1))
+                : Counter.Decide(state, command, ctx),
+        };
+
+    /// <summary>Completes with the text of the first error logged that names PlainEffect.</summary>
+    private sealed class PlainEffectErrorSink : ReceiveActor
     {
-        var failure = await StartupProbe.Start(
-            services =>
+        public PlainEffectErrorSink(TaskCompletionSource<string> found) =>
+            Receive<Error>(e =>
             {
+                var text = $"{e.Message} {e.Cause}";
+                if (text.Contains("PlainEffect", StringComparison.Ordinal)) found.TrySetResult(text);
+            });
+    }
+
+    [Fact]
+    public async Task The_same_handler_does_not_fail_the_start_next_to_an_entity_type_and_the_entity_that_issues_its_effect_is_refused_before_the_write()
+    {
+        // A handler with no answer names no entity type, so it fails no entity's start. The counter that issues its
+        // effect is refused at that first Execute, before anything is written.
+        var ct = TestContext.Current.CancellationToken;
+        var patience = TimeSpan.FromSeconds(15);
+        CancellationToken Ask()
+        {
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(patience);
+            return cts.Token;
+        }
+
+        using var host = new HostBuilder()
+            .ConfigureServices(services =>
+            {
+                services.AddDurableEntities();
                 CounterRoutes(services);
                 services.AddCheckoutHandlers()
                     .AddEffectHandler<EffectRouteStartupSpecs.PlainEffect, EffectRouteStartupSpecs.PlainEffectHandler>();
-            },
-            builder => StartupProbe.HostCounter(StartupProbe.HostCheckouts(builder), Counter.Definition));
+                services.AddAkka("startup-probe", builder =>
+                {
+                    builder.WithLocalReminders(r => r.WithResolver(system => new DurableEntityReminderResolver(system)));
+                    StartupProbe.HostCounter(StartupProbe.HostCheckouts(builder), IssuesPlainEffect);
+                });
+            })
+            .Build();
 
-        Assert.NotNull(failure);
-        Assert.Contains(StartupProbe.Messages(failure), message => message.StartsWith(
-            "Durable entity [counter] cannot start: the effect PlainEffect, handled by PlainEffectHandler, is journaled " +
-            "with the decision that issues it, and no serializer is registered for it",
-            StringComparison.Ordinal));
+        Exception? failure = null;
+        try
+        {
+            await host.StartAsync(ct);
+        }
+        catch (Exception refused)
+        {
+            failure = refused;
+        }
+
+        try
+        {
+            StartupProbe.AssertStarted(failure);
+
+            var counter = host.Services.GetRequiredService<IDurableEntityRefs<CounterCommand, CounterState, CounterEvent>>()
+                .Get(new EntityId("plain-2"));
+            await counter.Ask(new Increment(1), Ask()); // the entity runs
+            var before = await counter.GetStateAsync(Ask());
+
+            var system = host.Services.GetRequiredService<ActorSystem>();
+            var found = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            system.EventStream.Subscribe(system.ActorOf(Props.Create(() => new PlainEffectErrorSink(found))), typeof(Error));
+
+            counter.Tell(new NoHandler()); // one increment and the effect PlainEffect
+
+            var refusal = await found.Task.WaitAsync(patience, ct);
+            Assert.Contains("[counter]", refusal);
+            Assert.Contains("the effect PlainEffect, handled by PlainEffectHandler", refusal);
+            Assert.Contains("no serializer is registered for it", refusal);
+
+            // Refused before the write: the increment of that decision was not stored.
+            var after = await counter.GetStateAsync(Ask());
+            Assert.Equal(before.SequenceNr, after.SequenceNr);
+            Assert.Equal(before.State, after.State);
+        }
+        finally
+        {
+            await host.StopAsync(ct);
+        }
     }
 }
 
