@@ -52,7 +52,6 @@ A timer is a row in the reminder store (Akka.Reminders). That row is its only du
 - It is redundant. Storing a reminder is one quick write. A journal record that says "a reminder will be stored" is a second record of the same fact.
 - It gives no safety. The journal and the reminder store are most likely in the same database. When the reminder cannot be stored, the journal record that would say so most likely cannot be written either.
 - It costs. It adds stored record types, serializers, a settle step, recovery code and an ordering problem, on every decision that sets a timer.
-
 - Storing a reminder is an awaited call. The caller gets a confirmation or an error back. Nothing has to be remembered in order to find out later.
 
 **What to do when a reminder cannot be stored.** Fail the operation and send a nack to the sender. Do not hide the failure, do not retry it in secret, and do not record it for later. There is no fallback: no timer in memory, no second system, and no heartbeat that keeps an actor alive to set the timer again. When the durable timers do not work, do nothing more.
