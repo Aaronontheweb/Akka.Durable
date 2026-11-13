@@ -1,5 +1,8 @@
+using System.Collections.Concurrent;
+using Akka.Actor;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Durable.Tests.Fixtures.Checkouts;
+using Akka.Event;
 using Akka.Hosting;
 using Akka.Persistence.Sql.Hosting;
 using Akka.Reminders;
@@ -39,18 +42,49 @@ public sealed class RecordedExecuteSmokeSpecs(ITestOutputHelper output) : Counte
     }
 }
 
-/// <summary>The host refuses to start when the effects of an entity are not set up right.</summary>
+/// <summary>
+/// The effects of an entity that are not set up right are refused: at host start when the registration shows the
+/// entity type, and at the first <c>Execute</c>, before the write, when it does not.
+/// </summary>
 public sealed class EffectRouteStartupSpecs
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(15);
+
     /// <summary>An effect of the counter with no serializer: it carries no [AkkaSerializable].</summary>
     public sealed record PlainEffect(int Value);
 
+    /// <summary>The ids of the deliveries <see cref="PlainEffectHandler"/> got, from every spec.</summary>
+    private static readonly ConcurrentQueue<string> PlainEffectDeliveries = new();
+
     public sealed class PlainEffectHandler : IEffectHandler<PlainEffect>
     {
-        public Task HandleAsync(PlainEffect effect, EffectDelivery delivery, CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+        public Task HandleAsync(PlainEffect effect, EffectDelivery delivery, CancellationToken cancellationToken)
+        {
+            PlainEffectDeliveries.Enqueue(delivery.Id.Value);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>The counter, where <see cref="NoHandler"/> writes one increment and issues a <see cref="PlainEffect"/>.</summary>
+    private static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> IssuesPlainEffect =
+        Counter.Definition with
+        {
+            Decide = (state, command, ctx) => command.Value is NoHandler
+                ? ctx.Persist(new Incremented(1)).Execute(new PlainEffect(1))
+                : Counter.Decide(state, command, ctx),
+        };
+
+    /// <summary>Completes with the text of the first error logged that names <see cref="PlainEffect"/>.</summary>
+    private sealed class ErrorSink : ReceiveActor
+    {
+        public ErrorSink(TaskCompletionSource<string> found) =>
+            Receive<Error>(e =>
+            {
+                var text = $"{e.Message} {e.Cause}";
+                if (text.Contains(nameof(PlainEffect), StringComparison.Ordinal)) found.TrySetResult(text);
+            });
     }
 
     /// <summary>A handler for a counter effect that answers with another entity's command.</summary>
@@ -60,31 +94,59 @@ public sealed class EffectRouteStartupSpecs
             Task.FromResult<RailwayCommand>(new Adjust(1));
     }
 
-    private static async Task<string> StartupFailure(Action<IServiceCollection> handlers)
+    private static CancellationToken AskCancellation()
     {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        cts.CancelAfter(Patience);
+        return cts.Token;
+    }
+
+    [Fact]
+    public async Task A_no_answer_effect_without_a_serializer_is_refused_at_its_first_Execute_before_the_write_naming_it_and_its_handler()
+    {
+        // The registration of a handler with no answer does not say which entity type issues its effect, so the host
+        // starts. The counter that issues it is refused.
         using var host = new HostBuilder()
             .ConfigureServices(services =>
             {
                 services.AddDurableEntities();
-                handlers(services);
+                services.AddEffectHandler<PlainEffect, PlainEffectHandler>();
                 services.AddAkka("effect-routes", builder => builder
+                    .WithLocalReminders(r => r.WithResolver(system => new DurableEntityReminderResolver(system)))
                     .WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
-                    .WithDurableEntity(Counter.Definition));
+                    .WithDurableEntity(IssuesPlainEffect));
             })
             .Build();
 
-        var ex = await Assert.ThrowsAnyAsync<Exception>(() => host.StartAsync(Ct));
-        await host.StopAsync(Ct);
-        return ex.ToString();
-    }
+        await host.StartAsync(Ct);
+        try
+        {
+            var counter = host.Services.GetRequiredService<IDurableEntityRefs<CounterCommand, CounterState, CounterEvent>>()
+                .Get(new EntityId("plain-1"));
+            await counter.Ask(new Increment(1), AskCancellation()); // the entity runs
+            var before = await counter.GetStateAsync(AskCancellation());
 
-    [Fact]
-    public async Task An_effect_without_a_serializer_fails_startup_and_the_error_names_it_and_its_handler()
-    {
-        var message = await StartupFailure(services => services.AddEffectHandler<PlainEffect, PlainEffectHandler>());
+            var system = host.Services.GetRequiredService<ActorSystem>();
+            var found = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            system.EventStream.Subscribe(system.ActorOf(Props.Create(() => new ErrorSink(found))), typeof(Error));
 
-        Assert.Contains("Durable entity [counter] cannot start: the effect PlainEffect, handled by PlainEffectHandler", message);
-        Assert.Contains("make it implement ICounterProtocol", message);
+            counter.Tell(new NoHandler()); // one increment and the effect PlainEffect
+
+            var refusal = await found.Task.WaitAsync(Patience, Ct);
+            Assert.Contains("[counter]", refusal);
+            Assert.Contains("the effect PlainEffect, handled by PlainEffectHandler", refusal);
+            Assert.Contains("make it implement ICounterProtocol", refusal);
+
+            // Refused before the write: the increment of that decision was not stored, and the effect was not run.
+            var after = await counter.GetStateAsync(AskCancellation());
+            Assert.Equal(before.SequenceNr, after.SequenceNr);
+            Assert.Equal(before.State, after.State);
+            Assert.DoesNotContain(PlainEffectDeliveries, id => id.StartsWith("counter/plain-1/", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
     }
 
     [Fact]
