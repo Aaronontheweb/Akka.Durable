@@ -41,6 +41,26 @@ The safety stays. An entity that issues an effect and has no `GaveUp` fails at h
 
 **Samples.** The samples in `README.md` and in `docs/` follow the same rule. A reader must be able to read a sample and understand it before they adopt the library. Show a slice, not everything.
 
+### 2. Never journal a timer or a reminder
+
+A timer is a row in the reminder store (Akka.Reminders). That row is its only durable record. The library never writes a journal record that says a timer was set, will be set, or was cancelled. This is decided. Do not propose it again, do not design it, and do not build it. It has been proposed several times, each time to close the gap between the journal write and the reminder write.
+
+**What the rule covers.** An entity's `Schedule` and `CancelTimer`, a workflow's wake, the wait of a retry, and any later feature that sets or removes a reminder.
+
+**Why.**
+
+- It is redundant. Storing a reminder is one quick write. A journal record that says "a reminder will be stored" is a second record of the same fact.
+- It gives no safety. The journal and the reminder store are most likely in the same database. When the reminder cannot be stored, the journal record that would say so most likely cannot be written either.
+- It costs. It adds stored record types, serializers, a settle step, recovery code and an ordering problem, on every decision that sets a timer.
+
+**What to do when a reminder cannot be stored.** Fail the operation and send a nack to the sender. Do not hide the failure, do not retry it in secret, and do not record it for later.
+
+**Order.** What is already written when the failure comes depends on the order the developer gave. That is the developer's choice. The library does not add a record to make the two writes look like one.
+
+**The gap that stays.** A process can stop between the journal write and the reminder write. That gap is known and accepted. It is not a reason to journal timers. If one case needs it closed, ask the owner. Do not build a journal record for it.
+
+**Not covered by this rule.** `Execute` is different. A recorded effect is journaled with the decision, because its handler runs outside the entity and has no store of its own. A timer has one: the reminder store.
+
 ## How this repository is worked on
 
 - The default branch is `dev`. Pull requests go to `dev`.
