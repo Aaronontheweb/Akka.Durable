@@ -41,8 +41,8 @@ public enum GaveUpReason
 
 /// <summary>
 /// The notice that a piece of work got no answer. A workflow's <c>GaveUp</c> function turns it into one of the
-/// workflow's own facts. An entity's effect turns it into one of the entity's commands with
-/// <see cref="IEffect{TCommand}.GaveUp"/>.
+/// workflow's own facts. An entity's <see cref="EntityDefinition{TState,TCommand,TEvent}.GaveUp"/> function turns it
+/// into one of the entity's commands.
 /// </summary>
 /// <param name="Work">The effect record that was issued.</param>
 /// <param name="Reason">Why there is no answer.</param>

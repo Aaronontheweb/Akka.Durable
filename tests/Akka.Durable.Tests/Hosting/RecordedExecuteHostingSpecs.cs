@@ -222,10 +222,7 @@ public sealed class RecordedExecuteStartupSpecs
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>A counter effect with no serializer at all.</summary>
-    public sealed record Unserializable(int Value) : IEffect<CounterCommand>
-    {
-        public CounterCommand GaveUp(WorkGaveUp gaveUp) => new Noop();
-    }
+    public sealed record Unserializable(int Value);
 
     public sealed class UnserializableHandler : IEffectHandler<Unserializable, CounterCommand>
     {
@@ -299,17 +296,6 @@ public sealed class RecordedExecuteStartupSpecs
         Assert.NotNull(failure);
         Assert.Contains("Unserializable", failure);
         Assert.Contains("UnserializableHandler", failure);
-    }
-
-    [Fact]
-    public async Task A_route_whose_answer_is_not_the_command_type_of_the_entity_fails_startup_naming_both()
-    {
-        var failure = await StartAndStop(
-            s => s.AddSingleton(new ProbeWorld()).AddEffectHandler<Probe, string, TextAnswerHandler>(), probeSerializer: true);
-
-        Assert.NotNull(failure);
-        Assert.Contains("Probe", failure);
-        Assert.Contains("TextAnswerHandler", failure);
     }
 
     [Fact]

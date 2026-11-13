@@ -774,14 +774,14 @@ public sealed class RecordedExecuteSpecs(ITestOutputHelper output) : Persistence
 public sealed class WhenGaveUpSpecs
 {
     private static DeciderScenario<CounterState, CounterCommand, CounterEvent> Scenario() =>
-        DeciderScenario.For(Counter.Definition);
+        DeciderScenario.For(Counter.Definition.GaveUp(ProbeEntity.GaveUp));
 
     [Theory]
     [InlineData(GaveUpReason.Failed, 1, "a:Failed:1:True")]
     [InlineData(GaveUpReason.TimedOut, 1, "a:TimedOut:1:True")]
     [InlineData(GaveUpReason.Interrupted, 1, "a:Interrupted:1:True")]
     [InlineData(GaveUpReason.Failed, 4, "a:Failed:4:True")]
-    public void The_command_is_the_one_the_effect_makes_of_its_reason_and_attempts(
+    public void The_command_is_the_one_the_definition_makes_of_the_effect_its_reason_and_attempts(
         GaveUpReason reason, int attempts, string expected)
     {
         var scenario = Scenario();

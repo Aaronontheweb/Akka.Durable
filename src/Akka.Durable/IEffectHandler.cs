@@ -13,8 +13,9 @@ namespace Akka.Durable;
 /// <c>services.AddEffectHandler&lt;ChargeCard, InvoiceCommand, ChargeCardHandler&gt;()</c>. Each attempt gets a fresh
 /// DI scope. One handler may be registered for each effect type.</para>
 /// <para>Return expected failures as answers: a decline is an answer. A thrown exception, a time-out or an empty
-/// answer is a failed attempt. For an entity, <c>Decide</c> then gets the give-up command of the effect
-/// (<see cref="IEffect{TCommand}.GaveUp"/>). For a workflow, it gets the definition's give-up fact.</para>
+/// answer is a failed attempt. For an entity, <c>Decide</c> then gets the give-up command of the definition
+/// (<see cref="EntityDefinition{TState,TCommand,TEvent}.GaveUp"/>). For a workflow, it gets the definition's give-up
+/// fact.</para>
 /// </remarks>
 public interface IEffectHandler<in TEffect, TOutcome> where TEffect : notnull
 {
@@ -32,7 +33,7 @@ public interface IEffectHandler<in TEffect, TOutcome> where TEffect : notnull
 /// <typeparam name="TEffect">The effect record the decider issues.</typeparam>
 /// <remarks>
 /// Register it with <c>services.AddEffectHandler&lt;PublishPayment, PublishPaymentHandler&gt;()</c>. A thrown exception
-/// or a time-out is a failed attempt, and <c>Decide</c> gets the effect's give-up command.
+/// or a time-out is a failed attempt, and <c>Decide</c> gets the definition's give-up command.
 /// </remarks>
 public interface IEffectHandler<in TEffect> where TEffect : notnull
 {
@@ -41,24 +42,6 @@ public interface IEffectHandler<in TEffect> where TEffect : notnull
     /// <param name="delivery">The effect's stable id and the number of this attempt.</param>
     /// <param name="cancellationToken">Cancelled when the attempt runs past its time limit, or the host stops.</param>
     Task HandleAsync(TEffect effect, EffectDelivery delivery, CancellationToken cancellationToken);
-}
-
-/// <summary>
-/// An effect an entity issues with <c>Execute</c>. It says which command <c>Decide</c> gets when the effect gets no
-/// answer.
-/// </summary>
-/// <typeparam name="TCommand">The command type of the entity that issues the effect.</typeparam>
-/// <remarks>
-/// <para>The effect is journaled with the decision that issues it, so it needs a serializer, like the entity's events.
-/// The host checks this when it starts.</para>
-/// <para>The mapping is a method on the effect, not a function at the call site, so it still works after a restart,
-/// when the library has only the stored effect.</para>
-/// </remarks>
-public interface IEffect<out TCommand>
-{
-    /// <summary>The command <c>Decide</c> gets when this effect gets no answer.</summary>
-    /// <param name="gaveUp">Why there is no answer, and how many attempts were made.</param>
-    TCommand GaveUp(WorkGaveUp gaveUp);
 }
 
 /// <summary>The stable id of one effect.</summary>

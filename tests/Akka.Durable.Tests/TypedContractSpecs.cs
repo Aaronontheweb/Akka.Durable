@@ -82,9 +82,6 @@ public sealed class TypedContractSpecs
         "ctx.None().Send<CounterCommand>(new EntityId(\"b\"), new Adjust(1));",
         "ctx.None().Run<Gate>((gate, ct) => gate.WaitAsync(ct), onSuccess: next => next);",
         "ctx.Persist(new Added(1));",
-        // An entity effect must say what its give-up means to this entity.
-        "ctx.None().Execute(new Accepted());",
-        "ctx.None().Execute(new Calculate(new Adjust(1), 1));",
     ];
 
     [Theory]

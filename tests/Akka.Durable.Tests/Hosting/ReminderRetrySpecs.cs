@@ -65,10 +65,7 @@ public sealed class ReminderRetrySpecs(ITestOutputHelper output) : CounterHostin
     }
 
     [AkkaSerializable(Manifest = "counter-test-send-mail-v1", AllowEmpty = true)]
-    public sealed record SendMail : ICounterProtocol, IEffect<CounterCommand>
-    {
-        public CounterCommand GaveUp(WorkGaveUp gaveUp) => new EffectGaveUpNoted($"mail:{gaveUp.Reason}");
-    }
+    public sealed record SendMail : ICounterProtocol;
 
     private sealed class UnavailableMailer(ScopedRecorder recorder) : IEffectHandler<SendMail, CounterCommand>
     {

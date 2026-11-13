@@ -167,33 +167,21 @@ public sealed record CountIs([property: AkkaField(0)] int Count) : ICounterProto
 public sealed record GateOpened : ICounterProtocol;
 
 // Effects. Plain data handed to the registered effect handler. Journaled with the decision that issues them, so each
-// is serializable, and each says which command its give-up becomes.
+// is serializable. The definition says which command a give-up becomes.
 
 [AkkaSerializable(Manifest = "counter-compute-v1")]
-public sealed record Compute([property: AkkaField(0)] IncrementViaService Request) : ICounterProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) => new ComputeGaveUp(Request, gaveUp.Reason.ToString(), gaveUp.Attempts);
-}
+public sealed record Compute([property: AkkaField(0)] IncrementViaService Request) : ICounterProtocol;
 
 [AkkaSerializable(Manifest = "counter-explode-v1", AllowEmpty = true)]
-public sealed record Explode : ICounterProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) => new EffectGaveUpNoted($"explode:{gaveUp.Reason}");
-}
+public sealed record Explode : ICounterProtocol;
 
 /// <summary>No handler is registered for it.</summary>
 [AkkaSerializable(Manifest = "counter-unregistered-v1")]
-public sealed record Unregistered([property: AkkaField(0)] string Note) : ICounterProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) => new EffectGaveUpNoted($"unregistered:{gaveUp.Reason}");
-}
+public sealed record Unregistered([property: AkkaField(0)] string Note) : ICounterProtocol;
 
 /// <summary>Its handler has no answer: it is acknowledged when the handler returns.</summary>
 [AkkaSerializable(Manifest = "counter-announcement-v1")]
-public sealed record Announcement([property: AkkaField(0)] string Text) : ICounterProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) => new EffectGaveUpNoted($"announce:{gaveUp.Reason}");
-}
+public sealed record Announcement([property: AkkaField(0)] string Text) : ICounterProtocol;
 
 [AkkaSerializer<ICounterProtocol>("counter-test", 22599)]
 public sealed partial class CounterSerializer : AkkaSerializer
@@ -206,7 +194,18 @@ public static class Counter
     public static readonly EntityTypeName TypeName = new("counter");
 
     public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition =
-        new(TypeName, _ => new CounterState(0, false), Decide, Evolve);
+        new EntityDefinition<CounterState, CounterCommand, CounterEvent>(TypeName, _ => new CounterState(0, false), Decide, Evolve)
+            .GaveUp(GaveUp);
+
+    /// <summary>The command a give-up becomes: one for <see cref="Compute"/>, and one that names any other effect.</summary>
+    public static CounterCommand GaveUp(WorkGaveUp gaveUp) => gaveUp.Work switch
+    {
+        Compute compute => new ComputeGaveUp(compute.Request, gaveUp.Reason.ToString(), gaveUp.Attempts),
+        Explode => new EffectGaveUpNoted($"explode:{gaveUp.Reason}"),
+        Unregistered => new EffectGaveUpNoted($"unregistered:{gaveUp.Reason}"),
+        Announcement => new EffectGaveUpNoted($"announce:{gaveUp.Reason}"),
+        _ => new EffectGaveUpNoted($"{gaveUp.What}:{gaveUp.Reason}"),
+    };
 
     public static Decision<CounterCommand, CounterEvent> Decide(
         CounterState state, CounterCommand command, CounterContext ctx) =>

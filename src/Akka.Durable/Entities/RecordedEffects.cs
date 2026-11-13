@@ -219,11 +219,23 @@ internal sealed class EffectRoutes
     public bool TryGet(Type effectType, out EffectRoute route) => _byType.TryGetValue(effectType, out route!);
 
     /// <summary>
-    /// The routes of an entity whose command type is <typeparamref name="TCommand"/>: those whose effect type
-    /// implements <see cref="IEffect{TCommand}"/>.
+    /// The routes whose handler answers with <paramref name="commandType"/>: the effects of the entity type that has
+    /// this command type. The registration names the command type, so the owner is certain.
     /// </summary>
-    public IEnumerable<EffectRoute> Of<TCommand>() =>
-        _byType.Values.Where(route => typeof(IEffect<TCommand>).IsAssignableFrom(route.EffectType));
+    public IEnumerable<EffectRoute> AnsweringWith(Type commandType) =>
+        _byType.Values.Where(route => route.OutcomeType is { } outcome && commandType.IsAssignableFrom(outcome));
+
+    /// <summary>
+    /// The routes whose handler has no answer. Only an entity can issue such an effect: a workflow's work always
+    /// answers with a fact. The registration does not name the entity type, so every entity type may be the owner.
+    /// </summary>
+    public IEnumerable<EffectRoute> WithoutAnswer() => _byType.Values.Where(route => route.OutcomeType is null);
+
+    /// <summary>
+    /// The routes an entity whose command type is <paramref name="commandType"/> can issue: those that answer with
+    /// its command type, then those with no answer. The effects of these routes are journaled.
+    /// </summary>
+    public IEnumerable<EffectRoute> OfEntity(Type commandType) => AnsweringWith(commandType).Concat(WithoutAnswer());
 
     public static InvalidOperationException DuplicateRoute(EffectRoute first, EffectRoute second) => new(
         $"Two effect handlers are registered for the effect {first.EffectType.Name}: {first.Registration} and " +
@@ -248,3 +260,41 @@ internal sealed class MissingEffectRouteException(Type effectType, Type commandT
     private static string WithoutAnswer(Type effect) => $"AddEffectHandler<{effect.Name}, YourHandler>()";
 }
 
+/// <summary>
+/// An entity issued an effect whose handler answers with a type that is not the entity's command type. The answer
+/// could not reach <c>Decide</c>, so the effect is refused before the write, and the entity restarts.
+/// </summary>
+internal sealed class EffectAnswerMismatchException(EntityTypeName entity, EffectRoute route, Type commandType)
+    : InvalidOperationException(
+        $"Entity type [{entity.Value}] issued the effect {route.EffectType.Name}, and its handler " +
+        $"{route.HandlerType.Name} answers with a {route.OutcomeType?.Name}. The answer goes to the entity's Decide, " +
+        $"so it must be a {commandType.Name}. Register the handler with " +
+        $"services.AddEffectHandler<{route.EffectType.Name}, {commandType.Name}, YourHandler>(), or with " +
+        $"services.AddEffectHandler<{route.EffectType.Name}, YourHandler>() for a handler with no answer. The effect " +
+        "was not journaled and not run.");
+
+/// <summary>
+/// An entity type issues an effect, and its definition has no <c>GaveUp</c> line: <c>Decide</c> would get nothing
+/// when the effect gets no answer. The host refuses to start when it can see this. Otherwise the effect is refused
+/// before the write, and the entity restarts.
+/// </summary>
+internal sealed class MissingGiveUpException(string message) : InvalidOperationException(message)
+{
+    /// <summary>The line to add, and where.</summary>
+    internal static string Fix(EntityTypeName entity, Type commandType) =>
+        $"Add .GaveUp(gaveUp => new YourCommand(gaveUp.Reason)) to the definition of [{entity.Value}], where " +
+        $"YourCommand is a {commandType.Name}.";
+
+    private const string Why =
+        "its definition does not say which command Decide gets when an effect gets no answer";
+
+    /// <summary>The host sees an effect handler that answers with the entity's command type.</summary>
+    internal static MissingGiveUpException AtStart(EntityTypeName entity, EffectRoute route, Type commandType) => new(
+        $"Durable entity [{entity.Value}] cannot start: it issues the effect {route.EffectType.Name} (handled by " +
+        $"{route.HandlerType.Name}), and {Why}. {Fix(entity, commandType)}");
+
+    /// <summary>An entity issued an effect with <c>Execute</c>.</summary>
+    internal static MissingGiveUpException AtExecute(EntityTypeName entity, Type effectType, Type commandType) => new(
+        $"Entity type [{entity.Value}] issued the effect {effectType.Name}, and {Why}. {Fix(entity, commandType)} " +
+        "The effect was not journaled and not run.");
+}

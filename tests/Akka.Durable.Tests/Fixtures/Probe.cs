@@ -14,28 +14,17 @@ using CounterContext = DecisionContext<CounterState, CounterCommand, CounterEven
 
 public interface IProbeProtocol;
 
-/// <summary>An effect whose handler answers with a command. Its give-up says who gave up, why, and after how many tries.</summary>
+/// <summary>An effect whose handler answers with a command.</summary>
 [AkkaSerializable(Manifest = "probe-effect-v1")]
-public sealed record Probe([property: AkkaField(0)] string Name) : IProbeProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) =>
-        new EffectGaveUpNoted($"{Name}:{gaveUp.Reason}:{gaveUp.Attempts}:{Equals(gaveUp.Work, this)}");
-}
+public sealed record Probe([property: AkkaField(0)] string Name) : IProbeProtocol;
 
 /// <summary>An effect whose handler has no answer.</summary>
 [AkkaSerializable(Manifest = "probe-note-v1")]
-public sealed record Note([property: AkkaField(0)] string Name) : IProbeProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) =>
-        new EffectGaveUpNoted($"{Name}:{gaveUp.Reason}:{gaveUp.Attempts}:{Equals(gaveUp.Work, this)}");
-}
+public sealed record Note([property: AkkaField(0)] string Name) : IProbeProtocol;
 
 /// <summary>An effect type that nobody registered a handler for.</summary>
 [AkkaSerializable(Manifest = "probe-unrouted-v1", AllowEmpty = true)]
-public sealed record Unrouted : IProbeProtocol, IEffect<CounterCommand>
-{
-    public CounterCommand GaveUp(WorkGaveUp gaveUp) => new Noop();
-}
+public sealed record Unrouted : IProbeProtocol;
 
 [AkkaSerializer<IProbeProtocol>("probe-test", 22609)]
 public sealed partial class ProbeSerializer : AkkaSerializer
@@ -107,11 +96,23 @@ public static class ProbeEntity
 
     public static EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition(
         ProbeWorld world, EntityOptions? options = null) =>
-        Counter.Definition with
+        (Counter.Definition with
         {
             Decide = (state, command, ctx) => Decide(world, state, command, ctx),
             Options = options ?? EntityOptions.Default,
-        };
+        }).GaveUp(GaveUp);
+
+    /// <summary>
+    /// The give-up of a probe effect says who gave up, why, and after how many tries. The last part says that the
+    /// notice carries the effect as it was issued.
+    /// </summary>
+    public static CounterCommand GaveUp(WorkGaveUp gaveUp) => gaveUp.Work switch
+    {
+        Probe probe => new EffectGaveUpNoted($"{probe.Name}:{gaveUp.Reason}:{gaveUp.Attempts}:{gaveUp.What == nameof(Probe)}"),
+        Note note => new EffectGaveUpNoted($"{note.Name}:{gaveUp.Reason}:{gaveUp.Attempts}:{gaveUp.What == nameof(Note)}"),
+        Unrouted => new Noop(),
+        _ => Counter.GaveUp(gaveUp),
+    };
 
     private static string Describe(CounterCommand command) => command.Value switch
     {

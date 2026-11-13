@@ -570,8 +570,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     }
 
     /// <summary>
-    /// Decides the give-up of <paramref name="pending"/>: the command its effect maps it to, with an
-    /// <see cref="EffectGaveUp"/> in the same write. A library start has no command; its record is journaled alone.
+    /// Decides the give-up of <paramref name="pending"/>: the command the definition's <c>GaveUp</c> maps it to, with
+    /// an <see cref="EffectGaveUp"/> in the same write. A call to a workflow uses the <c>gaveUp</c> of its
+    /// <c>Uses</c>. A library start has no command; its record is journaled alone.
     /// </summary>
     private void GiveUp(PendingEffect pending, GaveUpReason reason, string? error, IActorRef origin, Action? then)
     {
@@ -580,21 +581,28 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         var record = new EffectGaveUp(sequence, pending.Attempt, reason);
         var gaveUp = new WorkGaveUp(PublicForm(pending.Effect), reason, error, pending.Attempt);
 
-        object? command;
-        if (pending.Effect is IEffect<TCommand> effect)
-            command = effect.GaveUp(gaveUp);
-        else
-            command = DeliveryOf(pending.Effect)?.GaveUp?.Invoke(gaveUp);
+        var ownCall = pending.Effect is RecordedStart or RecordedNotify or RecordedCancel;
+        object? command = ownCall
+            ? DeliveryOf(pending.Effect)?.GaveUp?.Invoke(gaveUp)
+            : _definition.OnGaveUp is { } map ? map(gaveUp) : null;
 
-        if (command is TCommand decided)
+        if (command is TCommand decided && decided is not IUnion { Value: null })
         {
             HandleCommand(decided, origin, reminder: null, new Settlement(sequence, record, then));
             return;
         }
 
-        // The effect's type changed since it was journaled, or the call has no command for a give-up.
-        _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}, and Decide has no command for it. It is " +
-                   "closed.", PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason);
+        if (!ownCall && _definition.OnGaveUp is null)
+            // Issue refuses an Execute by a definition with no GaveUp line, so this effect was journaled by a build
+            // whose definition had one.
+            _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}, and the definition of [{2}] has no " +
+                       "GaveUp line any more, so Decide gets nothing. It is closed. {5}",
+                PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason,
+                MissingGiveUpException.Fix(EntityType, typeof(TCommand)));
+        else
+            // The definition's GaveUp returned no command, or the call has no command for a give-up.
+            _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}, and Decide has no command for it. It " +
+                       "is closed.", PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason);
         Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [record], then);
     }
 
@@ -756,7 +764,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <summary>
     /// Prepares the record of a recorded <c>Execute</c>. A call to a workflow the definition does not declare, or a
     /// notify or cancel the definition cannot map, is not journaled: it is logged and dropped. An effect type with no
-    /// handler is refused before the write: a configuration error, so it goes to supervision.
+    /// handler, with a handler that answers with another command type, or issued by a definition with no
+    /// <c>GaveUp</c> line, is refused before the write: a configuration error, so it goes to supervision.
     /// </summary>
     private IssuedEffect Issue(ExecuteEffect execute, DateTimeOffset now)
     {
@@ -795,6 +804,26 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                            "startup with services.{3}. The effect was not journaled and not run.",
                     EntityType.Value, _entityId.Value, missing.EffectType, missing.Registration);
                 throw missing;
+            }
+
+            // The answer must be one of this entity's commands, and a give-up must become one. Both are checked
+            // here, before the write, so nothing is journaled that Decide could never hear the end of.
+            if (route.OutcomeType is { } outcome && !typeof(TCommand).IsAssignableFrom(outcome))
+            {
+                _log.Error("Entity [{0}/{1}] issued the effect {2}, and its handler {3} answers with a {4}, which is not " +
+                           "a {5}. The effect was not journaled and not run.",
+                    EntityType.Value, _entityId.Value, route.EffectType.Name, route.HandlerType.Name, outcome.Name,
+                    typeof(TCommand).Name);
+                throw new EffectAnswerMismatchException(EntityType, route, typeof(TCommand));
+            }
+
+            if (_definition.OnGaveUp is null)
+            {
+                _log.Error("Entity [{0}/{1}] issued the effect {2}, and the definition of [{0}] has no GaveUp line. {3} " +
+                           "The effect was not journaled and not run.",
+                    EntityType.Value, _entityId.Value, route.EffectType.Name,
+                    MissingGiveUpException.Fix(EntityType, typeof(TCommand)));
+                throw MissingGiveUpException.AtExecute(EntityType, route.EffectType, typeof(TCommand));
             }
 
             stored = execute.Effect;
@@ -862,7 +891,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <param name="Name">The effect's type name, for logs.</param>
     /// <param name="Invoke">One attempt. Returns the entity's command, or null when the delivery has no answer.</param>
     /// <param name="Answers">True when an attempt answers with a command for <c>Decide</c>.</param>
-    /// <param name="GaveUp">The command a give-up becomes, for a library call. Null for the author's effects.</param>
+    /// <param name="GaveUp">
+    /// The command a give-up becomes, for a library call. Null for the author's effects: the definition maps those.
+    /// </param>
     private sealed record Delivery(
         string Name,
         Func<IServiceProvider, EffectDelivery, CancellationToken, Task<object?>> Invoke,

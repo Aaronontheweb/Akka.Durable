@@ -69,6 +69,35 @@ public sealed record EntityDefinition<TState, TCommand, TEvent>(
         return this with { Accepted = Accepted.SetItem(typeof(TMessage), message => wrap((TMessage)message)) };
     }
 
+    /// <summary>The function given to <see cref="GaveUp"/>. Null: the definition has none.</summary>
+    internal Func<WorkGaveUp, TCommand>? OnGaveUp { get; init; }
+
+    /// <summary>
+    /// Declares which command <c>Decide</c> gets when an effect issued with <c>Execute</c> gets no answer. One line
+    /// for all the effects of the entity.
+    /// </summary>
+    /// <param name="gaveUp">
+    /// Turns the notice into one of this entity's commands. <see cref="WorkGaveUp.Work"/> is the effect that was
+    /// issued, so the function, or <c>Decide</c>, can tell the effects apart. <see cref="WorkGaveUp.Reason"/> is
+    /// <see cref="GaveUpReason.Failed"/>, <see cref="GaveUpReason.TimedOut"/>, <see cref="GaveUpReason.Interrupted"/>
+    /// after a restart, or <see cref="GaveUpReason.RetriesExhausted"/>.
+    /// </param>
+    /// <remarks>
+    /// <para>An entity that issues an effect with <c>Execute</c> needs this line. When the host starts, an entity type
+    /// that has an effect handler registered for its command type and no <c>GaveUp</c> line fails the start. An
+    /// <c>Execute</c> by an entity type with no <c>GaveUp</c> line is refused before anything is written.</para>
+    /// <para>The function lives on the definition, not on the effect and not on the call, so it still works after a
+    /// restart, when the library has only the journaled effect. A workflow's definition has the same function, with
+    /// the same name.</para>
+    /// <para>The give-up of a <c>Notify</c> or a <c>Cancel</c> of a workflow goes to the <c>gaveUp</c> function of
+    /// its <c>Uses</c> declaration, not to this one.</para>
+    /// </remarks>
+    public EntityDefinition<TState, TCommand, TEvent> GaveUp(Func<WorkGaveUp, TCommand> gaveUp)
+    {
+        ArgumentNullException.ThrowIfNull(gaveUp);
+        return this with { OnGaveUp = gaveUp };
+    }
+
     internal ImmutableDictionary<WorkflowTypeName, WorkflowUse> Used { get; init; } =
         ImmutableDictionary<WorkflowTypeName, WorkflowUse>.Empty;
 
