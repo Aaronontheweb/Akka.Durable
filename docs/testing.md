@@ -17,7 +17,7 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .ThenState(s => Assert.True(s is Paid));
 ```
 
-Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value. `WhenGaveUp` decides the command the effect's own `GaveUp` returns, so each way an effect can end is a pure test too:
+Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value. `WhenGaveUp` decides the command that `GaveUp` on the definition returns, so each way an effect can end is a pure test too:
 
 ```csharp
 var command = new IssueInvoice(250m, "billing@example.com");
@@ -65,7 +65,7 @@ DeciderScenario.For(Invoice.Definition)
     .ThenCancelled(ReminderCampaign.Definition, new WorkflowId("reminders-test-entity"), "customer closed", "invoices");
 ```
 
-`When` fails the test when a decision calls a workflow type that the definition does not name with `Uses`, or notifies or cancels a workflow whose `Uses` has no `told` and `gaveUp`. At run time that call would be refused with an error log.
+`When` fails the test when a decision calls a workflow type that the definition does not name with `Uses`, or notifies or cancels a workflow whose `Uses` has no `told` and `gaveUp`. It also fails the test when a decision issues an effect with `Execute` and the definition has no `GaveUp`. At run time each of these is refused with an error log.
 
 The answer of a call is an ordinary command, so you test what it means with `When`, like any other command.
 

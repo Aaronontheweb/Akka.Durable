@@ -50,19 +50,18 @@ public static InvoiceDecision Decide(InvoiceState state, InvoiceCommand command,
 
 Every state looks like this: see the [complete invoice](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md#how-to-structure-a-decider).
 
-`VerifyRecipient` is the effect: plain data, journaled in the same write as `VerificationStarted`. It says which command `Decide` gets when the directory gives no answer:
+`VerifyRecipient` is the effect: a plain record, journaled in the same write as `VerificationStarted`. The definition puts the invoice together. Its `GaveUp` is the command `Decide` gets when the directory gives no answer:
 
 ```csharp
 [AkkaSerializable(Manifest = "verify-recipient-v1")]
-public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient)
-    : IInvoiceProtocol, IEffect<InvoiceCommand>
-{
-    public InvoiceCommand GaveUp(WorkGaveUp g) =>
-        new RecipientRejected($"directory: {g.Reason}");
-}
+public sealed record VerifyRecipient([property: AkkaField(0)] string Recipient) : IInvoiceProtocol;
+
+public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
+    new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve,
+        GaveUp: g => new RecipientRejected($"directory: {g.Reason}"));
 ```
 
-The only impure code is its handler, which Akka.Durable resolves from a fresh DI scope when the effect runs. The handler's second type argument says what kind of answer it produces, here a command that goes back through `Decide`:
+The only impure code is the effect's handler, which Akka.Durable resolves from a fresh DI scope when the effect runs. The handler's second type argument says what kind of answer it produces, here a command that goes back through `Decide`:
 
 ```csharp
 public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
