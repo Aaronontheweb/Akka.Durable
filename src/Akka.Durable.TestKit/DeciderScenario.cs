@@ -79,7 +79,7 @@ public sealed class DeciderScenario<TState, TCommand, TEvent>(
     private Xunit.Sdk.XunitException NoGaveUp(string what) => new(
         $"{what}, but the definition of entity type [{definition.TypeName.Value}] does not say which command Decide " +
         "gets when an effect gets no answer. Add the argument \"GaveUp: gaveUp => new YourCommand(gaveUp.Reason)\" " +
-        $"to the EntityDefinition, where YourCommand is a {typeof(TCommand).Name}.");
+        $"to the EntityDefinition, where YourCommand is one of its commands ({typeof(TCommand).Name}).");
 
     /// <summary>
     /// An effect or a call to a workflow that the entity would refuse at run time fails the scenario here.

@@ -82,11 +82,64 @@ public sealed class TypedContractSpecs
         "ctx.None().Send<CounterCommand>(new EntityId(\"b\"), new Adjust(1));",
         "ctx.None().Run<Gate>((gate, ct) => gate.WaitAsync(ct), onSuccess: next => next);",
         "ctx.Persist(new Added(1));",
+        // A give-up becomes one of the entity's own commands: not another entity's, and not any other value.
+        "var replaced = Counter.Definition with { GaveUp = gaveUp => new Adjust(1) };",
+        "var replaced = Counter.Definition with { GaveUp = gaveUp => gaveUp.Reason };",
+        "var defined = new EntityDefinition<CounterState, CounterCommand, CounterEvent>(Counter.TypeName, " +
+        "_ => new CounterState(0, false), Counter.Decide, Counter.Evolve, GaveUp: gaveUp => new Adjust(1));",
     ];
 
     [Theory]
     [MemberData(nameof(InvalidCalls))]
     public void Invalid_calls_fail_compilation(string body) => Assert.NotEmpty(Compile(body));
+
+    /// <summary>
+    /// An effect is a plain record: it implements nothing and knows nothing of the entity. What its give-up becomes is
+    /// the definition's <c>GaveUp</c> argument, a lambda that returns one case of the command union.
+    /// </summary>
+    [Fact]
+    public void Execute_takes_a_record_that_implements_nothing_and_GaveUp_takes_a_lambda_that_returns_a_union_case()
+    {
+        var errors = Diagnostics("""
+            using Akka.Durable;
+            using Akka.Durable.Tests.Fixtures;
+
+            public sealed record PlainEffect(string Name);
+
+            public static class Author
+            {
+                public static Handled<CounterCommand, CounterEvent> Issue(
+                    DecisionContext<CounterState, CounterCommand, CounterEvent> ctx) =>
+                    ctx.None().Execute(new PlainEffect("a"));
+
+                public static Decision<CounterCommand, CounterEvent> IssueWithAnEvent(
+                    DecisionContext<CounterState, CounterCommand, CounterEvent> ctx) =>
+                    ctx.Persist(new Incremented(1)).Execute(new PlainEffect("a")).Execute(new PlainEffect("b"));
+
+                public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> Defined = new(
+                    Counter.TypeName, _ => new CounterState(0, false), Counter.Decide, Counter.Evolve,
+                    GaveUp: gaveUp => new EffectGaveUpNoted($"{gaveUp.What}:{gaveUp.Reason}"));
+
+                public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> Replaced =
+                    Counter.Definition with { GaveUp = gaveUp => new Noop() };
+
+                public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> ByEffect =
+                    Counter.Definition with
+                    {
+                        GaveUp = gaveUp => gaveUp.Work switch
+                        {
+                            PlainEffect plain => new EffectGaveUpNoted(plain.Name),
+                            _ => new Noop(),
+                        },
+                    };
+
+                public static readonly EntityDefinition<CounterState, CounterCommand, CounterEvent> Without =
+                    Counter.Definition with { GaveUp = null };
+            }
+            """).Where(d => d.Severity == DiagnosticSeverity.Error).ToImmutableArray();
+
+        Assert.True(errors.IsEmpty, string.Join(Environment.NewLine, errors));
+    }
 
     public static TheoryData<string, bool> StatusReaders => new()
     {

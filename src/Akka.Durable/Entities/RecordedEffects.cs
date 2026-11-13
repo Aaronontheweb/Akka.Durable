@@ -283,7 +283,7 @@ internal sealed class MissingGiveUpException(string message) : InvalidOperationE
     /// <summary>The line to add, and where.</summary>
     internal static string Fix(EntityTypeName entity, Type commandType) =>
         $"Add the argument \"GaveUp: gaveUp => new YourCommand(gaveUp.Reason)\" to the EntityDefinition of " +
-        $"[{entity.Value}], where YourCommand is a {commandType.Name}.";
+        $"[{entity.Value}], where YourCommand is one of its commands ({commandType.Name}).";
 
     private const string Why =
         "its definition does not say which command Decide gets when an effect gets no answer";

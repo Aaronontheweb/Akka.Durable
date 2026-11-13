@@ -230,11 +230,14 @@ public sealed class RecordedExecuteStartupSpecs
             Task.FromResult<CounterCommand>(new Noop());
     }
 
-    /// <summary>Answers with text, which is no command of any entity.</summary>
-    public sealed class TextAnswerHandler : IEffectHandler<Probe, string>
+    /// <summary>Answers with text, which is no command of any entity. Records its calls like the probe's own handler.</summary>
+    public sealed class TextAnswerHandler(ProbeWorld world) : IEffectHandler<Probe, string>
     {
-        public Task<string> HandleAsync(Probe effect, EffectDelivery delivery, CancellationToken ct) =>
-            Task.FromResult("text");
+        public Task<string> HandleAsync(Probe effect, EffectDelivery delivery, CancellationToken ct)
+        {
+            world.ProbeCalls.Enqueue((effect, delivery));
+            return Task.FromResult("text");
+        }
     }
 
     public sealed class QuietProbeHandler : IEffectHandler<Probe>
