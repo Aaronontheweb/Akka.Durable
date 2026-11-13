@@ -1,3 +1,30 @@
+#### 0.1.0-alpha.7 Unreleased ####
+
+**Breaking change: `IEffect<TCommand>` is removed.** An effect that an entity issues with `Execute` is now a plain record. The command for a give-up comes from one function on the entity's definition, as it does for a workflow. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **Removed: `IEffect<TCommand>`** and its `GaveUp` method. `Execute` takes any record.
+* **Added: `GaveUp` on `EntityDefinition`.** It is an optional, named argument: `new(name, initialState, Decide, Evolve, GaveUp: g => new YourCommand(g.Reason))`. It is one function for all the effects of the entity. `WorkGaveUp.Work` is the effect that got no answer, so the function, or `Decide`, can tell the effects apart. A workflow's definition has a `GaveUp` with the same name and shape.
+* **A missing `GaveUp` fails early.** The host does not start when an entity type has an effect handler that answers with its command type and no `GaveUp`. The error names the entity type and the argument to add. When every handler of the entity has no answer, the host cannot see which entity issues the effect. The first `Execute` is then refused before anything is written, with the same message, and the entity restarts.
+* **A handler that answers with another command type** is refused at the first `Execute`, before anything is written. Before, the host refused to start. The host can no longer tell this handler from the handler of another entity.
+* **The start-up checks no longer need the interface.** An entity host checks the serializer of every effect type whose handler answers with the entity's command type or has no answer. The check for Akka.Reminders uses the same handlers.
+* **TestKit.** `WhenGaveUp` decides the command that the definition's `GaveUp` returns. `When` fails the test when a decision issues an effect and the definition has no `GaveUp`.
+
+**What you change from 0.1.0-alpha.6:** two steps.
+
+1. Remove `IEffect<TCommand>` and the `GaveUp` method from each effect record.
+2. Add `GaveUp:` to the entity's definition. For an entity with more than one effect, the function is a `switch` on `g.Work`, with the body of each old method in one arm.
+
+```csharp
+// Before
+public sealed record VerifyRecipient(string Recipient) : IInvoiceProtocol, IEffect<InvoiceCommand>
+{ public InvoiceCommand GaveUp(WorkGaveUp g) => new RecipientRejected($"directory: {g.Reason}"); }
+// After
+public sealed record VerifyRecipient(string Recipient) : IInvoiceProtocol;
+new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve, GaveUp: g => new RecipientRejected($"directory: {g.Reason}"));
+```
+
+Nothing stored changes. An effect is stored through its own serializer and manifest, and the interface was never part of that. An effect that was journaled before the upgrade gives up through the new `GaveUp`.
+
 #### 0.1.0-alpha.6 November 12th 2026 ####
 
 Sixth alpha release of Akka.Durable. A caller can now wait for an entity's or a workflow's state, and watch it, without polling. `WaitForOutcome` is built on this and no longer polls. Akka.Durable is still a proof of concept, not an official Akka.NET project.

@@ -39,12 +39,37 @@ public readonly record struct DecisionContext<TState, TCommand, TEvent>(
     public Stashed Stash() => Decisions.Stash();
 }
 
+/// <summary>An entity type: its name, its first state, and the two functions that are its behavior.</summary>
+/// <param name="TypeName">The entity type's name. It names the shard region and starts every persistence id.</param>
+/// <param name="InitialState">The state of an entity that has no events yet.</param>
+/// <param name="Decide">What a command means in a state: the events to persist and the effects to run.</param>
+/// <param name="Evolve">The state after an event.</param>
+/// <param name="Options">Settings of the entity type: shards, passivation, snapshots, the time limit of an effect.</param>
+/// <param name="GaveUp">
+/// The command <c>Decide</c> gets when an effect issued with <c>Execute</c> gets no answer. One function for all the
+/// effects of the entity. <see cref="WorkGaveUp.Work"/> is the effect that was issued, so the function, or
+/// <c>Decide</c>, can tell the effects apart. <see cref="WorkGaveUp.Reason"/> is <see cref="GaveUpReason.Failed"/>,
+/// <see cref="GaveUpReason.TimedOut"/>, <see cref="GaveUpReason.Interrupted"/> after a restart, or
+/// <see cref="GaveUpReason.RetriesExhausted"/>.
+/// </param>
+/// <remarks>
+/// <para>An entity that issues an effect with <c>Execute</c> needs <paramref name="GaveUp"/>. When the host starts,
+/// an entity type that has an effect handler registered for its command type and no <paramref name="GaveUp"/> fails
+/// the start. An <c>Execute</c> by an entity type with no <paramref name="GaveUp"/> is refused before anything is
+/// written.</para>
+/// <para>The function is on the definition, not on the effect and not on the call, so it still works after a
+/// restart, when the library has only the journaled effect. A workflow's definition has the same function, with the
+/// same name.</para>
+/// <para>The give-up of a <c>Notify</c> or a <c>Cancel</c> of a workflow goes to the <c>gaveUp</c> function of its
+/// <c>Uses</c> declaration, not to this one.</para>
+/// </remarks>
 public sealed record EntityDefinition<TState, TCommand, TEvent>(
     EntityTypeName TypeName,
     Func<EntityId, TState> InitialState,
     Func<TState, TCommand, DecisionContext<TState, TCommand, TEvent>, Decision<TCommand, TEvent>> Decide,
     Func<TState, TEvent, TState> Evolve,
-    EntityOptions? Options = null)
+    EntityOptions? Options = null,
+    Func<WorkGaveUp, TCommand>? GaveUp = null)
 {
     /// <summary>
     /// The library's own work after recovery, for the workflow host: the give-ups of work that was interrupted.

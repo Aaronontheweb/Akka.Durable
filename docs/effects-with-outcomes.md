@@ -48,7 +48,7 @@ public sealed class VerifyRecipientHandler(IRecipientDirectory directory)
 services.AddEffectHandler<VerifyRecipient, InvoiceCommand, VerifyRecipientHandler>();
 ```
 
-`VerifyRecipient` itself is journaled in the same write as `VerificationStarted`, so it has a manifest, and it implements `IEffect<InvoiceCommand>` to say what its give-up means (see [the declarations](state-commands-events-and-replies.md)). `delivery` holds the effect's id, the same on every read and after a restart.
+`VerifyRecipient` itself is a plain record. It is journaled in the same write as `VerificationStarted`, so it has a manifest (see [the declarations](state-commands-events-and-replies.md)). `delivery` holds the effect's id, the same on every read and after a restart.
 
 To record a fact from the outside world, have the handler return a command that carries it. The blocks of the states that can accept it persist the event, and the blanket arm of every other state ignores it.
 
@@ -102,7 +102,7 @@ Expected failures are outcomes. A directory that does not know the recipient has
 Unknown u => new RecipientRejected(u.Reason),   // a decline is a result, not an exception
 ```
 
-When the handler gets no answer, `Decide` gets the effect's give-up command instead. `GaveUp` on the effect builds it from a `WorkGaveUp`, whose `Reason` says why:
+When the handler gets no answer, `Decide` gets the give-up command instead. `GaveUp` on the definition builds it from a `WorkGaveUp`, whose `Reason` says why:
 
 - `Failed`: `HandleAsync` threw, or answered with nothing.
 - `TimedOut`: it ran longer than `EntityOptions.EffectTimeout` (30 seconds by default; zero or a negative value is refused at startup).
@@ -111,10 +111,8 @@ When the handler gets no answer, `Decide` gets the effect's give-up command inst
 Without a retry policy on the handler, the library never runs the effect again. With one, it runs the handler again until an attempt is acknowledged, and `Decide` gets `RetriesExhausted` only when the policy runs out (see [Retry policies](effects.md#retry-policies-the-outbox)). A give-up does not mean the directory was not asked. `Decide` chooses what to do. The invoice turns every give-up into a rejection, so a caller can try again. An entity that wants to ask again issues the effect again from its arm:
 
 ```csharp
-public sealed record VerificationGaveUp(GaveUpReason Reason) : IInvoiceProtocol;   // a command case
-
-// on VerifyRecipient
-public InvoiceCommand GaveUp(WorkGaveUp g) => new VerificationGaveUp(g.Reason);
+// On the invoice's definition. VerificationGaveUp is a command case that holds the reason.
+GaveUp: g => new VerificationGaveUp(g.Reason),
 
 // In the Verifying block. Ask once more after a crash; reject on any other give-up.
 VerificationGaveUp { Reason: GaveUpReason.Interrupted } =>

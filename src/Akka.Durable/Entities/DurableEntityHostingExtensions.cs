@@ -142,7 +142,7 @@ public static class DurableEntityHostingExtensions
         }
 
         return builder.HostEntity<TState, TCommand, TEvent, EntityRegion<TCommand>>(definition, sharding,
-            (registry, region) => registry.Register<EntityRegion<TCommand, TState, TEvent>>(region));
+            (registry, region) => registry.Register<EntityRegion<TCommand, TState, TEvent>>(region), issuesEffects: true);
     }
 
     /// <summary>
@@ -150,11 +150,16 @@ public static class DurableEntityHostingExtensions
     /// under <typeparamref name="TRegion"/>. Refs find the entity type by that key.
     /// </summary>
     /// <param name="alsoRegister">Registers the same actor under more keys.</param>
+    /// <param name="issuesEffects">
+    /// True for an entity type an author defined: it can issue effects with <c>Execute</c>, so its effect routes are
+    /// checked. False for the entity type that hosts a workflow: a workflow's work is not journaled as an effect.
+    /// </param>
     internal static AkkaConfigurationBuilder HostEntity<TState, TCommand, TEvent, TRegion>(
         this AkkaConfigurationBuilder builder,
         EntityDefinition<TState, TCommand, TEvent> definition,
         ShardedHosting? sharding,
-        Action<IActorRegistry, IActorRef>? alsoRegister = null)
+        Action<IActorRegistry, IActorRef>? alsoRegister = null,
+        bool issuesEffects = false)
     {
         Func<string, Props> EntityProps(ActorSystem system, IDependencyResolver resolver)
         {
@@ -181,8 +186,10 @@ public static class DurableEntityHostingExtensions
             typeof(TState), typeof(TCommand), typeof(TEvent)));
 
         // The entity's effect types are known from their routes, so they are checked here, before any entity runs.
-        builder.WithActors((system, _, resolver) =>
-            EnsureEffectRoutes<TCommand>(system, definition.TypeName, resolver.GetService<IServiceProvider>()));
+        var mapsGiveUps = definition.GaveUp is not null;
+        if (issuesEffects)
+            builder.WithActors((system, _, resolver) => EnsureEffectRoutes<TCommand>(
+                system, definition.TypeName, mapsGiveUps, resolver.GetService<IServiceProvider>()));
 
         // An entity with pending effects keeps one reminder that wakes it. Without this, Native AOT cannot build its
         // envelope.
@@ -191,7 +198,7 @@ public static class DurableEntityHostingExtensions
         // A startup task runs after every actor is registered, so Akka.Reminders may be configured before or after.
         var usesWorkflows = !definition.Used.IsEmpty;
         builder.AddStartup((system, registry) =>
-            EnsureReminders<TCommand>(definition.TypeName, usesWorkflows, registry,
+            EnsureReminders<TCommand>(definition.TypeName, issuesEffects, usesWorkflows, registry,
                 DependencyResolver.For(system).Resolver.GetService<IServiceProvider>()));
 
         if (sharding is not null)
@@ -325,41 +332,47 @@ public static class DurableEntityHostingExtensions
     }
 
     /// <summary>
-    /// Checks the effect types of an entity: the routes whose effect type implements <see cref="IEffect{TCommand}"/>.
-    /// Each answers with the entity's command or not at all, and each has a serializer of its own, because it is
-    /// journaled with the decision that issues it.
+    /// Checks the effects of an entity type, as far as the registrations show them. A route that answers with the
+    /// entity's command type belongs to this entity type. A route with no answer belongs to an entity type, and the
+    /// registration does not say which one, so every entity host checks it.
     /// </summary>
-    internal static void EnsureEffectRoutes<TCommand>(ActorSystem system, EntityTypeName typeName, IServiceProvider services)
+    /// <remarks>
+    /// <para>Each of these effect types has a serializer of its own, because the effect is journaled with the decision
+    /// that issues it.</para>
+    /// <para>An entity type that has a route for its command type has a <c>GaveUp</c> on its definition. A route
+    /// with no answer cannot be checked this way here: the first <c>Execute</c> is refused before the write.</para>
+    /// <para>A route that answers with another type is the effect of another entity type or of a workflow, so it is
+    /// not checked here. An entity that issues such an effect is refused before the write.</para>
+    /// </remarks>
+    internal static void EnsureEffectRoutes<TCommand>(
+        ActorSystem system, EntityTypeName typeName, bool mapsGiveUps, IServiceProvider services)
     {
         var routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
         var serialization = system.Serialization;
         var fallback = TryFindSerializer(serialization, typeof(object));
 
-        foreach (var route in routes.Of<TCommand>())
+        foreach (var route in routes.OfEntity(typeof(TCommand)))
         {
-            if (route.OutcomeType is { } outcome && !typeof(TCommand).IsAssignableFrom(outcome))
-                throw new InvalidOperationException(
-                    $"Durable entity [{typeName.Value}] cannot start: the effect {route.EffectType.Name} is an " +
-                    $"IEffect<{typeof(TCommand).Name}>, but its handler {route.HandlerType.Name} answers with a " +
-                    $"{outcome.Name}. The answer goes to the entity's Decide, so it must be a {typeof(TCommand).Name}. " +
-                    $"Register it with AddEffectHandler<{route.EffectType.Name}, {typeof(TCommand).Name}, " +
-                    $"{route.HandlerType.Name}>(), or with AddEffectHandler<{route.EffectType.Name}, " +
-                    $"{route.HandlerType.Name}>() for a handler with no answer.");
-
             if (TryFindSerializer(serialization, route.EffectType) is { } found
                 && (fallback is null || found.Identifier != fallback.Identifier))
                 continue;
 
             var protocol = ProtocolOf(TryFindSerializer(serialization, typeof(TCommand)));
+            var example = protocol is null ? "" : $"make it implement {protocol.Name}";
+            var where = route.OutcomeType is not null
+                ? $"that holds {typeof(TCommand).Name}" + (protocol is null ? "" : $" (for example, {example})")
+                : "of the entity type that issues it" +
+                  (protocol is null ? "" : $" (if that is [{typeName.Value}]: {example})");
             throw new InvalidOperationException(
                 $"Durable entity [{typeName.Value}] cannot start: the effect {route.EffectType.Name}, handled by " +
                 $"{route.HandlerType.Name}, is journaled with the decision that issues it, and no serializer is " +
                 $"registered for it, so it would fall back to {fallback?.GetType().Name ?? "no serializer at all"}. " +
-                $"Mark it [AkkaSerializable(Manifest = \"...\")] under the [AkkaSerializer<TProtocol>] serializer that " +
-                $"holds {typeof(TCommand).Name}" +
-                (protocol is null ? "" : $" (for example, make it implement {protocol.Name})") +
-                ", and register that serializer with WithCustomSerializer.");
+                "Mark it [AkkaSerializable(Manifest = \"...\")] under the [AkkaSerializer<TProtocol>] serializer " +
+                $"{where}, and register that serializer with WithCustomSerializer.");
         }
+
+        if (!mapsGiveUps && routes.AnsweringWith(typeof(TCommand)).FirstOrDefault() is { } unmapped)
+            throw MissingGiveUpException.AtStart(typeName, unmapped, typeof(TCommand));
     }
 
     /// <summary>
@@ -367,16 +380,18 @@ public static class DurableEntityHostingExtensions
     /// Akka.Reminders: the wake that brings it back after a crash is a reminder, and it is stored before the write.
     /// </summary>
     internal static void EnsureReminders<TCommand>(
-        EntityTypeName typeName, bool usesWorkflows, IActorRegistry registry, IServiceProvider services)
+        EntityTypeName typeName, bool issuesEffects, bool usesWorkflows, IActorRegistry registry, IServiceProvider services)
     {
         var routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
-        var effect = routes.Of<TCommand>().FirstOrDefault();
+        var effect = issuesEffects ? routes.OfEntity(typeof(TCommand)).FirstOrDefault() : null;
         if (effect is null && !usesWorkflows) return;
         if (registry.TryGet<ReminderSchedulerProxy>(out _)) return;
 
-        var why = effect is not null
-            ? $"it issues the effect {effect.EffectType.Name} (handled by {effect.HandlerType.Name})"
-            : "it calls workflows (Uses)";
+        var why = effect is null
+            ? "it calls workflows (Uses)"
+            : effect.OutcomeType is not null
+                ? $"it issues the effect {effect.EffectType.Name} (handled by {effect.HandlerType.Name})"
+                : $"an entity can issue the effect {effect.EffectType.Name} (handled by {effect.HandlerType.Name})";
         throw new InvalidOperationException(
             $"Durable entity [{typeName.Value}] cannot start: {why}, and Akka.Reminders is not configured. A recorded " +
             "effect keeps a reminder that wakes the entity after a crash, so its effects are delivered or given up. " +

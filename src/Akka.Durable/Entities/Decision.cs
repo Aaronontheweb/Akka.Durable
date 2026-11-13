@@ -153,17 +153,19 @@ public sealed record Handled<TCommand, TEvent>(
     /// <remarks>
     /// <para>Without a retry policy on the handler, the effect is attempted once. With one, it is attempted again after
     /// a failure, a time-out or a restart, until an attempt is acknowledged or the policy runs out.</para>
-    /// <para><c>Decide</c> then gets exactly one of two things, as a command: the handler's answer, or the effect's
-    /// give-up (<see cref="IEffect{TCommand}.GaveUp"/>) with <see cref="GaveUpReason.Failed"/>,
+    /// <para><c>Decide</c> then gets exactly one of two things, as a command: the handler's answer, or the give-up
+    /// (<see cref="EntityDefinition{TState,TCommand,TEvent}.GaveUp"/>) with <see cref="GaveUpReason.Failed"/>,
     /// <see cref="GaveUpReason.TimedOut"/>, <see cref="GaveUpReason.Interrupted"/> (without a policy, after a restart) or
     /// <see cref="GaveUpReason.RetriesExhausted"/>. A handler with no answer (<see cref="IEffectHandler{TEffect}"/>) is
     /// acknowledged when it returns, and <c>Decide</c> gets nothing.</para>
     /// <para>Before the first write that leaves an effect pending, the entity stores a reminder that wakes it after a
     /// crash. If the reminder cannot be stored, nothing is written and the command fails.</para>
-    /// <para>The effect type needs a serializer and a handler registered with <c>AddEffectHandler</c>. Without a
-    /// handler the effect is refused before the write, and the entity restarts.</para>
+    /// <para>The effect is a plain record. Its type needs a serializer and a handler registered with
+    /// <c>AddEffectHandler</c>, and the entity's definition needs a <c>GaveUp</c>. Without a handler, with a handler
+    /// that answers with another command type, or without the <c>GaveUp</c>, the effect is refused before the write,
+    /// and the entity restarts.</para>
     /// </remarks>
-    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull, IEffect<TCommand>
+    public Handled<TCommand, TEvent> Execute<TEffect>(TEffect effect) where TEffect : notnull
     {
         ArgumentNullException.ThrowIfNull(effect);
         return Add(new ExecuteEffect(effect) { Recorded = true });

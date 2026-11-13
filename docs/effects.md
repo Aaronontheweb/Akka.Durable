@@ -9,13 +9,9 @@ A decision does outside work through effects. Effects run after the decision's e
 Use `Execute` for outside work: a call to a service, a mail, a message to another system. Take the invoice's reminder mail:
 
 ```csharp
-// The effect. It is journaled, so it has a manifest, and it says which command its give-up becomes.
+// The effect. A plain record. It is journaled, so it has a manifest.
 [AkkaSerializable(Manifest = "mail-reminder-v1")]
-public sealed record MailReminder([property: AkkaField(0)] string Recipient)
-    : IInvoiceProtocol, IEffect<InvoiceCommand>
-{
-    public InvoiceCommand GaveUp(WorkGaveUp g) => new ReminderNotSent(g.Reason);
-}
+public sealed record MailReminder([property: AkkaField(0)] string Recipient) : IInvoiceProtocol;
 
 // The handler. The only code that touches the mail server.
 public sealed class MailReminderHandler(IInvoiceMailer mailer) : IEffectHandler<MailReminder, InvoiceCommand>
@@ -26,6 +22,9 @@ public sealed class MailReminderHandler(IInvoiceMailer mailer) : IEffectHandler<
 
 // At startup.
 services.AddEffectHandler<MailReminder, InvoiceCommand, MailReminderHandler>();
+
+// On the invoice's definition. The command Decide gets when the mail gets no answer.
+GaveUp: g => new ReminderNotSent(g.Reason),
 
 // In Decide, in the Issued block.
 SendReminder => ctx.None().Execute(new MailReminder(s.Recipient)),
@@ -40,7 +39,7 @@ This is what `Execute` promises:
 
 - **It is recorded.** The effect is journaled in the same write as the decision's events. Both are stored, or neither is.
 - **Without a retry policy, it is attempted once.** The handler runs after the write, in a fresh DI scope, within `EntityOptions.EffectTimeout`. The entity does not wait for it: it keeps handling commands. With a policy, see [Retry policies](#retry-policies-the-outbox).
-- **`Decide` hears how it ended.** It gets exactly one command: the handler's answer, or the effect's give-up. The give-up comes from `GaveUp` on the effect, with a reason:
+- **`Decide` hears how it ended.** It gets exactly one command: the handler's answer, or the give-up. The give-up is the command that `GaveUp` on the definition returns. It comes with a reason:
 
   | Reason | When |
   |---|---|
@@ -67,12 +66,36 @@ services.AddEffectHandler<PublishPayment, PublishPaymentHandler>();
 
 The rules for setting it up are checked early:
 
-- An entity effect implements `IEffect<TCommand>` of the entity. Without it, `Execute` does not compile.
+- An entity that issues an effect has `GaveUp` on its definition. Without it, the host does not start, and the error names the entity type and the argument to add. The host sees the mistake from a handler that answers with the entity's command type. When all the handlers of the entity have no answer, the host cannot see it. The first `Execute` is then refused before anything is written.
 - Each effect type has exactly one handler, registered with `AddEffectHandler`. A second registration throws at startup.
 - An entity effect needs a serializer of its own, because it is journaled. The host checks this at startup. See [Serialization](serialization.md).
-- An effect type with no handler registered at all is refused at its first `Execute`, before anything is written. The entity logs an error that names the `AddEffectHandler<...>` call to add, and restarts.
+- An effect type with no handler registered at all is refused at its first `Execute`, before anything is written. The entity logs an error that names the `AddEffectHandler<...>` call to add, and restarts. The same happens to an effect whose handler answers with the command type of another entity.
 
 [Effects with outcomes](effects-with-outcomes.md) shows the two halves of a decision around an `Execute` in detail.
+
+### One `GaveUp` for all the effects
+
+`GaveUp` is one function for the entity, not one for each effect. `WorkGaveUp.Work` is the effect that got no answer. One command can carry it, and `Decide` matches on it where it cares:
+
+```csharp
+// A command case. Work holds the effect that got no answer.
+[AkkaSerializable(Manifest = "invoice-effect-gave-up-v1")]
+public sealed record EffectGaveUp(
+    [property: AkkaField(0)] object Work,
+    [property: AkkaField(1)] GaveUpReason Reason) : IInvoiceProtocol;
+
+// On the invoice's definition.
+GaveUp: g => new EffectGaveUp(g.Work, g.Reason),
+
+// In Decide, in the Issued block. The one effect this state cares about.
+EffectGaveUp { Work: MailReminder } =>
+    ctx.None().Schedule("reminder", TimeSpan.FromHours(1), new SendReminder()),
+
+// In NotHere, the blanket arm of every state. Every other give-up.
+EffectGaveUp => ctx.Ignore(),
+```
+
+The function can also choose the command itself, with a `switch` on `g.Work`. A workflow's definition has a `GaveUp` function too, for its work: see [Workflows](workflows.md).
 
 ## Retry policies: the outbox
 
@@ -103,7 +126,7 @@ What the library does:
 - Each attempt after the first is journaled before it runs, so a restart does not reset the count.
 - While the entity runs, the wait between attempts is a timer. Between attempts the effect is not in flight: the entity handles other commands, and it can be passivated.
 - One durable reminder for each entity wakes it after a crash, a passivation or a shard move, so the next attempt happens without anyone sending it a message. It is stored before the write that leaves the first effect pending, and again before a write whose effect is due earlier than the stored wake. If it cannot be stored, nothing is written and the command fails. It is removed when nothing is pending.
-- When a limited policy runs out, `Decide` gets the effect's give-up with `GaveUpReason.RetriesExhausted`. `WorkGaveUp.Attempts` says how many attempts were made, and `Error` holds the last failure.
+- When a limited policy runs out, `Decide` gets the give-up with `GaveUpReason.RetriesExhausted`. `WorkGaveUp.Attempts` says how many attempts were made, and `Error` holds the last failure.
 - An answer from an earlier attempt that arrives late is dropped. `Decide` gets one answer or one give-up for each effect.
 - `delivery.Id` is the same on every attempt. `delivery.Attempt` counts from 1. Give `delivery.Id.Value` to the other system as the idempotency key, so a repeated attempt is not applied twice.
 

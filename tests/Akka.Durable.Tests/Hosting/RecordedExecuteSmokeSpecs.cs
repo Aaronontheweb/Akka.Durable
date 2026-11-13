@@ -45,10 +45,7 @@ public sealed class EffectRouteStartupSpecs
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>An effect of the counter with no serializer: it carries no [AkkaSerializable].</summary>
-    public sealed record PlainEffect(int Value) : IEffect<CounterCommand>
-    {
-        public CounterCommand GaveUp(WorkGaveUp gaveUp) => new Noop();
-    }
+    public sealed record PlainEffect(int Value);
 
     public sealed class PlainEffectHandler : IEffectHandler<PlainEffect>
     {
@@ -88,14 +85,6 @@ public sealed class EffectRouteStartupSpecs
 
         Assert.Contains("Durable entity [counter] cannot start: the effect PlainEffect, handled by PlainEffectHandler", message);
         Assert.Contains("make it implement ICounterProtocol", message);
-    }
-
-    [Fact]
-    public async Task An_effect_whose_handler_answers_with_another_command_type_fails_startup()
-    {
-        var message = await StartupFailure(services => services.AddEffectHandler<Compute, RailwayCommand, ComputeForRailway>());
-
-        Assert.Contains("the effect Compute is an IEffect<CounterCommand>, but its handler ComputeForRailway answers with a RailwayCommand", message);
     }
 
     [Fact]

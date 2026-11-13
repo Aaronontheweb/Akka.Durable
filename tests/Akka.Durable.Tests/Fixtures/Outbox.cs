@@ -23,10 +23,7 @@ public sealed record Logged(string Line);
 
 public readonly union OutboxEvent(Logged);
 
-public sealed record Deliver(string Name) : IEffect<OutboxCommand>
-{
-    public OutboxCommand GaveUp(WorkGaveUp gaveUp) => new MailGaveUp(Name, gaveUp.Reason, gaveUp.Attempts, gaveUp.Error);
-}
+public sealed record Deliver(string Name);
 
 /// <summary>What the mail handler saw, and what it does on each attempt.</summary>
 public sealed class OutboxWorld
@@ -50,7 +47,8 @@ public sealed class DeliverHandler(OutboxWorld world) : IEffectHandler<Deliver, 
 public static class Outbox
 {
     public static readonly EntityDefinition<OutboxState, OutboxCommand, OutboxEvent> Definition =
-        new(new EntityTypeName("outbox"), _ => new OutboxState([]), Decide, Evolve);
+        new(new EntityTypeName("outbox"), _ => new OutboxState([]), Decide, Evolve,
+            GaveUp: g => new MailGaveUp(((Deliver)g.Work).Name, g.Reason, g.Attempts, g.Error));
 
     private static Decision<OutboxCommand, OutboxEvent> Decide(OutboxState state, OutboxCommand command, OutboxContext ctx) =>
         command switch
