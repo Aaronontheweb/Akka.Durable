@@ -17,6 +17,26 @@ public void Paying_in_full_marks_the_invoice_paid() =>
         .ThenState(s => Assert.True(s is Paid));
 ```
 
+A decider with a blanket arm in each state needs these tests: the compiler does not report a pair of state and command that nobody placed (see [How to structure a decider](state-commands-events-and-replies.md#how-to-structure-a-decider)). For each state, test each command it must accept, and at least one command it must refuse. For a command that a caller sent, test the refusal reply. For a late answer of an effect, test that it is ignored:
+
+```csharp
+[Fact]
+public void Paying_a_draft_is_refused() =>
+    DeciderScenario.For(Invoice.Definition)
+        .When(new RecordPayment(250m))
+        .ThenNothingPersisted()
+        .ThenReplied(new RecordPayment(250m), new InvoiceRejected("Invalid invoice operation"));
+
+[Fact]
+public void A_late_verification_answer_is_ignored_once_the_invoice_is_issued() =>
+    DeciderScenario.For(Invoice.Definition)
+        .Given(
+            new VerificationStarted(new IssueInvoice(250m, "billing@example.com")),
+            new InvoiceIssued(250m, "billing@example.com", DateTimeOffset.UnixEpoch))
+        .When(new RecipientVerified())
+        .ThenIgnored();
+```
+
 Effects are data, so both halves of an `Execute` are pure tests with no fakes. `ThenExecuted` and `ThenSent` compare the effect by value. `WhenGaveUp` decides the command the effect's own `GaveUp` returns, so each way an effect can end is a pure test too:
 
 ```csharp

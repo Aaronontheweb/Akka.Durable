@@ -27,13 +27,21 @@ public sealed class MailReminderHandler(IInvoiceMailer mailer) : IEffectHandler<
 // At startup.
 services.AddEffectHandler<MailReminder, InvoiceCommand, MailReminderHandler>();
 
-// In Decide.
-(Issued s, SendReminder) => ctx.None().Execute(new MailReminder(s.Recipient)),
-(Issued, ReminderDelivered) => ctx.None().Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
-(Issued, ReminderBounced) => ctx.None(),                     // no more reminders
-(Issued, ReminderNotSent) => ctx.None().Schedule("reminder", TimeSpan.FromHours(1), new SendReminder()),
-(_, ReminderDelivered or ReminderBounced or ReminderNotSent) => ctx.Ignore(),
+// In Decide, the block of the Issued state.
+private static InvoiceDecision WhenIssued(Issued s, InvoiceCommand command, InvoiceContext ctx) =>
+    command switch
+    {
+        SendReminder => ctx.None().Execute(new MailReminder(s.Recipient)),
+        ReminderDelivered => ctx.None().Schedule("reminder", TimeSpan.FromDays(30), new SendReminder()),
+        ReminderBounced => ctx.None(),                     // no more reminders
+        ReminderNotSent => ctx.None().Schedule("reminder", TimeSpan.FromHours(1), new SendReminder()),
+
+        // Leftover refuses a caller's command, and ignores a late answer of an effect.
+        _ => Leftover(command, ctx),
+    };
 ```
+
+The other states do not list the three answers. Their blanket arm ignores them, as a late answer of an effect needs no reply. See [How to structure a decider](state-commands-events-and-replies.md#how-to-structure-a-decider).
 
 This is what `Execute` promises:
 
@@ -115,11 +123,11 @@ There is no order between effects. To do one thing after another, issue the seco
 Before the outbox, an entity that had to deliver a message kept delivery flags in its state, with a retry timer and an acknowledge command:
 
 ```csharp
-// Do not do this.
-(Paid s, PaymentRecorded) => ctx.Persist(new LedgerPostingPending(s.Amount))
+// Do not do this. In the block of the Paid state:
+PostToLedger => ctx.Persist(new LedgerPostingPending(s.Amount))
     .Schedule("ledger-retry", TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1), new RetryLedgerPosting()),
-(Paid { LedgerPending: true } s, RetryLedgerPosting) => ctx.None().Run<ILedger>((ledger, ct) => ledger.PostAsync(s.Amount, ct)),
-(Paid, LedgerPostingAcknowledged) => ctx.Persist(new LedgerPostingDelivered()).CancelTimer("ledger-retry"),
+RetryLedgerPosting when s.LedgerPending => ctx.None().Run<ILedger>((ledger, ct) => ledger.PostAsync(s.Amount, ct)),
+LedgerPostingAcknowledged => ctx.Persist(new LedgerPostingDelivered()).CancelTimer("ledger-retry"),
 ```
 
 The library already does this. Issue the effect with `Execute`, and register its handler with `Retry.UntilAcknowledged`.
@@ -131,7 +139,8 @@ The library already does this. Issue the effect with `Execute`, and register its
 `Run` takes a lambda against one service, inline in `Decide`. There is no effect record, no handler and no second arm:
 
 ```csharp
-(Issued, SendReminder) => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
+// In the Issued block.
+SendReminder => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
 ```
 
 If the mail server is down, a warning is logged and the invoice never knows.
@@ -139,7 +148,8 @@ If the mail server is down, a warning is logged and the invoice never knows.
 `Run` is awaited in place, so everything after it in the chain waits for it. This reply leaves only after the read model is written, and the caller can read what it wrote:
 
 ```csharp
-(Issued s, RecordPayment p) when p.Amount == s.Total =>
+// In the Issued block.
+RecordPayment p when p.Amount == s.Total =>
     ctx.Persist(new PaymentRecorded(p.Amount))
         .Run<IInvoiceReadModel>((model, ct) => model.MarkPaidAsync(ctx.EntityId, ct))
         .Reply(p, new PaymentAccepted()),

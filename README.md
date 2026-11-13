@@ -24,51 +24,84 @@ That's the caller API: choose an ID, send a command, get its declared reply type
 
 ## Define its behavior
 
-Here is the `Invoice` behind those calls. `Decide` produces events and effects; `Evolve` computes the state from each persisted event. Issuing an invoice needs an answer from a recipient directory, so `Decide` records that verification started and issues a `VerifyRecipient` effect. The directory's answer comes back as a command, `RecipientVerified` or `RecipientRejected`, and a second arm finishes the job.
+Here is the `Invoice` behind those calls. `Decide` produces events and effects; `Evolve` computes the state from each persisted event. `Decide` switches on the state first. Each state has its own short block with only the commands that mean something in that state, and one last arm for the rest. Issuing an invoice needs an answer from a recipient directory, so `Decide` records that verification started and issues a `VerifyRecipient` effect. The directory's answer comes back as a command, `RecipientVerified` or `RecipientRejected`, and the `Verifying` block finishes the job. See [How to structure a decider](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md#how-to-structure-a-decider).
 
 ```csharp
 using InvoiceContext = DecisionContext<InvoiceState, InvoiceCommand, InvoiceEvent>;
+using InvoiceDecision = Decision<InvoiceCommand, InvoiceEvent>;
 
 public static class Invoice
 {
     public static readonly EntityDefinition<InvoiceState, InvoiceCommand, InvoiceEvent> Definition =
         new(new EntityTypeName("invoices"), _ => new Draft(), Decide, Evolve);
 
-    public static Decision<InvoiceCommand, InvoiceEvent> Decide(
+    // The state comes first. Each state has its own block.
+    public static InvoiceDecision Decide(
         InvoiceState state,
         InvoiceCommand command,
         InvoiceContext ctx) =>
-        (state, command) switch
+        state switch
+        {
+            Draft => WhenDraft(command, ctx),
+            Verifying v => WhenVerifying(v, command, ctx),
+            Issued s => WhenIssued(s, command, ctx),
+            Paid => Leftover(command, ctx),
+        };
+
+    private static InvoiceDecision WhenDraft(InvoiceCommand command, InvoiceContext ctx) =>
+        command switch
         {
             // Needs an outside answer: remember that we asked, then ask.
-            (Draft, IssueInvoice c) when c.Total > 0 =>
+            IssueInvoice c when c.Total > 0 =>
                 ctx.Persist(new VerificationStarted(c))
                     .Execute(new VerifyRecipient(c.Recipient)),
 
+            _ => Leftover(command, ctx),
+        };
+
+    private static InvoiceDecision WhenVerifying(Verifying v, InvoiceCommand command, InvoiceContext ctx) =>
+        command switch
+        {
             // The answer arrives as a command. The request kept in state fixes the reply type.
-            (Verifying v, RecipientVerified) =>
+            RecipientVerified =>
                 ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
                     .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
                     .Reply(v.Request, new InvoiceAccepted(ctx.EntityId)),
-            (Verifying v, RecipientRejected r) =>
+            RecipientRejected r =>
                 ctx.Persist(new VerificationFailed(r.Reason))
                     .Reply(v.Request, new InvoiceRejected(r.Reason)),
-            (_, RecipientVerified or RecipientRejected) => ctx.Ignore(),
 
-            (Issued s, RecordPayment p) when p.Amount == s.Total =>
+            _ => Leftover(command, ctx),
+        };
+
+    private static InvoiceDecision WhenIssued(Issued s, InvoiceCommand command, InvoiceContext ctx) =>
+        command switch
+        {
+            RecordPayment p when p.Amount == s.Total =>
                 ctx.Persist(new PaymentRecorded(p.Amount))
                     .CancelTimer("reminder")
                     .Reply(p, new PaymentAccepted()),
 
             // A lost reminder mail is acceptable, so the light, unrecorded Run is enough.
-            (Issued, SendReminder) =>
+            SendReminder =>
                 ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
-            (_, SendReminder) => ctx.Ignore(),
 
-            (_, IssueInvoice c) =>
+            _ => Leftover(command, ctx),
+        };
+
+    // The blanket arm of every state. It builds a decision and does not look at the state.
+    // It has no `_` arm of its own, so a new command does not compile until it is placed here.
+    private static InvoiceDecision Leftover(InvoiceCommand command, InvoiceContext ctx) =>
+        command switch
+        {
+            // A caller sent these on purpose. Refuse them, so the caller sees the refusal.
+            IssueInvoice c =>
                 ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
-            (_, RecordPayment p) =>
+            RecordPayment p =>
                 ctx.None().Reply(p, new InvoiceRejected("Invalid invoice operation")),
+
+            // The entity's own effects and reminders can arrive late. Ignore them.
+            RecipientVerified or RecipientRejected or SendReminder => ctx.Ignore(),
         };
 
     public static InvoiceState Evolve(InvoiceState state, InvoiceEvent @event) =>
@@ -210,7 +243,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 
 | Page | What it covers |
 |---|---|
-| [State, commands, events, and replies](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md) | How to declare an entity's state, commands, events and replies, and what a decision can do. |
+| [State, commands, events, and replies](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/state-commands-events-and-replies.md) | How to declare an entity's state, commands, events and replies, what a decision can do, and how to structure a decider. |
 | [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) | `Execute`, the normal way to do outside work, retry policies (the outbox), and the light forms `Run`, `Tell` and `Send`. |
 | [Effects with outcomes](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects-with-outcomes.md) | Effect handlers, answers and give-ups, for work whose result the entity decides on. |
 | [Talking to other entities](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/talking-to-other-entities.md) | `Send` and `Accepts`, for one entity that drives another. |
