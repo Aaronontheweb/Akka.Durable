@@ -57,7 +57,7 @@ To record a fact from the outside world, have the handler return a command that 
 `Execute` starts the handler and moves on; the outcome arrives later as a message. Other commands are handled in the meantime, which is why the invoice records `Verifying`. A second `IssueInvoice` that arrives during verification has no arm in the `Verifying` block. Its blanket arm refuses it, and the caller gets the rejection:
 
 ```csharp
-// In Leftover, which the blanket arm of every state calls.
+// In NotHere, which the blanket arm of every state calls.
 IssueInvoice c => ctx.None().Reply(c, new InvoiceRejected("Invalid invoice operation")),
 ```
 
@@ -123,7 +123,7 @@ VerificationGaveUp g =>
     ctx.Persist(new VerificationFailed($"directory: {g.Reason}")).Reply(v.Request, new InvoiceRejected("directory unavailable")),
 ```
 
-In every other state, `Leftover` ignores `VerificationGaveUp`, like the other late answers.
+In every other state, `NotHere` ignores `VerificationGaveUp`, like the other late answers.
 
 Each `Execute` is a new effect with a new id. Answers and give-ups are matched to the effect they belong to, so a late answer of an effect that already gave up is dropped.
 

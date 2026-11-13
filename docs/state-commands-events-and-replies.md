@@ -158,11 +158,12 @@ public static class Invoice
                 // Needs an outside answer: remember that we asked, then ask.
                 IssueInvoice c when c.Total > 0 =>
                     ctx.Persist(new VerificationStarted(c)).Execute(new VerifyRecipient(c.Recipient)),
-                _ => Leftover(command, ctx),
+                _ => NotHere(command, ctx),   // refused or ignored: it does not belong here
             },
             Verifying v => command switch
             {
-                // The answer arrives as a command. The request kept in state fixes the reply type.
+                // The answer to VerifyRecipient arrives as a command.
+                // v.Request is the IssueInvoice we are still answering.
                 RecipientVerified =>
                     ctx.Persist(new InvoiceIssued(v.Request.Total, v.Request.Recipient, ctx.UtcNow))
                         .Schedule("reminder", TimeSpan.FromDays(30), new SendReminder())
@@ -170,7 +171,7 @@ public static class Invoice
                 RecipientRejected r =>
                     ctx.Persist(new VerificationFailed(r.Reason))
                         .Reply(v.Request, new InvoiceRejected(r.Reason)),
-                _ => Leftover(command, ctx),
+                _ => NotHere(command, ctx),   // refused or ignored: it does not belong here
             },
             Issued s => command switch
             {
@@ -180,14 +181,14 @@ public static class Invoice
                         .Reply(p, new PaymentAccepted()),
                 // A lost reminder mail is acceptable, so the light, unrecorded Run is enough.
                 SendReminder => ctx.None().Run<IInvoiceMailer>((mailer, ct) => mailer.RemindAsync(ct)),
-                _ => Leftover(command, ctx),
+                _ => NotHere(command, ctx),
             },
-            Paid => Leftover(command, ctx),
+            Paid => NotHere(command, ctx),
         };
 
     // The blanket arm of every state. It builds a decision and does not look at the state.
     // It has no `_` arm of its own, so a new command does not compile until it is placed here.
-    private static InvoiceDecision Leftover(InvoiceCommand command, InvoiceContext ctx) =>
+    private static InvoiceDecision NotHere(InvoiceCommand command, InvoiceContext ctx) =>
         command switch
         {
             // A caller sent these on purpose. Refuse them, so the caller sees the refusal.
@@ -230,9 +231,9 @@ A small entity whose whole table fits on one screen can be one flat `(state, com
 | Early, and valid after a change of state | `ctx.Stash()`, and `.UnstashAll()` on the arms that leave the state | Nothing until the release |
 | A late answer or reminder of the entity's own effect | `ctx.Ignore()` | Nothing. A reminder is acknowledged. |
 
-Keep refusal and ignore apart. A caller's command that is ignored gets no reply, and an effect answer you forgot to handle looks like a late duplicate. `Leftover` has no `_` arm for this reason: the compiler makes you sort each new command into one kind.
+Keep refusal and ignore apart. A caller's command that is ignored gets no reply, and an effect answer you forgot to handle looks like a late duplicate. `NotHere` has no `_` arm for this reason: the compiler makes you sort each new command into one kind.
 
-**The cost.** The compiler still checks that a new command is placed in `Leftover`, and that the outer `switch` has an arm for a new state. It no longer checks that a command has its own arm in each state where it should mean something: there it falls into the blanket arm and is refused or ignored. A decision test covers this. For each state, test each command it must accept, and at least one it must refuse.
+**The cost.** The compiler still checks that a new command is placed in `NotHere`, and that the outer `switch` has an arm for a new state. It no longer checks that a command has its own arm in each state where it should mean something: there it falls into the blanket arm and is refused or ignored. A decision test covers this. For each state, test each command it must accept, and at least one it must refuse.
 
 A workflow's fact table has its own rule: see [Workflow rules](workflow-rules.md).
 
