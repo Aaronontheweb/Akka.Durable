@@ -86,7 +86,7 @@ public abstract class EntityFlowSpecs(ITestOutputHelper output) : StreamKit(outp
     }
 
     [Fact]
-    public async Task Watch_emits_the_current_state_then_each_later_one()
+    public async Task Watch_emits_the_current_state_then_later_ones_without_going_back()
     {
         var counter = CounterRef("watched");
 
@@ -98,7 +98,7 @@ public abstract class EntityFlowSpecs(ITestOutputHelper output) : StreamKit(outp
                 firstSeen.TrySetResult();
                 return snapshot;
             })
-            .Take(3)
+            .Take(2)
             .RunWith(Sink.Seq<StateSnapshot<CounterState>>(), Materializer);
 
         await firstSeen.Task.WaitAsync(Timeout, TestCancellation);
@@ -108,8 +108,12 @@ public abstract class EntityFlowSpecs(ITestOutputHelper output) : StreamKit(outp
 
         var snapshots = await watching.WaitAsync(Timeout, TestCancellation);
 
-        Assert.Equal(3, snapshots.Count);
-        Assert.Equal([0, 1, 2], snapshots.Select(s => s.State.Count));
+        // The subscription conflates: a slow reader gets the newest snapshot it has not read, so it can skip a
+        // state. What it guarantees is the current state first, then later ones, never an older one after a newer.
+        Assert.Equal(2, snapshots.Count);
+        Assert.Equal(0, snapshots[0].State.Count);
+        Assert.True(snapshots[1].State.Count >= 1);
+        Assert.True(snapshots[1].SequenceNr > snapshots[0].SequenceNr);
     }
 }
 
