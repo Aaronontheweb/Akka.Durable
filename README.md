@@ -153,6 +153,63 @@ public sealed class PublishPaymentHandler(IBus bus)
 
 See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) for the other retry policies, and for `Execute` without a policy, which is attempted once and tells `Decide` how it ended. A workflow's work takes the same policies from the same registration: see [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md#retry-policies-on-work).
 
+## Feed a stream. Start a workflow per element.
+
+`Aaron.Akka.Durable.Streams` puts Akka.Streams over the refs. Watch an entity's state, send commands from a stream, and start a durable workflow for each element.
+
+```csharp
+// Watch one entity's state. Never completes: an entity has no terminal state.
+EntitySource.Watch(invoiceRef)
+    .Select(snapshot => $"{snapshot.State}: seq {snapshot.SequenceNr}")
+    .RunForeach(Console.WriteLine, materializer);
+
+// Send a command per element, and emit the replies in the input's order.
+Source.From(payments)
+    .Via(EntityFlow.Ask<Payment, InvoiceCommand, PaymentAccepted>(
+        invoiceRefs,
+        p => (new EntityId($"invoice-{p.Number}"), new RecordPayment(p.Amount)),
+        parallelism: 4))
+    .RunForeach(accepted => Console.WriteLine($"accepted {accepted.Amount}"), materializer);
+```
+
+### Starting a workflow and waiting for it are separate stages
+
+A workflow is durable and may run for a long time: it can wait on a timer for months. So `WorkflowFlow` does not tie a stream slot to a workflow's lifetime.
+
+```csharp
+// Start one workflow per element. Emits as soon as each start is stored, and never waits for an outcome.
+Source.From(orders)
+    .Via(WorkflowFlow.Start<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
+        checkouts, order => new WorkflowId(order.Number), parallelism: 8))
+    .RunForeach(started => Console.WriteLine($"{started.Id}: {started.Result}"), materializer);
+```
+
+`WorkflowFlow.Wait` observes outcomes separately. Each element waits in its own substream, so a slow workflow does not hold up the others.
+
+```csharp
+Source.From(started.Select(s => (s.Id, order)))
+    .Via(WorkflowFlow.Wait<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
+        checkouts, breadth: 8, timeout: TimeSpan.FromMinutes(5)))
+    .RunForeach(ended => Console.WriteLine($"{ended.Id}: {ended.Ended}"), materializer);
+```
+
+`WorkflowFlow.Run` does both, for a workflow that finishes in seconds:
+
+```csharp
+Source.From(batch)
+    .Via(WorkflowFlow.Run<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
+        checkouts, order => new WorkflowId(order.Number), parallelism: 2, timeout: TimeSpan.FromSeconds(30)))
+    .RunForeach(ended => Console.WriteLine($"{ended.Id}: {ended.Ended}"), materializer);
+```
+
+An element whose workflow does not end in time emits `WorkflowTimedOut`. The workflow itself carries on: it is durable, and its outcome is still in its journal.
+
+### What the stream does not do
+
+The stream is not durable. If the process stops, the workflows resume and the stream does not. The source must replay from an offset of its own, for example by committing only after an element's outcome is emitted. Compute the workflow id from the element: a replayed element then reaches the instance it started before and starts no second one.
+
+Watching an entity or a workflow activates it, so a source that stays materialized keeps it alive. A slow reader gets the newest snapshot it has not read: it can skip states, but it never reads an older one after a newer one.
+
 ## Getting started
 
 Install the .NET 11 SDK pinned in `global.json`, then run:
@@ -168,6 +225,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 | Package | Contents |
 |---|---|
 | `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
+| `Aaron.Akka.Durable.Streams` | Akka.Streams sources and flows over the refs, in the `Akka.Durable.Streams` namespace |
 | `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
 ## Guide

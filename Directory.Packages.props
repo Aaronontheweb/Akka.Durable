@@ -15,6 +15,7 @@
   <ItemGroup>
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Hosting" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Akka.Streams" Version="$(AkkaVersion)" />
     <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaRemindersVersion)" />
     <PackageVersion Include="Akka.Serialization.V2" Version="$(AkkaVersion)" />
     <PackageVersion Include="FSharp.Core" Version="11.0.101" />

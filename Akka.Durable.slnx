@@ -7,6 +7,7 @@
     <File Path="README.md" />
   </Folder>
   <Project Path="src/Akka.Durable/Akka.Durable.csproj" />
+  <Project Path="src/Akka.Durable.Streams/Akka.Durable.Streams.csproj" />
   <Project Path="src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
   <Project Path="tests/Akka.Durable.AotSmoke/Akka.Durable.AotSmoke.csproj" />
   <Project Path="tests/Akka.Durable.FSharp.Tests/Akka.Durable.FSharp.Tests.fsproj" />

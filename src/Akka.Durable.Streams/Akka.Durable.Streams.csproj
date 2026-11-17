@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>$(NetLibVersion)</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Published as Aaron.Akka.Durable.Streams; the assembly and namespace stay Akka.Durable.Streams. -->
+    <PackageId>Aaron.Akka.Durable.Streams</PackageId>
+    <Description>Akka.Streams sources and flows for Akka.Durable: watch an entity's state, send commands from a stream, and start durable workflows per element.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Akka.Streams" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Akka.Durable/Akka.Durable.csproj" />
+  </ItemGroup>
+</Project>
