@@ -2,9 +2,7 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <!-- Nuget package versions -->
-    <AkkaVersion>1.6.0-beta7</AkkaVersion>
-    <!-- Aaron.Akka.Reminders ships separately and can lag the Akka.NET beta it targets. -->
-    <AkkaRemindersVersion>1.6.0-beta5</AkkaRemindersVersion>
+    <AkkaVersion>1.6.0-beta8</AkkaVersion>
     <!-- Akka.Persistence.Sql also ships separately; used only by tests, for a real serializing journal. -->
     <AkkaPersistenceSqlVersion>1.6.0-beta5</AkkaPersistenceSqlVersion>
     <XunitVersion>4.0.3</XunitVersion>
@@ -15,7 +13,7 @@
   <ItemGroup>
     <PackageVersion Include="Akka.Cluster.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Hosting" Version="$(AkkaVersion)" />
-    <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaRemindersVersion)" />
+    <PackageVersion Include="Akka.Reminders" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Serialization.V2" Version="$(AkkaVersion)" />
     <PackageVersion Include="FSharp.Core" Version="11.0.101" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
