@@ -1,3 +1,19 @@
+#### 0.1.0-alpha.9 November 18th 2026 ####
+
+**Akka.NET 1.6.0-beta8 and the official `Akka.Reminders` package.** Akka.Durable now depends on `Akka.Reminders`, which ships with Akka.NET from 1.6.0-beta8 on, in place of `Aaron.Akka.Reminders`. No API of Akka.Durable changes. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **The Akka.NET packages are 1.6.0-beta8.**
+* **`Akka.Reminders` replaces `Aaron.Akka.Reminders`.** Only the package id is different. The assembly name and the namespaces are the same, so no `using` line changes.
+* **Akka.Durable does not use the new retry setting of a reminder** (`ReminderRetryPolicy.UntilAcknowledged`, new in Akka.Reminders 1.6.0-beta8). Its reminders are delivered as before.
+
+**What you change from 0.1.0-alpha.8:** three steps.
+
+1. Replace each `Aaron.Akka.Reminders` package with the `Akka.Reminders` package of the same kind, at 1.6.0-beta8. For example, `Aaron.Akka.Reminders.SqlServer` becomes `Akka.Reminders.SqlServer`. Do not keep both: the two families ship an assembly with the same name.
+2. Move your other Akka.NET packages to 1.6.0-beta8.
+3. Let the reminder store update its schema. Akka.Reminders 1.6.0-beta8 adds one column to the reminder table, for the retry setting. Reminders that are already stored are kept. When the store creates its own schema at start, it adds the column. When your application's database login cannot change the schema, add the column before you deploy. The Akka.NET 1.6.0-beta8 release notes have the details.
+
+Nothing that Akka.Durable stores changes.
+
 #### 0.1.0-alpha.8 November 13th 2026 ####
 
 **Fix: an entity host is no longer refused at start because of another entity's effect.** This fault was new in 0.1.0-alpha.7. Akka.Durable is still a proof of concept, not an official Akka.NET project.
