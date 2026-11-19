@@ -1,11 +1,9 @@
 using Akka.Actor;
-using Akka.Cluster.Hosting;
 using Akka.Durable.Tests.Fixtures;
 using Akka.Durable.Tests.Fixtures.Echoes;
 using Akka.Durable.Tests.Fixtures.Slows;
 using Akka.Durable.TestKit;
 using Akka.Hosting;
-using Akka.Remote.Hosting;
 using Akka.Streams;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -14,14 +12,11 @@ using Xunit;
 namespace Akka.Durable.Tests.Hosting;
 
 /// <summary>
-/// Hosts the echo workflow and the counter entity through the public API, the way an application would, and
-/// gives the stream specs a materializer. Subclasses choose the hosting mode.
+/// Hosts the echo and slow workflows and the counter entity through the public API, the way an application would,
+/// and gives the stream specs a materializer. The stages do not depend on the hosting mode, so it is always local.
 /// </summary>
 public abstract class StreamKit(ITestOutputHelper output) : DurableEntityTestKit(output)
 {
-    /// <summary>Host in a shard region of a single-node cluster; otherwise in a local host actor.</summary>
-    protected virtual bool Sharded => false;
-
     protected override void ConfigureTestServices(HostBuilderContext context, IServiceCollection services)
     {
         services.AddSingleton<EffectRecorder>();
@@ -34,23 +29,14 @@ public abstract class StreamKit(ITestOutputHelper output) : DurableEntityTestKit
 
     protected override void ConfigureEntities(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        if (Sharded)
-            builder.WithRemoting("localhost", 0).WithClustering().AddStartup((system, _) =>
-            {
-                var cluster = Akka.Cluster.Cluster.Get(system);
-                cluster.Join(cluster.SelfAddress);
-            });
-
         builder
             .WithCustomSerializer(EchoSerializer.CreateSerializerDetails)
             .WithCustomSerializer(SlowSerializer.CreateSerializerDetails)
             .WithCustomSerializer(CounterSerializer.CreateSerializerDetails)
-            .WithDurableWorkflow(Echo.Definition, Sharding())
-            .WithDurableWorkflow(Slow.Definition, Sharding())
-            .WithDurableEntity(Counter.Definition, Sharding());
+            .WithDurableWorkflow(Echo.Definition)
+            .WithDurableWorkflow(Slow.Definition)
+            .WithDurableEntity(Counter.Definition);
     }
-
-    protected ShardedHosting? Sharding() => Sharded ? new ShardedHosting() : null;
 
     protected IWorkflowRef<Shout, Listening, EchoFact, Heard> EchoRef(string id) =>
         WorkflowRef<Shout, Listening, EchoFact, Heard>(id);

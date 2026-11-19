@@ -155,60 +155,32 @@ See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effect
 
 ## Feed a stream. Start a workflow per element.
 
-`Aaron.Akka.Durable.Streams` puts Akka.Streams over the refs. Watch an entity's state, send commands from a stream, and start a durable workflow for each element.
+`Aaron.Akka.Durable.Streams` puts Akka.Streams stages over the refs. Every stage is bounded: you give it a `parallelism` and a `timeout`. A deadline that passes is an answer, `TimedOut`, and not a stream failure. Every output carries its input.
 
 ```csharp
-// Watch one entity's state. Never completes: an entity has no terminal state.
-EntitySource.Watch(invoiceRef)
-    .Select(snapshot => $"{snapshot.State}: seq {snapshot.SequenceNr}")
-    .RunForeach(Console.WriteLine, materializer);
-
-// Send a command per element, and emit the replies in the input's order.
-Source.From(payments)
-    .Via(EntityFlow.Ask<Payment, InvoiceCommand, PaymentAccepted>(
-        invoiceRefs,
-        p => (new EntityId($"invoice-{p.Number}"), new RecordPayment(p.Amount)),
-        parallelism: 4))
-    .RunForeach(accepted => Console.WriteLine($"accepted {accepted.Amount}"), materializer);
+orders
+    .Via(DurableFlow.Start(
+        checkouts,
+        (OrderMessage m) => (new WorkflowId(m.Order), new PlaceOrder(m.Order, m.Total)),
+        parallelism: 8,
+        timeout: TimeSpan.FromSeconds(5)))
+    .RunForeach(r =>
+    {
+        // No answer in time does not mean the start failed. The id comes from the order,
+        // so sending the order through again reaches the same workflow.
+        if (r.Answer is TimedOut or Failed)
+            retry(r.Input);
+    }, materializer);
 ```
 
-### Starting a workflow and waiting for it are separate stages
+`orders` is a `Source<OrderMessage, NotUsed>`: your queue. `Start` emits once the start is stored. It does not wait for the workflow to finish.
 
-A workflow is durable and may run for a long time: it can wait on a timer for months. So `WorkflowFlow` does not tie a stream slot to a workflow's lifetime.
+- `DurableFlow.Ask` sends a command to an entity and emits its reply.
+- `DurableFlow.Notify` sends a fact to a running workflow and emits whether it was taken.
+- `DurableFlow.Until` waits until an entity's state, or a workflow's status, satisfies a condition. Use it after `Start` to wait for a short workflow.
+- `DurableSource.Watch` is one entity's or one workflow's state as a source.
 
-```csharp
-// Start one workflow per element. Emits as soon as each start is stored, and never waits for an outcome.
-Source.From(orders)
-    .Via(WorkflowFlow.Start<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
-        checkouts, order => new WorkflowId(order.Number), parallelism: 8))
-    .RunForeach(started => Console.WriteLine($"{started.Id}: {started.Result}"), materializer);
-```
-
-`WorkflowFlow.Wait` observes outcomes separately. Each element waits in its own substream, so a slow workflow does not hold up the others.
-
-```csharp
-Source.From(started.Select(s => (s.Id, order)))
-    .Via(WorkflowFlow.Wait<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
-        checkouts, breadth: 8, timeout: TimeSpan.FromMinutes(5)))
-    .RunForeach(ended => Console.WriteLine($"{ended.Id}: {ended.Ended}"), materializer);
-```
-
-`WorkflowFlow.Run` does both, for a workflow that finishes in seconds:
-
-```csharp
-Source.From(batch)
-    .Via(WorkflowFlow.Run<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>(
-        checkouts, order => new WorkflowId(order.Number), parallelism: 2, timeout: TimeSpan.FromSeconds(30)))
-    .RunForeach(ended => Console.WriteLine($"{ended.Id}: {ended.Ended}"), materializer);
-```
-
-An element whose workflow does not end in time emits `WorkflowTimedOut`. The workflow itself carries on: it is durable, and its outcome is still in its journal.
-
-### What the stream does not do
-
-The stream is not durable. If the process stops, the workflows resume and the stream does not. The source must replay from an offset of its own, for example by committing only after an element's outcome is emitted. Compute the workflow id from the element: a replayed element then reaches the instance it started before and starts no second one.
-
-Watching an entity or a workflow activates it, so a source that stays materialized keeps it alive. A slow reader gets the newest snapshot it has not read: it can skip states, but it never reads an older one after a newer one.
+There is no fire and forget. See [Streams](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/streams.md) for each stage, what a timed-out answer means, and why the stream is not durable.
 
 ## Getting started
 
@@ -225,7 +197,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 | Package | Contents |
 |---|---|
 | `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
-| `Aaron.Akka.Durable.Streams` | Akka.Streams sources and flows over the refs, in the `Akka.Durable.Streams` namespace |
+| `Aaron.Akka.Durable.Streams` | Akka.Streams flows and sources over the refs: start workflows, ask entities, notify workflows, wait for a state, and watch it. In the `Akka.Durable.Streams` namespace |
 | `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
 ## Guide
@@ -246,6 +218,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Waiting for a state, and watching it](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md#waiting-for-a-state-and-watching-it) | `WaitForStateAsync` and `WatchStateAsync`, and what a state subscription guarantees. |
 | [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, retry policies on work, the fact table, and workflow refs. |
 | [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
+| [Streams](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/streams.md) | Akka.Streams stages for entities and workflows: `Start`, `Ask`, `Notify`, `Until` and `Watch`. Bounded, and a missed deadline is an answer. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
 | [Observing what entities do](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/observing-what-entities-do.md) | A read-only observer for telemetry and an audit trail, and the event stream publisher. |
 | [Headers beside a command](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/headers-beside-a-command.md) | Opaque headers that travel beside a command, are stored with recorded effects, and are restored before an effect handler runs: a request id for an audit trail or a trace. |

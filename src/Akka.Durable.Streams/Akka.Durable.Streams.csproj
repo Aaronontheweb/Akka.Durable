@@ -4,8 +4,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Published as Aaron.Akka.Durable.Streams; the assembly and namespace stay Akka.Durable.Streams. -->
     <PackageId>Aaron.Akka.Durable.Streams</PackageId>
-    <Description>Akka.Streams sources and flows for Akka.Durable: watch an entity's state, send commands from a stream, and start durable workflows per element.</Description>
+    <Description>Akka.Streams stages for Akka.Durable: start a workflow per element, ask entities, notify workflows, wait for a state, and watch an entity or a workflow as a source. Every stage is bounded and gives a missed deadline as an answer, not as a failure.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Akka.Durable.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Akka.Streams" />
