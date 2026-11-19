@@ -7,15 +7,19 @@
     <LangVersion>preview</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.1.0-alpha.10</VersionPrefix>
-    <PackageReleaseNotes>**A read-only observer for what entities do.** `IDurableObserver` sees what entities and workflows do. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+    <VersionPrefix>0.1.0-alpha.11</VersionPrefix>
+    <PackageReleaseNotes>**Headers beside a command.** A few opaque strings travel beside a command, so an application can say which request a chain of work belongs to without putting that into its command and event types. Akka.Durable is still a proof of concept, not an official Akka.NET project.
 
-* **`IDurableObserver`** sees each saved event, with the command that decided it and what started the decision: a command, a timer, the answer of a recorded effect, or the library's work after recovery. It sees each stage of a recorded effect: issued, attempt started, acknowledged and gave up. It sees each timer that is set, cancelled or fired. Register an observer with `AddDurableObserver&lt;T&gt;()`.
-* **`AddDurableEventStreamPublisher()`** publishes the same observations to the actor system's event stream. Subscribe to `IDurableObservation`.
-* **The observer is read-only.** It is called after the journal write. It is never called while an entity recovers. An observer that throws is logged, and it cannot affect the entity.
-* **A new guide page,** "Observing what entities do", has a telemetry example and an audit trail example.
+* **`IHeaderPropagator`.** `Inject` adds headers at every send. The library carries them, stores them with each recorded effect, and calls `Restore` before an effect handler runs, also for a retry and after a restart. `InjectForTimer` lets an application mark a chain that one of an entity's own timers started. Register one with `AddDurableHeaderPropagator&lt;T&gt;()`. `Decide`, `Evolve` and effect handlers never see headers.
+* **`Headers` on the observations.** `EventSaved`, `EffectObserved` and `TimerObserved` have a new `Headers` member.
+* **Fix: a timer whose command `Decide` stashed was reported as `Fired` twice.** It is now reported once, when its command is decided.
+* **New guide page,** "Headers beside a command".
 
-**What you change from 0.1.0-alpha.9:** nothing. Nothing on the wire or in storage changes, so no migration is needed.</PackageReleaseNotes>
+**What you change from 0.1.0-alpha.10:** three things.
+
+1. Code that constructs `EventSaved`, `EffectObserved` or `TimerObserved` itself (tests, usually) passes the new `Headers` member. Observers that only read them need no change.
+2. Roll out in two steps if you use headers in a cluster. First run this version on every node. Only then register a propagator, because a node on an older version cannot read a command that carries headers.
+3. Nothing to migrate in storage. Each recorded effect gains one new field. Records written before it still read, and an older version skips the field.</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Target framework definitions. Projects should reference these instead of hardcoding a TFM:
