@@ -191,4 +191,5 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
 | [Observing what entities do](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/observing-what-entities-do.md) | A read-only observer for telemetry and an audit trail, and the event stream publisher. |
 | [Headers beside a command](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/headers-beside-a-command.md) | Opaque headers that travel beside a command, are stored with recorded effects, and are restored before an effect handler runs: a request id for an audit trail or a trace. |
+| [Audit trail sample](https://github.com/Aaronontheweb/Akka.Durable/tree/dev/samples/AuditTrail) | A small web application that records who did each thing across two entities and a timer, with no audit code in the entities. |
 | [Status and direction](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/status.md) | What works today and what is not done yet. |
