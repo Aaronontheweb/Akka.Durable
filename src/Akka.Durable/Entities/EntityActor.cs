@@ -60,6 +60,9 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // Created lazily so entities that never touch reminders don't require them to be configured.
     private IReminderClient? _reminderClient;
 
+    // The observers registered in DI, in registration order. Empty when there are none, which every call site checks first.
+    private readonly IDurableObserver[] _observers;
+
     private long _lastSnapshotSequenceNr;
 
     // Execute handlers this incarnation started whose outcome it has not received yet. Send is not counted:
@@ -103,6 +106,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         _timeProvider = timeProvider;
         _options = definition.Options ?? EntityOptions.Default;
         _routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
+        _observers = [.. services.GetServices<IDurableObserver>()];
 
         _log = Context.GetLogger()
             .WithContext("EntityType", definition.TypeName.Value)
@@ -298,7 +302,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         if (pending.Effects.IsDefaultOrEmpty && pending.Events.IsDefaultOrEmpty) return;
 
         // The asker of the request that started this work belongs to the previous incarnation.
-        Commit(pending, Context.System.DeadLetters, reminder: null);
+        Commit(pending, Context.System.DeadLetters, reminder: null, Trigger.AfterRecovery);
     }
 
     #endregion
@@ -360,12 +364,15 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         TCommand command, IActorRef origin, ReminderEnvelope? reminder, Settlement? settlement = null)
     {
         var decision = _definition.Decide(State, command, NewContext());
+        var trigger = reminder is not null ? Trigger.FromTimer(reminder.Key.Name, command)
+            : settlement is not null ? Trigger.FromAnswer(settlement.Sequence, command)
+            : Trigger.FromCommand(command);
         if (settlement is not null)
         {
             ImmutableArray<object> records = [settlement.Record];
             if (decision is Handled<TCommand, TEvent> handled)
             {
-                Commit(handled, origin, reminder, records, settlement.Then);
+                Commit(handled, origin, reminder, trigger, records, settlement.Then);
                 return;
             }
 
@@ -382,14 +389,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                 throw new InvalidOperationException(
                     $"{EntityType.Value}.Decide returned an uninitialized Decision for command {command}.");
 
-            Commit(Decisions.None<TCommand, TEvent>(), origin, reminder, records, settlement.Then);
+            Commit(Decisions.None<TCommand, TEvent>(), origin, reminder, Trigger.None, records, settlement.Then);
             return;
         }
 
         switch (decision)
         {
             case Handled<TCommand, TEvent> handled:
-                Commit(handled, origin, reminder);
+                Commit(handled, origin, reminder, trigger);
                 break;
 
             case Ignored:
@@ -438,6 +445,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // The check still guards against a payload that changed type in reminder storage.
         if (envelope.Message is TCommand command)
         {
+            ObserveTimer(envelope.Key.Name, TimerStage.Fired, due: null, _timeProvider.Now);
             HandleCommand(command, Sender, envelope);
             return;
         }
@@ -560,7 +568,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             if (delivery is { Answers: true })
                 HandleCommand(answer, origin, reminder: null, new Settlement(sequence, acknowledged, Then: null));
             else
-                Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [acknowledged]);
+                Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, Trigger.None, [acknowledged]);
             return;
         }
 
@@ -618,7 +626,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             // The definition's GaveUp returned no command, or the call has no command for a give-up.
             _log.Error("Effect {0} (id {1}) of entity [{2}/{3}] gave up as {4}, and Decide has no command for it. It " +
                        "is closed.", PublicName(pending.Effect), sequence, EntityType.Value, _entityId.Value, reason);
-        Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [record], then);
+        Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, Trigger.None, [record], then);
     }
 
     /// <summary>The answer or give-up of a recorded effect was stashed by <c>Decide</c>, and the stash was released.</summary>
@@ -661,10 +669,11 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <param name="handled">The decision.</param>
     /// <param name="origin">Who <c>Reply</c> answers.</param>
     /// <param name="reminder">The reminder delivery that carried the command, acknowledged once it is decided.</param>
+    /// <param name="trigger">What started the decision and which command it decided, for the observers.</param>
     /// <param name="records">Library records that settle effects or start an attempt.</param>
     /// <param name="then">Runs last, after the effects. Used to decide the next give-up after recovery.</param>
     private void Commit(
-        Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder,
+        Handled<TCommand, TEvent> handled, IActorRef origin, ReminderEnvelope? reminder, Trigger trigger,
         ImmutableArray<object> records = default, Action? then = null)
     {
         ImmutableArray<TEvent> events = handled.Events.IsDefault ? [] : handled.Events;
@@ -703,17 +712,18 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     return;
                 }
 
-                Write(events, effects, issued, records, origin, reminder, then);
+                Write(events, effects, issued, records, origin, reminder, then, trigger);
             });
             return;
         }
 
-        Write(events, effects, issued, records, origin, reminder, then);
+        Write(events, effects, issued, records, origin, reminder, then, trigger);
     }
 
     private void Write(
         ImmutableArray<TEvent> events, ImmutableArray<EntityEffect> effects, List<IssuedEffect> issued,
-        ImmutableArray<object> records, IActorRef origin, ReminderEnvelope? reminder, Action? then)
+        ImmutableArray<object> records, IActorRef origin, ReminderEnvelope? reminder, Action? then,
+        Trigger trigger)
     {
         var journaled = issued.Where(effect => effect.Record is not null).ToList();
         var batch = ImmutableArray.CreateBuilder<object>(events.Length + (records.IsDefault ? 0 : records.Length) + journaled.Count);
@@ -741,19 +751,23 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     journaled[next++].Sequence = sequence;
                     Track(record, sequence);
                     _origins[sequence] = origin;
+                    ObserveEffect(sequence, record.Effect, EffectStage.Issued, 1);
                     break;
                 case EffectRetried retried:
                     Track(retried);
                     break;
                 case EffectAcknowledged acknowledged:
-                    _pending.Remove(acknowledged.Id);
+                    if (_pending.Remove(acknowledged.Id, out var done))
+                        ObserveEffect(acknowledged.Id, done.Effect, EffectStage.Acknowledged, done.Attempt);
                     break;
                 case EffectGaveUp gaveUp:
-                    _pending.Remove(gaveUp.Id);
+                    if (_pending.Remove(gaveUp.Id, out var closed))
+                        ObserveEffect(gaveUp.Id, closed.Effect, EffectStage.GaveUp, gaveUp.Attempts);
                     break;
                 default:
                     Apply((TEvent)entry);
                     applied = true;
+                    ObserveEvent(entry, trigger);
                     break;
             }
         }, onCompleteAsync: async () =>
@@ -1032,7 +1046,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
 
         var policy = pending.Policy?.ToPolicy();
         var retried = new EffectRetried(due.Sequence, due.Attempt, NextAttemptAt(_timeProvider.Now, policy, due.Attempt));
-        Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, [retried],
+        Commit(Decisions.None<TCommand, TEvent>(), origin, reminder: null, Trigger.None, [retried],
             then: () => StartAttempt(due.Sequence, origin));
     }
 
@@ -1047,8 +1061,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             return;
         }
 
-        var id = new EffectDelivery(
-            new EffectId($"{EntityType.Value}/{_entityId.Value}/{sequence}", sequence), pending.Attempt);
+        var id = new EffectDelivery(new EffectId(EffectIdText(sequence), sequence), pending.Attempt);
+        ObserveEffect(sequence, pending.Effect, EffectStage.AttemptStarted, pending.Attempt);
         var scope = _services.CreateAsyncScope();
         var services = scope.ServiceProvider;
         StartHandler(scope, ct => delivery.Invoke(services, id, ct), pending.Effect, origin, failed: null, sequence,
@@ -1200,26 +1214,34 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
                     break;
 
                 case ScheduleEffect schedule:
+                    var now = _timeProvider.Now;
+                    var due = now + schedule.Delay;
                     EnsureScheduled(await Reminders.ScheduleSingleReminderAsync(
                         new ReminderKey(schedule.Key),
-                        _timeProvider.Now + schedule.Delay,
+                        due,
                         schedule.Message,
                         ct: _lifetime.Token));
+                    ObserveTimer(schedule.Key, TimerStage.Set, due, now);
                     break;
 
                 case ScheduleRecurringEffect recurring:
+                    var started = _timeProvider.Now;
+                    var firstDue = started + recurring.InitialDelay;
                     EnsureScheduled(await Reminders.ScheduleRecurringReminderAsync(
                         new ReminderKey(recurring.Key),
-                        _timeProvider.Now + recurring.InitialDelay,
+                        firstDue,
                         recurring.Interval,
                         recurring.Message,
                         ct: _lifetime.Token));
+                    ObserveTimer(recurring.Key, TimerStage.Set, firstDue, started);
                     break;
 
                 case CancelTimerEffect cancel:
                     var cancelled = await Reminders.CancelReminderAsync(
                         new ReminderKey(cancel.Key), _lifetime.Token);
                     // Cancelling a reminder that doesn't exist is not an error.
+                    if (cancelled.ResponseCode is ReminderCancelResponseCode.Success)
+                        ObserveTimer(cancel.Key, TimerStage.Cancelled, due: null, _timeProvider.Now);
                     if (cancelled.ResponseCode is not (ReminderCancelResponseCode.Success
                         or ReminderCancelResponseCode.NotFound))
                     {
@@ -1438,6 +1460,110 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// implicit sender isn't reliably Self, and the shard identifies the entity by Sender.
     /// </remarks>
     private void Passivate() => Context.Parent.Tell(new Passivate(StopEntity.Instance), Self);
+
+    #endregion
+
+    #region Observers
+
+    /// <summary>What started a decision. The default is a plain command.</summary>
+    /// <param name="Kind">The kind of cause.</param>
+    /// <param name="Key">The key of the timer that fired.</param>
+    /// <param name="Sequence">The id of the effect whose answer it is.</param>
+    /// <param name="Command">The command that was decided. It stays a <typeparamref name="TCommand"/> until an observer needs it.</param>
+    /// <param name="HasCommand">False when the library decided without a command.</param>
+    private readonly record struct Trigger(CauseKind Kind, string? Key, long Sequence, TCommand? Command, bool HasCommand)
+    {
+        /// <summary>No command and no events: a write of library records only.</summary>
+        public static Trigger None => default;
+
+        /// <summary>The library's own work after recovery, decided with no command.</summary>
+        public static Trigger AfterRecovery => new(CauseKind.AfterRecovery, null, 0, default, false);
+
+        public static Trigger FromCommand(TCommand command) => new(CauseKind.Command, null, 0, command, true);
+
+        public static Trigger FromTimer(string key, TCommand command) => new(CauseKind.Timer, key, 0, command, true);
+
+        public static Trigger FromAnswer(long sequence, TCommand command) =>
+            new(CauseKind.EffectAnswer, null, sequence, command, true);
+    }
+
+    // The text of an effect's public id. Built from the journal sequence of its EffectIssued.
+    private string EffectIdText(long sequence) => $"{EntityType.Value}/{_entityId.Value}/{sequence}";
+
+    // Each Observe method checks for observers first, and builds nothing when there are none. The caller passes only
+    // values it already has.
+
+    /// <summary>Reports an event that the write just stored. LastSequenceNr is its number: call it from the persist handler.</summary>
+    private void ObserveEvent(object entry, Trigger trigger)
+    {
+        if (_observers.Length == 0) return;
+
+        var cause = trigger.Kind switch
+        {
+            CauseKind.Timer => new EventCause(CauseKind.Timer, trigger.Key),
+            CauseKind.EffectAnswer => new EventCause(CauseKind.EffectAnswer, EffectIdText(trigger.Sequence)),
+            CauseKind.AfterRecovery => new EventCause(CauseKind.AfterRecovery, null),
+            _ => new EventCause(CauseKind.Command, null),
+        };
+        var saved = new EventSaved(EntityType, _entityId, LastSequenceNr, Unwrap(entry)!,
+            trigger.HasCommand ? Unwrap(trigger.Command) : null, cause, _timeProvider.Now);
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                observer.EventSaved(in saved);
+            }
+            catch (Exception error)
+            {
+                LogObserverFailure(observer, error);
+            }
+        }
+    }
+
+    private void ObserveEffect(long sequence, object stored, EffectStage stage, int attempt)
+    {
+        if (_observers.Length == 0) return;
+
+        var observed = new EffectObserved(EntityType, _entityId, EffectIdText(sequence), PublicForm(stored), stage,
+            attempt, _timeProvider.Now);
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                observer.EffectMoved(in observed);
+            }
+            catch (Exception error)
+            {
+                LogObserverFailure(observer, error);
+            }
+        }
+    }
+
+    private void ObserveTimer(string key, TimerStage stage, DateTimeOffset? due, DateTimeOffset at)
+    {
+        // The library's own reminders (the wake of pending effects, a workflow's wake) are never reported.
+        if (_observers.Length == 0 || key.StartsWith(Handled<TCommand, TEvent>.ReservedKeyPrefix, StringComparison.Ordinal)) return;
+
+        var observed = new TimerObserved(EntityType, _entityId, key, stage, due, at);
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                observer.TimerMoved(in observed);
+            }
+            catch (Exception error)
+            {
+                LogObserverFailure(observer, error);
+            }
+        }
+    }
+
+    // A union is shown as the case it holds.
+    private static object? Unwrap(object? value) => value is IUnion { Value: { } inner } ? inner : value;
+
+    private void LogObserverFailure(IDurableObserver observer, Exception error) =>
+        _log.Warning(error, "Observer {0} threw for entity [{1}/{2}]. The entity is not affected.",
+            observer.GetType().Name, EntityType.Value, _entityId.Value);
 
     #endregion
 
