@@ -153,6 +153,35 @@ public sealed class PublishPaymentHandler(IBus bus)
 
 See [Effects](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/effects.md) for the other retry policies, and for `Execute` without a policy, which is attempted once and tells `Decide` how it ended. A workflow's work takes the same policies from the same registration: see [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md#retry-policies-on-work).
 
+## Feed a stream. Start a workflow per element.
+
+`Aaron.Akka.Durable.Streams` puts Akka.Streams stages over the refs. Every stage is bounded: you give it a `parallelism` and a `timeout`. A deadline that passes is an answer, `TimedOut`, and not a stream failure. Every output carries its input.
+
+```csharp
+orders
+    .Via(DurableFlow.Start(
+        checkouts,
+        (OrderMessage m) => (new WorkflowId(m.Order), new PlaceOrder(m.Order, m.Total)),
+        parallelism: 8,
+        timeout: TimeSpan.FromSeconds(5)))
+    .RunForeach(r =>
+    {
+        // No answer in time does not mean the start failed. The id comes from the order,
+        // so sending the order through again reaches the same workflow.
+        if (r.Answer is TimedOut or Failed)
+            retry(r.Input);
+    }, materializer);
+```
+
+`orders` is a `Source<OrderMessage, NotUsed>`: your queue. `Start` emits once the start is stored. It does not wait for the workflow to finish.
+
+- `DurableFlow.Ask` sends a command to an entity and emits its reply.
+- `DurableFlow.Notify` sends a fact to a running workflow and emits whether it was taken.
+- `DurableFlow.Until` waits until an entity's state, or a workflow's status, satisfies a condition. Use it after `Start` to wait for a short workflow.
+- `DurableSource.Watch` is one entity's or one workflow's state as a source.
+
+There is no fire and forget. See [Streams](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/streams.md) for each stage, what a timed-out answer means, and why the stream is not durable.
+
 ## Getting started
 
 Install the .NET 11 SDK pinned in `global.json`, then run:
@@ -168,6 +197,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 | Package | Contents |
 |---|---|
 | `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
+| `Aaron.Akka.Durable.Streams` | Akka.Streams flows and sources over the refs: start workflows, ask entities, notify workflows, wait for a state, and watch it. In the `Akka.Durable.Streams` namespace. |
 | `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
 ## Guide
@@ -188,6 +218,7 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Waiting for a state, and watching it](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/reading-state.md#waiting-for-a-state-and-watching-it) | `WaitForStateAsync` and `WatchStateAsync`, and what a state subscription guarantees. |
 | [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, retry policies on work, the fact table, and workflow refs. |
 | [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
+| [Streams](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/streams.md) | Akka.Streams stages for entities and workflows: `Start`, `Ask`, `Notify`, `Until` and `Watch`. Bounded, and a missed deadline is an answer. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
 | [Observing what entities do](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/observing-what-entities-do.md) | A read-only observer for telemetry and an audit trail, and the event stream publisher. |
 | [Headers beside a command](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/headers-beside-a-command.md) | Opaque headers that travel beside a command, are stored with recorded effects, and are restored before an effect handler runs: a request id for an audit trail or a trace. |

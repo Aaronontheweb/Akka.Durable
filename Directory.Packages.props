@@ -16,6 +16,7 @@
     <PackageVersion Include="Akka.Persistence.Hosting" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Reminders" Version="$(AkkaVersion)" />
     <PackageVersion Include="Akka.Serialization.V2" Version="$(AkkaVersion)" />
+    <PackageVersion Include="Akka.Streams" Version="$(AkkaVersion)" />
     <PackageVersion Include="FSharp.Core" Version="11.0.101" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
   </ItemGroup>
