@@ -30,31 +30,15 @@ public sealed record Shipment(string Number);
 
 public sealed record PrintLabel(string Shipment);
 
-public sealed record Rendering;
-public sealed record Sending;
-public readonly union LabelState(Rendering, Sending);
-
-public sealed record Rendered(string File);
-public sealed record Sent;
-public readonly union LabelFact(Rendered, Sent);
-
-public sealed record LabelReady(string File);
-public sealed record LabelRefused(string Reason);
-public readonly union LabelOutcome(LabelReady, LabelRefused);
+public sealed record LabelOutcome(string File);
 
 /// <summary>A request from a support tool to try an order again.</summary>
 public sealed record RetryRequest(string Order);
-
-public sealed record PackOrder;
-public readonly union OrderCommand(PackOrder);
 
 public sealed record Open;
 public sealed record Packed(string Carrier);
 public sealed record Arrived(string Carrier, string Tracking);
 public readonly union OrderState(Open, Packed, Arrived);
-
-public sealed record OrderPacked(string Carrier);
-public readonly union OrderEvent(OrderPacked);
 
 /// <summary>What a page shows about one order.</summary>
 public sealed record OrderView(string Status, string Detail)
@@ -167,8 +151,8 @@ public static class StreamDocSamples
 
     public static Task<Done> PrintLabels(
         Source<Shipment, NotUsed> shipments,
-        IWorkflowRefs<PrintLabel, LabelState, LabelFact, LabelOutcome> labels,
-        Sink<(Shipment Input, Answer<StateSnapshot<WorkflowStatus<LabelState, LabelOutcome>>> Answer), NotUsed> followUp,
+        IWorkflowRefs<PrintLabel, string, string, LabelOutcome> labels,
+        Sink<(Shipment Input, Answer<StateSnapshot<WorkflowStatus<string, LabelOutcome>>> Answer), NotUsed> followUp,
         Sink<Shipment, Task<Done>> attachToParcel,
         IMaterializer materializer)
     {
@@ -195,7 +179,7 @@ public static class StreamDocSamples
     }
 
     public static Task ShowOrder(
-        IDurableEntityRef<OrderCommand, OrderState, OrderEvent> order,
+        IDurableEntityRef<string, OrderState, string> order,
         Action<OrderView> publish,
         IMaterializer materializer)
     {

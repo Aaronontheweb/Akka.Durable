@@ -13,7 +13,7 @@ namespace Akka.Durable.Tests;
 /// The stage under every flow, on its own: no host, and calls made by hand. A test holds each call open until it
 /// ends it, so what the stage does with the calls is the only thing under test.
 /// </summary>
-public sealed class DurableStageSpecs : IAsyncLifetime
+public sealed class DurableStageSpecs : IAsyncDisposable
 {
     private static readonly TimeSpan MustHappen = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan Plenty = TimeSpan.FromMinutes(5);
@@ -21,8 +21,6 @@ public sealed class DurableStageSpecs : IAsyncLifetime
     private readonly ActorSystem _system = ActorSystem.Create("durable-stage-specs");
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
-
-    public ValueTask InitializeAsync() => ValueTask.CompletedTask;
 
     public async ValueTask DisposeAsync() => await _system.Terminate();
 

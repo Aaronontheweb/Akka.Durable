@@ -30,7 +30,6 @@ internal sealed class DurableStage<TIn, TOut> : GraphStage<FlowShape<TIn, (TIn I
 
     public DurableStage(Func<TIn, CancellationToken, Task<TOut>> call, int parallelism, TimeSpan timeout, bool ordered)
     {
-        ArgumentNullException.ThrowIfNull(call);
         ArgumentOutOfRangeException.ThrowIfLessThan(parallelism, 1);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
         // CancelAfter takes at most this many milliseconds.
@@ -140,8 +139,7 @@ internal sealed class DurableStage<TIn, TOut> : GraphStage<FlowShape<TIn, (TIn I
             }
             catch (OperationCanceledException) when (limit.IsCancellationRequested)
             {
-                if (_stopped)
-                    return;
+                // Either the deadline or the stage's own stop. After a stop the answer is dropped below.
                 answer = new TimedOut();
             }
             catch (Exception error)
@@ -156,9 +154,6 @@ internal sealed class DurableStage<TIn, TOut> : GraphStage<FlowShape<TIn, (TIn I
 
         private void Answered((Slot Slot, Answer<TOut> Answer) done)
         {
-            if (_stopped)
-                return;
-
             done.Slot.Result = done.Answer;
             if (!_stage._ordered)
                 _ready.Enqueue(done.Slot);

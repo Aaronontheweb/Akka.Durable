@@ -197,7 +197,7 @@ The solution targets `net11.0` and enables preview C# features (C# 15 unions are
 | Package | Contents |
 |---|---|
 | `Aaron.Akka.Durable` | Entity definitions, decisions and effects, entity refs, the entity runtime, and Akka.Hosting integration. Everything is in the `Akka.Durable` namespace. |
-| `Aaron.Akka.Durable.Streams` | Akka.Streams flows and sources over the refs: start workflows, ask entities, notify workflows, wait for a state, and watch it. In the `Akka.Durable.Streams` namespace |
+| `Aaron.Akka.Durable.Streams` | Akka.Streams flows and sources over the refs: start workflows, ask entities, notify workflows, wait for a state, and watch it. In the `Akka.Durable.Streams` namespace. |
 | `Aaron.Akka.Durable.TestKit` | Test helpers built on Akka.Hosting.TestKit, in the `Akka.Durable.TestKit` namespace |
 
 ## Guide

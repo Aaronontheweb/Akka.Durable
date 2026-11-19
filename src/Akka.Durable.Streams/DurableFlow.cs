@@ -6,31 +6,11 @@ namespace Akka.Durable.Streams;
 /// Flows that call entities and workflows, one call per element.
 /// </summary>
 /// <remarks>
-/// <para>Every flow follows the same rules.</para>
-/// <list type="number">
-/// <item>It is request and response. There is no fire and forget.</item>
-/// <item>
-/// It is bounded. At most <c>parallelism</c> elements are in flight, and upstream is pulled only when a slot is free.
-/// Each element has <c>timeout</c> to get its answer.
-/// </item>
-/// <item>
-/// A deadline that passed is an answer, <see cref="TimedOut"/>, and so is an exception for one element,
-/// <see cref="Failed"/>. The stream carries on with the next element.
-/// </item>
-/// <item>Every output carries its input, so that the next stage can retry it or route it aside.</item>
-/// <item>
-/// When an element's deadline passes, and when the stream stops for any reason, the cancellation token of the call is
-/// cancelled. A state wait then goes away at once.
-/// </item>
-/// <item>
-/// <see cref="Start"/>, <see cref="Ask"/> and <see cref="Notify"/> emit in the input's order. <see cref="Until"/> emits
-/// as each wait ends.
-/// </item>
-/// </list>
-/// <para>
-/// Calls begin on the stage's thread, in the input's order. So commands to the same entity are sent in the input's
-/// order.
-/// </para>
+/// Every flow is request and response, and bounded: at most <c>parallelism</c> elements are in flight, and each has
+/// <c>timeout</c> to get its answer. A deadline that passes is the answer <see cref="TimedOut"/>, and an exception
+/// for one element is <see cref="Failed"/>. The stream carries on. Every output carries its input. When a deadline
+/// passes, and when the stream stops, the cancellation token of the call is cancelled.
+/// Calls begin on the stage's thread, in the input's order. See the Streams page of the guide.
 /// </remarks>
 public static class DurableFlow
 {
