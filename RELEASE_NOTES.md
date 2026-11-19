@@ -1,3 +1,14 @@
+#### 0.1.0-alpha.10 November 19th 2026 ####
+
+**A read-only observer for what entities do.** `IDurableObserver` sees what entities and workflows do. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **`IDurableObserver`** sees each saved event, with the command that decided it and what started the decision: a command, a timer, the answer of a recorded effect, or the library's work after recovery. It sees each stage of a recorded effect: issued, attempt started, acknowledged and gave up. It sees each timer that is set, cancelled or fired. Register an observer with `AddDurableObserver<T>()`.
+* **`AddDurableEventStreamPublisher()`** publishes the same observations to the actor system's event stream. Subscribe to `IDurableObservation`.
+* **The observer is read-only.** It is called after the journal write. It is never called while an entity recovers. An observer that throws is logged, and it cannot affect the entity.
+* **A new guide page,** "Observing what entities do", has a telemetry example and an audit trail example.
+
+**What you change from 0.1.0-alpha.9:** nothing. Nothing on the wire or in storage changes, so no migration is needed.
+
 #### 0.1.0-alpha.9 November 18th 2026 ####
 
 **Akka.NET 1.6.0-beta8 and the official `Akka.Reminders` package.** Akka.Durable now depends on `Akka.Reminders`, which ships with Akka.NET from 1.6.0-beta8 on, in place of `Aaron.Akka.Reminders`. No API of Akka.Durable changes. Akka.Durable is still a proof of concept, not an official Akka.NET project.
