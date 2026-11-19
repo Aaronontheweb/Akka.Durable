@@ -104,4 +104,4 @@ public class InvoiceSpecs(ITestOutputHelper output) : DurableEntityTestKit(outpu
 
 ---
 
-Next: [Status and direction](status.md)
+Next: [Observing what entities do](observing-what-entities-do.md)

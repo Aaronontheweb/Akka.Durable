@@ -7,14 +7,19 @@
     <LangVersion>preview</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.1.0-alpha.8</VersionPrefix>
-    <PackageReleaseNotes>**Fix: an entity host is no longer refused at start because of another entity's effect.** This fault was new in 0.1.0-alpha.7. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+    <VersionPrefix>0.1.0-alpha.11</VersionPrefix>
+    <PackageReleaseNotes>**Headers beside a command.** A few opaque strings travel beside a command, so an application can say which request a chain of work belongs to without putting that into its command and event types. Akka.Durable is still a proof of concept, not an official Akka.NET project.
 
-* **The fault.** At host start, each entity type checked every effect handler with no answer, in the whole container. A host that runs one entity type was refused when the container also held a no-answer handler for an effect of another entity type, and the host did not register that other type's serializer. The error named the entity type that was starting, not the one that issues the effect. A test host that runs one entity with a shared set of handlers hit this.
-* **At start, an entity type now checks only the effects whose handler answers with its own command type.** Their owner is certain.
-* **An effect whose handler has no answer, and that has no serializer of its own,** is refused at the issuing entity's first `Execute` of it, before anything is written. The error names that entity type, the effect and the line to add. A missing `GaveUp` is refused in the same place. This check applies to entities hosted with `WithDurableEntity`.
+* **`IHeaderPropagator`.** `Inject` adds headers at every send. The library carries them, stores them with each recorded effect, and calls `Restore` before an effect handler runs, also for a retry and after a restart. `InjectForTimer` lets an application mark a chain that one of an entity's own timers started. Register one with `AddDurableHeaderPropagator&lt;T&gt;()`. `Decide`, `Evolve` and effect handlers never see headers.
+* **`Headers` on the observations.** `EventSaved`, `EffectObserved` and `TimerObserved` have a new `Headers` member.
+* **Fix: a timer whose command `Decide` stashed was reported as `Fired` twice.** It is now reported once, when its command is decided.
+* **New guide page,** "Headers beside a command".
 
-**What you change from 0.1.0-alpha.7:** nothing. Nothing stored changes.</PackageReleaseNotes>
+**What you change from 0.1.0-alpha.10:** three things.
+
+1. Code that constructs `EventSaved`, `EffectObserved` or `TimerObserved` itself (tests, usually) passes the new `Headers` member. Observers that only read them need no change.
+2. Roll out in two steps if you use headers in a cluster. First run this version on every node. Only then register a propagator, because a node on an older version cannot read a command that carries headers.
+3. Nothing to migrate in storage. Each recorded effect gains one new field. Records written before it still read, and an older version skips the field.</PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Target framework definitions. Projects should reference these instead of hardcoding a TFM:

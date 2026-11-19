@@ -22,12 +22,14 @@ namespace Akka.Durable;
 /// When the next attempt is due if attempt 1 gets no answer: its start, plus the time limit, plus the policy's wait.
 /// Without a policy: when the attempt counts as interrupted.
 /// </param>
+/// <param name="Headers">The headers of the decision that issued it. Null when it had none, and in a record written before this field existed.</param>
 [AkkaSerializable(Manifest = "durable-effect-issued-v1")]
 internal sealed record EffectIssued(
     [property: AkkaField(0)] object Effect,
     [property: AkkaField(1)] DateTimeOffset IssuedAt,
     [property: AkkaField(2)] StoredPolicy? Policy = null,
-    [property: AkkaField(3)] DateTimeOffset NextAt = default) : IDurableEntityProtocol, IDurableJournalRecord;
+    [property: AkkaField(3)] DateTimeOffset NextAt = default,
+    [property: AkkaField(4)] ImmutableDictionary<string, string>? Headers = null) : IDurableEntityProtocol, IDurableJournalRecord;
 
 /// <summary>Attempt <paramref name="Attempt"/> of the effect <paramref name="Id"/> starts. Journaled before it runs.</summary>
 /// <param name="Id">The sequence number of the effect's <see cref="EffectIssued"/>.</param>
@@ -85,6 +87,7 @@ internal sealed record StoredPolicy(
 /// <param name="Policy">The retry policy it was issued with. Null: one attempt.</param>
 /// <param name="Attempt">The number of the last attempt that started.</param>
 /// <param name="NextAt">When the next attempt is due if the last one gets no answer.</param>
+/// <param name="Headers">The headers of the decision that issued it. Null when it had none, and in a record written before this field existed.</param>
 [AkkaSerializable(Manifest = "durable-pending-effect-v1")]
 internal sealed record PendingEffect(
     [property: AkkaField(0)] long Sequence,
@@ -92,7 +95,8 @@ internal sealed record PendingEffect(
     [property: AkkaField(2)] DateTimeOffset IssuedAt,
     [property: AkkaField(3)] StoredPolicy? Policy = null,
     [property: AkkaField(4)] int Attempt = 1,
-    [property: AkkaField(5)] DateTimeOffset NextAt = default) : IDurableEntityProtocol;
+    [property: AkkaField(5)] DateTimeOffset NextAt = default,
+    [property: AkkaField(6)] ImmutableDictionary<string, string>? Headers = null) : IDurableEntityProtocol;
 
 /// <summary>
 /// The payload of the entity's one reminder for its pending effects. It wakes the entity after a crash, a passivation

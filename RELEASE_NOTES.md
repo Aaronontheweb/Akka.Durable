@@ -1,3 +1,45 @@
+#### 0.1.0-alpha.11 November 19th 2026 ####
+
+**Headers beside a command.** A few opaque strings travel beside a command, so an application can say which request a chain of work belongs to without putting that into its command and event types. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **`IHeaderPropagator`.** `Inject` adds headers at every send. The library carries them, stores them with each recorded effect, and calls `Restore` before an effect handler runs, also for a retry and after a restart. `InjectForTimer` lets an application mark a chain that one of an entity's own timers started. Register one with `AddDurableHeaderPropagator<T>()`. `Decide`, `Evolve` and effect handlers never see headers.
+* **`Headers` on the observations.** `EventSaved`, `EffectObserved` and `TimerObserved` have a new `Headers` member.
+* **Fix: a timer whose command `Decide` stashed was reported as `Fired` twice.** It is now reported once, when its command is decided.
+* **New guide page,** "Headers beside a command".
+
+**What you change from 0.1.0-alpha.10:** three things.
+
+1. Code that constructs `EventSaved`, `EffectObserved` or `TimerObserved` itself (tests, usually) passes the new `Headers` member. Observers that only read them need no change.
+2. Roll out in two steps if you use headers in a cluster. First run this version on every node. Only then register a propagator, because a node on an older version cannot read a command that carries headers.
+3. Nothing to migrate in storage. Each recorded effect gains one new field. Records written before it still read, and an older version skips the field.
+
+#### 0.1.0-alpha.10 November 19th 2026 ####
+
+**A read-only observer for what entities do.** `IDurableObserver` sees what entities and workflows do. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **`IDurableObserver`** sees each saved event, with the command that decided it and what started the decision: a command, a timer, the answer of a recorded effect, or the library's work after recovery. It sees each stage of a recorded effect: issued, attempt started, acknowledged and gave up. It sees each timer that is set, cancelled or fired. Register an observer with `AddDurableObserver<T>()`.
+* **`AddDurableEventStreamPublisher()`** publishes the same observations to the actor system's event stream. Subscribe to `IDurableObservation`.
+* **The observer is read-only.** It is called after the journal write. It is never called while an entity recovers. An observer that throws is logged, and it cannot affect the entity.
+* **A new guide page,** "Observing what entities do", has a telemetry example and an audit trail example.
+
+**What you change from 0.1.0-alpha.9:** nothing. Nothing on the wire or in storage changes, so no migration is needed.
+
+#### 0.1.0-alpha.9 November 18th 2026 ####
+
+**Akka.NET 1.6.0-beta8 and the official `Akka.Reminders` package.** Akka.Durable now depends on `Akka.Reminders`, which ships with Akka.NET from 1.6.0-beta8 on, in place of `Aaron.Akka.Reminders`. No API of Akka.Durable changes. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **The Akka.NET packages are 1.6.0-beta8.**
+* **`Akka.Reminders` replaces `Aaron.Akka.Reminders`.** Only the package id is different. The assembly name and the namespaces are the same, so no `using` line changes.
+* **Akka.Durable does not use the new retry setting of a reminder** (`ReminderRetryPolicy.UntilAcknowledged`, new in Akka.Reminders 1.6.0-beta8). Its reminders are delivered as before.
+
+**What you change from 0.1.0-alpha.8:** three steps.
+
+1. Replace each `Aaron.Akka.Reminders` package with the `Akka.Reminders` package of the same kind, at 1.6.0-beta8. For example, `Aaron.Akka.Reminders.SqlServer` becomes `Akka.Reminders.SqlServer`. Do not keep both: the two families ship an assembly with the same name.
+2. Move your other Akka.NET packages to 1.6.0-beta8.
+3. Let the reminder store update its schema. Akka.Reminders 1.6.0-beta8 adds one column to the reminder table, for the retry setting. Reminders that are already stored are kept. When the store creates its own schema at start, it adds the column. When your application's database login cannot change the schema, add the column before you deploy. The Akka.NET 1.6.0-beta8 release notes have the details.
+
+Nothing that Akka.Durable stores changes.
+
 #### 0.1.0-alpha.8 November 13th 2026 ####
 
 **Fix: an entity host is no longer refused at start because of another entity's effect.** This fault was new in 0.1.0-alpha.7. Akka.Durable is still a proof of concept, not an official Akka.NET project.

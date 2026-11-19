@@ -6,6 +6,8 @@
     <File Path="NuGet.Config" />
     <File Path="README.md" />
   </Folder>
+  <Project Path="samples/AuditTrail.Tests/Akka.Durable.Samples.AuditTrail.Tests.csproj" />
+  <Project Path="samples/AuditTrail/Akka.Durable.Samples.AuditTrail.csproj" />
   <Project Path="src/Akka.Durable/Akka.Durable.csproj" />
   <Project Path="src/Akka.Durable.Streams/Akka.Durable.Streams.csproj" />
   <Project Path="src/Akka.Durable.TestKit/Akka.Durable.TestKit.csproj" />
