@@ -51,9 +51,7 @@ public static class DurableEntityHostingExtensions
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
         services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
         services.TryAddSingleton(typeof(IWorkflowRefs<,,,>), typeof(WorkflowRefs<,,,>));
-
-        // The propagators registered with AddDurableHeaderPropagator, found when the first ref is made.
-        services.TryAddSingleton(provider => HeaderPropagation.From(provider));
+        HeaderPropagation.Register(services);
         AddEffectRoutes(services);
         return services;
     }

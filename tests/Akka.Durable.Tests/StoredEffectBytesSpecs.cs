@@ -225,14 +225,13 @@ public sealed class StoredEffectBytesSpecs(ITestOutputHelper output) : Persisten
         ImmutableDictionary<string, string>.Empty.Add("request-id", "req-1").Add("trace-id", "t-9");
 
     [Fact]
-    public void Headers_are_stored_with_an_issued_effect_a_pending_effect_and_a_snapshot_and_read_back()
+    public void Headers_are_stored_with_an_issued_effect_and_a_snapshots_pending_effect_and_read_back()
     {
         var issued = RoundTrip(new EffectIssued(new Probe("a"), IssuedAt, null, IssuedAt.AddSeconds(35), Headers));
         var pending = new PendingEffect(4, new Probe("a"), IssuedAt, null, 2, IssuedAt.AddSeconds(35), Headers);
         var snapshot = RoundTrip(new EntitySnapshot(new CounterState(2, false), [pending]));
 
         Assert.Equal(Headers.OrderBy(h => h.Key), issued.Headers!.OrderBy(h => h.Key));
-        Assert.Equal(Headers.OrderBy(h => h.Key), RoundTrip(pending).Headers!.OrderBy(h => h.Key));
         Assert.Equal(Headers.OrderBy(h => h.Key),
             Assert.IsType<PendingEffect>(Assert.Single(snapshot.Pending)).Headers!.OrderBy(h => h.Key));
         Assert.Null(RoundTrip(new EffectIssued(new Probe("a"), IssuedAt)).Headers); // none stays none

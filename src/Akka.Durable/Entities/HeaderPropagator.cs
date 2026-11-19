@@ -3,6 +3,7 @@ using Akka.Actor;
 using Akka.Event;
 using Akka.Serialization.V2;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Akka.Durable;
 
@@ -47,14 +48,8 @@ public interface IHeaderPropagator
     /// A timer of an entity fired. Add the headers that the decision it starts should carry. Add nothing for none.
     /// </summary>
     /// <remarks>
-    /// <para>Called on the entity's thread, just before the command that the timer delivers is decided. The headers
-    /// are then the decision's headers, exactly like headers that arrived with a command: they are reported with the
-    /// event, stored with the effects the decision issues, passed on by <c>Send</c>, restored for effect handlers and
-    /// inherited by the answers of those effects. Use it to mark a chain that started at a timer, so nobody mistakes it
-    /// for a send that lost its headers.</para>
-    /// <para>Only the entity's own timers are reported: never the library's own reminders, whose keys start with
-    /// <c>durable-</c>. The headers of the command that set the timer are not carried, and nothing about the stored
-    /// reminder changes. The default does nothing. Keep it quick and do not block.</para>
+    /// Called on the entity's thread, just before that decision, and never for the library's own reminders, whose keys
+    /// start with <c>durable-</c>. The default does nothing.
     /// </remarks>
     /// <param name="entityType">The type of the entity.</param>
     /// <param name="entityId">The id of the entity.</param>
@@ -66,10 +61,7 @@ public interface IHeaderPropagator
 /// <summary>Registers header propagators.</summary>
 public static class DurableHeaderExtensions
 {
-    /// <summary>
-    /// Registers <typeparamref name="TPropagator"/> as a header propagator. It is a singleton. Call it again to add
-    /// more propagators: they are called in the order added, and when two add the same key, the later one wins.
-    /// </summary>
+    /// <summary>Registers <typeparamref name="TPropagator"/> as a header propagator. It is a singleton.</summary>
     /// <remarks>
     /// Registering a propagator is what makes this node send headers. Before you do, every node of the cluster must
     /// run a version of Akka.Durable that understands them. See the guide page "Headers beside a command".
@@ -80,6 +72,7 @@ public static class DurableHeaderExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         services.AddSingleton<IHeaderPropagator, TPropagator>();
+        HeaderPropagation.Register(services);
         return services;
     }
 }
@@ -117,7 +110,14 @@ internal sealed class HeaderPropagation
         _services = services;
     }
 
-    public static HeaderPropagation From(IServiceProvider services)
+    /// <summary>
+    /// Registers the one instance that refs and entity actors share. Called by <c>AddDurableEntities</c> and by
+    /// <c>AddDurableHeaderPropagator</c>, so it exists whichever is called.
+    /// </summary>
+    public static void Register(IServiceCollection services) =>
+        services.TryAddSingleton(provider => From(provider));
+
+    private static HeaderPropagation From(IServiceProvider services)
     {
         var found = services.GetServices<IHeaderPropagator>().ToArray();
         return found.Length == 0 ? None : new HeaderPropagation(found, services);
@@ -131,72 +131,21 @@ internal sealed class HeaderPropagation
     {
         if (_propagators.Length == 0) return command;
 
-        var headers = Inject();
+        var headers = Collect(static (propagator, own) => propagator.Inject(own), nameof(IHeaderPropagator.Inject),
+            "The command is sent without its headers.", log: null);
         return headers is null ? command : new Carried(command, headers);
     }
 
-    /// <summary>Asks every propagator for the headers of a command that is about to be sent. Null when there are none.</summary>
-    private ImmutableDictionary<string, string>? Inject()
-    {
-        Dictionary<string, string>? merged = null;
-        foreach (var propagator in _propagators)
-        {
-            // Each propagator gets its own dictionary, so one that throws half way adds nothing.
-            var own = new Dictionary<string, string>();
-            try
-            {
-                propagator.Inject(own);
-            }
-            catch (Exception error)
-            {
-                SystemLog.Warning(error, "Header propagator {0} threw in Inject. The command is sent without its headers.",
-                    propagator.GetType().Name);
-                continue;
-            }
-
-            foreach (var (key, value) in own)
-            {
-                if (string.IsNullOrEmpty(key) || value is null) continue;
-                (merged ??= [])[key] = value;
-            }
-        }
-
-        return merged?.ToImmutableDictionary();
-    }
-
     /// <summary>
-    /// Asks every propagator for the headers of the decision that a fired timer starts. Null when there are none. Called
-    /// on the entity's thread, so it logs with the entity's logger.
+    /// Asks every propagator for the headers of the decision that a fired timer starts. Null when there are none.
+    /// Called on the entity's thread, so it logs with the entity's logger.
     /// </summary>
     public ImmutableDictionary<string, string>? InjectForTimer(
-        EntityTypeName entityType, EntityId entityId, string key, ILoggingAdapter log)
-    {
-        if (_propagators.Length == 0) return null;
-
-        Dictionary<string, string>? merged = null;
-        foreach (var propagator in _propagators)
-        {
-            var own = new Dictionary<string, string>();
-            try
-            {
-                propagator.InjectForTimer(entityType, entityId, key, own);
-            }
-            catch (Exception error)
-            {
-                log.Warning(error, "Header propagator {0} threw in InjectForTimer. The timer's decision has none of its headers.",
-                    propagator.GetType().Name);
-                continue;
-            }
-
-            foreach (var (name, value) in own)
-            {
-                if (string.IsNullOrEmpty(name) || value is null) continue;
-                (merged ??= [])[name] = value;
-            }
-        }
-
-        return merged?.ToImmutableDictionary();
-    }
+        EntityTypeName entityType, EntityId entityId, string key, ILoggingAdapter log) =>
+        _propagators.Length == 0
+            ? null
+            : Collect((propagator, own) => propagator.InjectForTimer(entityType, entityId, key, own),
+                nameof(IHeaderPropagator.InjectForTimer), "The timer's decision has none of its headers.", log);
 
     /// <summary>
     /// Calls <see cref="IHeaderPropagator.Restore"/> of each propagator. Dispose the result when the work has finished.
@@ -223,7 +172,41 @@ internal sealed class HeaderPropagation
         return undo is null ? null : new Undo(undo, log);
     }
 
-    public bool Any => _propagators.Length > 0;
+    /// <summary>
+    /// Calls each propagator with its own dictionary, so one that throws half way adds nothing, and merges what they
+    /// add in order: a later one wins on the same key. Null values and empty keys are dropped.
+    /// </summary>
+    /// <param name="call">The call to make on a propagator.</param>
+    /// <param name="what">The name of the member, for the log.</param>
+    /// <param name="consequence">What a failure costs, for the log.</param>
+    /// <param name="log">The entity's logger, or null for the actor system's.</param>
+    private ImmutableDictionary<string, string>? Collect(
+        Action<IHeaderPropagator, IDictionary<string, string>> call, string what, string consequence, ILoggingAdapter? log)
+    {
+        Dictionary<string, string>? merged = null;
+        foreach (var propagator in _propagators)
+        {
+            var own = new Dictionary<string, string>();
+            try
+            {
+                call(propagator, own);
+            }
+            catch (Exception error)
+            {
+                (log ?? SystemLog).Warning(error, "Header propagator {0} threw in {1}. {2}",
+                    propagator.GetType().Name, what, consequence);
+                continue;
+            }
+
+            foreach (var (name, value) in own)
+            {
+                if (string.IsNullOrEmpty(name) || value is null) continue;
+                (merged ??= [])[name] = value;
+            }
+        }
+
+        return merged?.ToImmutableDictionary();
+    }
 
     private ILoggingAdapter SystemLog => _systemLog ??= _services!.GetRequiredService<ActorSystem>().Log;
 

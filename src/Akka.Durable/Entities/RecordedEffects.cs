@@ -22,10 +22,7 @@ namespace Akka.Durable;
 /// When the next attempt is due if attempt 1 gets no answer: its start, plus the time limit, plus the policy's wait.
 /// Without a policy: when the attempt counts as interrupted.
 /// </param>
-/// <param name="Headers">
-/// The headers of the decision that issued it, or null when it had none. Every attempt restores them, and an effect
-/// issued while deciding this effect's answer inherits them. Null in a record written before this field existed.
-/// </param>
+/// <param name="Headers">The headers of the decision that issued it. Null when it had none, and in a record written before this field existed.</param>
 [AkkaSerializable(Manifest = "durable-effect-issued-v1")]
 internal sealed record EffectIssued(
     [property: AkkaField(0)] object Effect,
@@ -90,10 +87,7 @@ internal sealed record StoredPolicy(
 /// <param name="Policy">The retry policy it was issued with. Null: one attempt.</param>
 /// <param name="Attempt">The number of the last attempt that started.</param>
 /// <param name="NextAt">When the next attempt is due if the last one gets no answer.</param>
-/// <param name="Headers">
-/// The headers of the decision that issued it, copied from its <see cref="EffectIssued"/>. Null when it had none, and
-/// in a snapshot written before this field existed.
-/// </param>
+/// <param name="Headers">The headers of the decision that issued it. Null when it had none, and in a record written before this field existed.</param>
 [AkkaSerializable(Manifest = "durable-pending-effect-v1")]
 internal sealed record PendingEffect(
     [property: AkkaField(0)] long Sequence,

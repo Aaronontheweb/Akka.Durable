@@ -92,17 +92,7 @@ public readonly record struct EventSaved(
     object? Command,
     EventCause Cause,
     DateTimeOffset At,
-    IReadOnlyDictionary<string, string> Headers) : IDurableObservation
-{
-    private readonly IReadOnlyDictionary<string, string>? _headers = Headers is { Count: > 0 } ? Headers : null;
-
-    /// <summary>The headers. Empty when there are none. Never null.</summary>
-    public IReadOnlyDictionary<string, string> Headers
-    {
-        get => _headers ?? DurableHeaders.None;
-        init => _headers = value is { Count: > 0 } ? value : null;
-    }
-}
+    IReadOnlyDictionary<string, string> Headers) : IDurableObservation;
 
 /// <summary>The stage of a recorded effect.</summary>
 public enum EffectStage
@@ -140,17 +130,7 @@ public readonly record struct EffectObserved(
     EffectStage Stage,
     int Attempt,
     DateTimeOffset At,
-    IReadOnlyDictionary<string, string> Headers) : IDurableObservation
-{
-    private readonly IReadOnlyDictionary<string, string>? _headers = Headers is { Count: > 0 } ? Headers : null;
-
-    /// <summary>The headers. Empty when there are none. Never null.</summary>
-    public IReadOnlyDictionary<string, string> Headers
-    {
-        get => _headers ?? DurableHeaders.None;
-        init => _headers = value is { Count: > 0 } ? value : null;
-    }
-}
+    IReadOnlyDictionary<string, string> Headers) : IDurableObservation;
 
 /// <summary>What happened to a timer.</summary>
 public enum TimerStage
@@ -185,23 +165,7 @@ public readonly record struct TimerObserved(
     TimerStage Stage,
     DateTimeOffset? Due,
     DateTimeOffset At,
-    IReadOnlyDictionary<string, string> Headers) : IDurableObservation
-{
-    private readonly IReadOnlyDictionary<string, string>? _headers = Headers is { Count: > 0 } ? Headers : null;
-
-    /// <summary>The headers. Empty when there are none. Never null.</summary>
-    public IReadOnlyDictionary<string, string> Headers
-    {
-        get => _headers ?? DurableHeaders.None;
-        init => _headers = value is { Count: > 0 } ? value : null;
-    }
-}
-
-/// <summary>The one empty set of headers that observations share.</summary>
-internal static class DurableHeaders
-{
-    public static readonly IReadOnlyDictionary<string, string> None = System.Collections.Immutable.ImmutableDictionary<string, string>.Empty;
-}
+    IReadOnlyDictionary<string, string> Headers) : IDurableObservation;
 
 /// <summary>Registers observers of durable entities.</summary>
 public static class DurableObserverExtensions

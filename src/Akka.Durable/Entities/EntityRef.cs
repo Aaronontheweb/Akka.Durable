@@ -7,12 +7,6 @@ namespace Akka.Durable;
 /// Logical reference to one entity. Messages go through the entity type's shard region or local host,
 /// which create the entity on demand and buffer messages while it passivates.
 /// </summary>
-/// <param name="id">The entity.</param>
-/// <param name="region">The entity type's shard region or local host.</param>
-/// <param name="headers">
-/// The header propagators. With none registered, the bare command is sent, as it always was. Otherwise they are asked,
-/// on the caller's thread, for the headers that travel beside it.
-/// </param>
 internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region, HeaderPropagation headers) : IEntityRef<TCommand>
 {
     public EntityId Id => id;
@@ -34,7 +28,6 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region, HeaderP
 /// <param name="id">The entity.</param>
 /// <param name="region">The entity type's shard region or local host.</param>
 /// <param name="system">The actor system this ref is used in. State subscriptions run a watcher actor in it.</param>
-/// <param name="headers">The header propagators. State reads carry no headers.</param>
 internal sealed class EntityRef<TCommand, TState, TEvent>(
     EntityId id, IActorRef region, ActorSystem system, HeaderPropagation headers)
     : IDurableEntityRef<TCommand, TState, TEvent>

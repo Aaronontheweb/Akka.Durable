@@ -57,9 +57,6 @@ public sealed class HeaderHostingSpecs(ITestOutputHelper output) : DurableEntity
     private RequestIdPropagator Propagator =>
         Host.Services.GetServices<IHeaderPropagator>().OfType<RequestIdPropagator>().Single();
 
-    private static void AssertRequest(string expected, IReadOnlyDictionary<string, string> headers) =>
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, expected)], headers.ToArray());
-
     [Fact]
     public async Task Headers_injected_at_a_send_reach_the_entity_and_ride_through_an_effect_to_a_second_entity()
     {
@@ -76,15 +73,15 @@ public sealed class HeaderHostingSpecs(ITestOutputHelper output) : DurableEntity
         var events = Seen.Events;
         var ordersEvents = events.Where(e => e.EntityType == Orders.Definition.TypeName).ToArray();
         Assert.Equal(["OrderOpened", "StockRequested", "StockConfirmed"], ordersEvents.Select(e => e.Event.GetType().Name));
-        Assert.All(ordersEvents, e => AssertRequest("req-h", e.Headers)); // the last is decided on the answer
+        Assert.All(ordersEvents, e => HeaderAssert.Request("req-h", e.Headers)); // the last is decided on the answer
 
         // The handler had them restored, and its own call to the second entity picked them up again.
         var shipment = Assert.Single(events, e => e.EntityType == Shipments.Definition.TypeName);
         Assert.IsType<ShipmentCreated>(shipment.Event);
-        AssertRequest("req-h", shipment.Headers);
+        HeaderAssert.Request("req-h", shipment.Headers);
         Assert.Equal(["req-h"], Host.Services.GetRequiredService<RequestSightings>().Seen);
-        AssertRequest("req-h", Assert.Single(Propagator.Restored));
-        Assert.All(Seen.Effects, e => AssertRequest("req-h", e.Headers));
+        HeaderAssert.Request("req-h", Assert.Single(Propagator.Restored));
+        Assert.All(Seen.Effects, e => HeaderAssert.Request("req-h", e.Headers));
         await AwaitAssertAsync(() => Assert.Equal(0, Propagator.Open), cancellationToken: TestCancellation);
     }
 }
@@ -107,9 +104,6 @@ public sealed class HeaderWorkflowSpecs(ITestOutputHelper output) : BumpWorkflow
 
     private EventSaved[] WorkflowEvents => [.. Seen.Events.Where(e => e.EntityType.Value == Bump.Definition.TypeName.Value)];
 
-    private static void AssertRequest(string expected, IReadOnlyDictionary<string, string> headers) =>
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, expected)], headers.ToArray());
-
     [Fact]
     public async Task A_workflow_that_is_started_with_headers_carries_them_into_its_work_and_the_command_that_work_sends()
     {
@@ -120,11 +114,11 @@ public sealed class HeaderWorkflowSpecs(ITestOutputHelper output) : BumpWorkflow
 
         // The start, and the fact that the railway's reply became: each decided with the headers of the start.
         Assert.Equal(["WfStarted", "WfFactRecorded"], WorkflowEvents.Select(e => e.Event.GetType().Name));
-        Assert.All(WorkflowEvents, e => AssertRequest("req-w", e.Headers));
+        Assert.All(WorkflowEvents, e => HeaderAssert.Request("req-w", e.Headers));
 
         // The work ran with them restored, and its Send to the railway picked them up again.
         var railway = Assert.Single(Seen.Events, e => e.EntityType == Railway.Definition.TypeName);
-        AssertRequest("req-w", railway.Headers);
+        HeaderAssert.Request("req-w", railway.Headers);
     }
 
     [Fact]
@@ -140,7 +134,7 @@ public sealed class HeaderWorkflowSpecs(ITestOutputHelper output) : BumpWorkflow
             // After the restart the interrupted work gives up as a fact. The library decided it, not a command with headers.
             await AwaitAssertAsync(() => Assert.Equal(["WfStarted", "WfFactRecorded"],
                 WorkflowEvents.Select(e => e.Event.GetType().Name)), cancellationToken: TestCancellation);
-            AssertRequest("req-r", WorkflowEvents[0].Headers);
+            HeaderAssert.Request("req-r", WorkflowEvents[0].Headers);
             Assert.Empty(WorkflowEvents[1].Headers);
         }
         finally
@@ -183,12 +177,12 @@ public sealed class HeaderEntityCallsSpecs(ITestOutputHelper output) : EntityCal
         var seen = Host.Services.GetRequiredService<Observations>();
         var started = Assert.Single(seen.Effects, e => e.Stage == EffectStage.Issued);
         Assert.IsType<StartWorkflow>(started.Effect);
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, "req-b")], started.Headers.ToArray());
+        HeaderAssert.Is(RequestIdPropagator.Key, "req-b", started.Headers);
 
         // The library delivered the call with them restored, so the workflow's start carries them too.
         var campaign = Assert.Single(seen.Events, e => e.EntityType.Value == Campaign.Definition.TypeName.Value);
         Assert.IsType<WfStarted>(campaign.Event);
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, "req-b")], campaign.Headers.ToArray());
+        HeaderAssert.Is(RequestIdPropagator.Key, "req-b", campaign.Headers);
     }
 }
 
@@ -230,13 +224,13 @@ public sealed class HeaderSendSpecs(ITestOutputHelper output) : DurableEntityTes
 
         // The counter got the increment with the headers of the command that the tally was handling.
         var counted = Assert.Single(events, e => e.EntityType == Counter.TypeName);
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, "req-s")], counted.Headers.ToArray());
+        HeaderAssert.Is(RequestIdPropagator.Key, "req-s", counted.Headers);
 
         // The tally decided its start with them. Its end is decided on the counter's reply, which carried none over the
         // wire, and keeps the headers of the decision that issued the Send, so the chain goes on.
         var tally = events.Where(e => e.EntityType == Tally.TypeName).ToArray();
         Assert.Equal(["TallyStarted", "TallyFinished"], tally.Select(e => e.Event.GetType().Name));
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, "req-s")], tally[0].Headers.ToArray());
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, "req-s")], tally[1].Headers.ToArray());
+        HeaderAssert.Is(RequestIdPropagator.Key, "req-s", tally[0].Headers);
+        HeaderAssert.Is(RequestIdPropagator.Key, "req-s", tally[1].Headers);
     }
 }

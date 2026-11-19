@@ -63,8 +63,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     // The observers registered in DI, in registration order. Empty when there are none, which every call site checks first.
     private readonly IDurableObserver[] _observers;
 
-    // The header propagators registered in DI, in registration order. None when there are none: then no header is
-    // injected or restored. Headers that arrive are carried and stored all the same.
+    // The header propagators registered in DI, in registration order. None when there are none.
     private readonly HeaderPropagation _headerPropagation;
 
     private long _lastSnapshotSequenceNr;
@@ -111,7 +110,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         _options = definition.Options ?? EntityOptions.Default;
         _routes = services.GetService<EffectRoutes>() ?? EffectRoutes.Empty;
         _observers = [.. services.GetServices<IDurableObserver>()];
-        _headerPropagation = HeaderPropagation.From(services);
+        _headerPropagation = services.GetService<HeaderPropagation>() ?? HeaderPropagation.None;
 
         _log = Context.GetLogger()
             .WithContext("EntityType", definition.TypeName.Value)
@@ -334,16 +333,14 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Command<GetPendingEffects>(_ =>
             Sender.Tell(new PendingEffectsReply([.. _pending.Values.Select(pending => PublicForm(pending.Effect))])));
 
-        // A command that travels with headers. Must precede Command<TCommand>, so it is unwrapped and never mistaken
-        // for a message that is not a command.
+        // Before Command<TCommand>: a command that travels with headers is unwrapped here.
         Command<Carried>(carried => HandleForeign(carried.Command, Sender, carried.Headers));
 
         Command<TCommand>(command => HandleCommand(command, Sender, reminder: null, headers: null));
         Command<EffectCompleted>(HandleEffectCompleted);
         Command<RetryDue>(HandleRetryDue);
         Command<DecideAgain>(HandleDecideAgain);
-        // A reply carries no headers back over the wire. The entity remembers its own: the decision on the reply keeps
-        // the headers of the decision that issued the Send, while this incarnation lives.
+        // A reply carries nothing back over the wire: it keeps the headers of the decision that issued the Send.
         Command<ForeignReply>(reply => HandleForeign(reply.Message, reply.Origin, reply.Headers));
         Command<StopEntity>(_ => RequestStop());
 
@@ -368,10 +365,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <param name="command">The command.</param>
     /// <param name="origin">Who <c>Reply</c> answers.</param>
     /// <param name="reminder">The reminder delivery that carried the command, acknowledged once it is decided.</param>
-    /// <param name="headers">
-    /// The headers that travelled beside the command, or null. For an effect's answer or give-up: the headers of the
-    /// effect. <c>Decide</c> never sees them: they go to what the decision does, and to the observers.
-    /// </param>
+    /// <param name="headers">The headers that travelled beside the command, or null. For an effect's answer: the effect's.</param>
     /// <param name="settlement">
     /// For the answer or the give-up of a recorded effect: the record that settles it, written in the same write as the
     /// decision's events, whatever the decision is.
@@ -381,6 +375,10 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Settlement? settlement = null)
     {
         var decision = _definition.Decide(State, command, NewContext());
+
+        // A stashed timer comes back through HandleReminder when the stash is released, so it fires once: when decided.
+        if (reminder is not null && decision is not Stashed) headers = FireTimer(reminder.Key.Name);
+
         var trigger = reminder is not null ? Trigger.FromTimer(reminder.Key.Name, command, headers)
             : settlement is not null ? Trigger.FromAnswer(settlement.Sequence, command, headers)
             : Trigger.FromCommand(command, headers);
@@ -462,13 +460,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         // The check still guards against a payload that changed type in reminder storage.
         if (envelope.Message is TCommand command)
         {
-            // A timer carries no headers: nothing about a reminder or its stored payload holds them. It is a starting
-            // point of its own, and a propagator can mark it. The library's own reminders are never asked.
-            var headers = envelope.Key.Name.StartsWith(Handled<TCommand, TEvent>.ReservedKeyPrefix, StringComparison.Ordinal)
-                ? null
-                : _headerPropagation.InjectForTimer(EntityType, _entityId, envelope.Key.Name, _log);
-            ObserveTimer(envelope.Key.Name, TimerStage.Fired, due: null, _timeProvider.Now, headers);
-            HandleCommand(command, Sender, envelope, headers);
+            HandleCommand(command, Sender, envelope, headers: null);
             return;
         }
 
@@ -478,12 +470,8 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         Unhandled(envelope);
     }
 
-    /// <summary>
-    /// A command that came in a <see cref="Carried"/>, or a message that is not a <typeparamref name="TCommand"/>:
-    /// typically another entity's reply. The message is decided as a command when it is one, or when the definition
-    /// accepts its type. Otherwise it is refused and logged.
-    /// </summary>
-    /// <param name="headers">The headers of a <see cref="Carried"/>, otherwise null.</param>
+    /// <summary>A command from a <see cref="Carried"/>, or a message that is not a <typeparamref name="TCommand"/>: typically another entity's reply.</summary>
+    /// <param name="headers">The headers of the carrier or of the <c>Send</c>, otherwise null.</param>
     private void HandleForeign(object message, IActorRef origin, ImmutableDictionary<string, string>? headers)
     {
         if (message is TCommand command)
@@ -539,7 +527,6 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         switch (outcome)
         {
             case TCommand command:
-                // The outcome of work started by a decision keeps that decision's headers, while the entity lives.
                 HandleCommand(command, completed.Origin, reminder: null, completed.Headers);
                 break;
 
@@ -1094,7 +1081,6 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         var scope = _services.CreateAsyncScope();
         var services = scope.ServiceProvider;
 
-        // Every attempt runs with the headers the effect was issued with: the first, a retry, and one after a restart.
         StartHandler(scope, ct => delivery.Invoke(services, id, ct), pending.Effect, origin, failed: null, sequence,
             pending.Attempt, pending.Headers);
     }
@@ -1330,9 +1316,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// </summary>
     /// <param name="sequence">The id of a recorded effect, or 0.</param>
     /// <param name="attempt">The attempt of a recorded effect, or 0.</param>
-    /// <param name="headers">
-    /// The headers the handler runs with: restored before it, and kept by the outcome of an effect that is not recorded.
-    /// </param>
+    /// <param name="headers">The headers the handler runs with.</param>
     private void StartHandler(
         AsyncServiceScope scope, Func<CancellationToken, Task<object?>> invoke, object effect, IActorRef origin,
         Func<Exception, object?>? failed, long sequence, int attempt, ImmutableDictionary<string, string>? headers)
@@ -1383,7 +1367,6 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         var log = _log;
         // Ask gives the target a reply address that lives until it answers, and ties the answer to the origin
         // of the command that issued the send. The entity's own reminders are its deadline, not this call.
-        // The headers of the command that is being handled go on with the command. Without any, the bare command is sent.
         object message = headers is null ? send.Command : new Carried(send.Command, headers);
         _ = region.Ask(new ShardingEnvelope(send.Target.Value, message), timeout: null, cancellationToken: lifetime)
             .ContinueWith(t =>
@@ -1404,10 +1387,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// work's own failure or timeout; those come back in the outcome. Disposes the scope once the work has
     /// really finished, which can be after a timeout.
     /// </summary>
-    /// <param name="headers">
-    /// The headers of the command the work is done for, or null. The propagators restore them just before the work
-    /// starts, inside the task that runs it, so an <see cref="AsyncLocal{T}"/> they set reaches everything it calls.
-    /// </param>
+    /// <param name="headers">The headers the propagators restore inside the task that runs the work, or null.</param>
     private async Task<EffectOutcome> InvokeAsync(
         AsyncServiceScope scope,
         Func<IServiceProvider, CancellationToken, Task<object?>> invoke,
@@ -1426,7 +1406,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             task = Task.Run(() =>
             {
                 cts.Token.ThrowIfCancellationRequested();
-                return headers is null || !_headerPropagation.Any
+                return headers is null
                     ? invoke(scope.ServiceProvider, cts.Token)
                     : InvokeRestoredAsync(scope.ServiceProvider, invoke, headers, cts.Token);
             });
@@ -1468,10 +1448,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         }
     }
 
-    /// <summary>
-    /// Restores the headers, runs the work, and undoes the restore when the work has finished. An async method, so what
-    /// the propagators set stays inside this call and what it awaits.
-    /// </summary>
+    /// <summary>Restores the headers, runs the work, and undoes the restore. Async, so what is set stays in this call.</summary>
     private async Task<object?> InvokeRestoredAsync(
         IServiceProvider services,
         Func<IServiceProvider, CancellationToken, Task<object?>> invoke,
@@ -1543,7 +1520,6 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         public static Trigger FromCommand(TCommand command, ImmutableDictionary<string, string>? headers) =>
             new(CauseKind.Command, null, 0, command, true, headers);
 
-        /// <summary>A timer's command has the headers that a propagator added for it, if any.</summary>
         public static Trigger FromTimer(string key, TCommand command, ImmutableDictionary<string, string>? headers) =>
             new(CauseKind.Timer, key, 0, command, true, headers);
 
@@ -1570,7 +1546,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
             _ => new EventCause(CauseKind.Command, null),
         };
         var saved = new EventSaved(EntityType, _entityId, LastSequenceNr, Unwrap(entry)!,
-            trigger.HasCommand ? Unwrap(trigger.Command) : null, cause, _timeProvider.Now, trigger.Headers ?? DurableHeaders.None);
+            trigger.HasCommand ? Unwrap(trigger.Command) : null, cause, _timeProvider.Now, trigger.Headers ?? ImmutableDictionary<string, string>.Empty);
         foreach (var observer in _observers)
         {
             try
@@ -1590,7 +1566,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         if (_observers.Length == 0) return;
 
         var observed = new EffectObserved(EntityType, _entityId, EffectIdText(sequence), PublicForm(stored), stage,
-            attempt, _timeProvider.Now, headers ?? DurableHeaders.None);
+            attempt, _timeProvider.Now, headers ?? ImmutableDictionary<string, string>.Empty);
         foreach (var observer in _observers)
         {
             try
@@ -1604,13 +1580,23 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         }
     }
 
+    /// <summary>A timer delivery is decided: asks the propagators to mark its decision, and reports that it fired.</summary>
+    private ImmutableDictionary<string, string>? FireTimer(string key)
+    {
+        var headers = key.StartsWith(Handled<TCommand, TEvent>.ReservedKeyPrefix, StringComparison.Ordinal)
+            ? null
+            : _headerPropagation.InjectForTimer(EntityType, _entityId, key, _log);
+        ObserveTimer(key, TimerStage.Fired, due: null, _timeProvider.Now, headers);
+        return headers;
+    }
+
     private void ObserveTimer(
         string key, TimerStage stage, DateTimeOffset? due, DateTimeOffset at, ImmutableDictionary<string, string>? headers)
     {
         // The library's own reminders (the wake of pending effects, a workflow's wake) are never reported.
         if (_observers.Length == 0 || key.StartsWith(Handled<TCommand, TEvent>.ReservedKeyPrefix, StringComparison.Ordinal)) return;
 
-        var observed = new TimerObserved(EntityType, _entityId, key, stage, due, at, headers ?? DurableHeaders.None);
+        var observed = new TimerObserved(EntityType, _entityId, key, stage, due, at, headers ?? ImmutableDictionary<string, string>.Empty);
         foreach (var observer in _observers)
         {
             try
@@ -1740,10 +1726,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
     /// <summary>The result of an <c>Execute</c> handler, sent by the entity to itself.</summary>
     /// <param name="Sequence">The id of a recorded effect, or 0 for an effect that is not recorded.</param>
     /// <param name="Attempt">The attempt of a recorded effect, or 0.</param>
-    /// <param name="Headers">
-    /// The headers the work ran with. The decision on the outcome of an effect that is not recorded keeps them. A
-    /// recorded effect's answer takes its headers from the pending effect instead.
-    /// </param>
+    /// <param name="Headers">The headers the work ran with: the decision on the outcome of an effect that is not recorded keeps them.</param>
     private sealed record EffectCompleted(
         object Effect, object? Outcome, Exception? Failure, IActorRef Origin, Func<Exception, object?>? Failed,
         ImmutableDictionary<string, string>? Headers, long Sequence = 0, int Attempt = 0)
@@ -1775,10 +1758,7 @@ internal sealed class EntityActor<TState, TCommand, TEvent> : ReceivePersistentA
         public long Sequence { get; set; }
     }
 
-    /// <summary>
-    /// Another entity's reply to a <c>Send</c>, with the origin and the headers of the decision that issued the
-    /// <c>Send</c>. Kept in memory only: after a restart the reply is lost, so nothing is stored.
-    /// </summary>
+    /// <summary>Another entity's reply to a <c>Send</c>, with the origin and headers of the decision that issued it. In memory only.</summary>
     private sealed record ForeignReply(object Message, IActorRef Origin, ImmutableDictionary<string, string>? Headers)
         : INoSerializationVerificationNeeded;
 }

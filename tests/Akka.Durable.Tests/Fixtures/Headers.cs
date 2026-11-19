@@ -2,6 +2,18 @@ using System.Collections.Concurrent;
 
 namespace Akka.Durable.Tests.Fixtures;
 
+/// <summary>Asserts on the headers an observation or a carrier holds.</summary>
+public static class HeaderAssert
+{
+    /// <summary>The headers are exactly this one entry.</summary>
+    public static void Is(string key, string value, IReadOnlyDictionary<string, string> headers) =>
+        Xunit.Assert.Equal([KeyValuePair.Create(key, value)], headers.ToArray());
+
+    /// <summary>The headers are exactly this request id.</summary>
+    public static void Request(string id, IReadOnlyDictionary<string, string> headers) =>
+        Is(RequestIdPropagator.Key, id, headers);
+}
+
 /// <summary>
 /// Carries a request id the way an application would: in an <see cref="AsyncLocal{T}"/>. <see cref="Inject"/> sends it
 /// beside a command, and <see cref="Restore"/> puts it back before an effect handler runs. It also writes down what

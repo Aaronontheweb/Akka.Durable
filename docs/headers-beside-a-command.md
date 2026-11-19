@@ -23,7 +23,6 @@ public interface IHeaderPropagator
     void Inject(IDictionary<string, string> headers);
 
     // Called just before the library runs your code on behalf of a command that carried headers.
-    // Put the headers where your code reads them. Dispose undoes it.
     IDisposable Restore(IReadOnlyDictionary<string, string> headers);
 
     // A timer of the entity fired. Add the headers that the decision it starts should carry.
@@ -47,11 +46,11 @@ An `AsyncLocal<string?>` is the usual place to keep a header. `Inject` reads it,
 
 **Injected.** Every send of a command from outside the library asks the propagators for headers: `Tell` and `Ask` on an entity ref, and `Start`, `Notify` and `Cancel` on a workflow ref. `Inject` runs on the caller's thread, so a request-scoped `AsyncLocal` is still in place.
 
-If no propagator is registered, or none adds anything, the command is sent exactly as before. The message is the bare command. There is no wrapper, and the only added work is a check of how many propagators there are.
+If no propagator is registered, or none adds anything, the command is sent exactly as before. The message is the bare command.
 
-**Carried.** When there are headers, the command travels in one library message beside them, inside the same envelope. The entity unwraps it and decides on the command as usual. The sender is unchanged, so `Ask` replies work as before. Every node understands this message, whether or not it has a propagator.
+**Carried.** When there are headers, the command travels in one library message beside them, inside the same envelope. The entity unwraps it and decides on the command as usual. The sender is unchanged, so `Ask` replies work as before. Every node on this version understands it, whether or not it has a propagator.
 
-**Passed on.** A `Send` that a decision issues passes on the headers of the command being handled. There is no ambient state inside an entity, so the library does this itself.
+**Passed on.** A `Send` that a decision issues passes on the headers of the command being handled.
 
 **Stored.** A recorded effect (`Execute`, and the recorded calls to a workflow: `Start`, `Notify` and `Cancel`) keeps the headers of the decision that issued it. They are written in the same atomic write as the decision's events and the effect. A snapshot keeps them too, with the pending effect.
 
@@ -61,15 +60,13 @@ An effect that a decision issues while deciding on the answer or the give-up of 
 
 `Restore` runs inside the task that runs the handler. An `AsyncLocal` that it sets reaches the handler and everything the handler calls. When the handler sends a command through a plain `IEntityRefs`, that send asks the propagators for headers, and `Inject` finds them again. Handler code does not change.
 
-`Run` effects and a workflow's work are restored the same way, while the entity or the workflow lives.
-
-**Marked at a timer.** A timer is a starting point of its own: nobody asked, so there is no command with headers. When one of the entity's own timers fires, the library calls `InjectForTimer` on each propagator, on the entity's thread, just before the command the timer delivers is decided. The headers it adds are the decision's headers, exactly like headers that arrived with a command. They are reported with the event, stored with the effects the decision issues, passed on by `Send`, restored for handlers and inherited by answers. Use it to mark a chain ("this started at timer X"), so it can be told apart from a send that lost its headers. The library's own reminders, whose keys start with `durable-`, are never reported to it. With no propagator that overrides it, nothing is called and nothing is allocated.
+**Marked at a timer.** A timer is a starting point of its own: nobody asked, so there is no command with headers. When one of the entity's own timers fires, the library calls `InjectForTimer` on each propagator, on the entity's thread, just before the command the timer delivers is decided. The headers it adds are the decision's headers, exactly like headers that arrived with a command. They are reported with the event, stored with the effects the decision issues, passed on by `Send`, restored for handlers and inherited by answers. Use it to mark a chain ("this started at timer X"), so it can be told apart from a send that lost its headers. The library's own reminders, whose keys start with `durable-`, are never reported to it. With no propagator registered, nothing is called.
 
 **Observed.** `EventSaved`, `EffectObserved` and `TimerObserved` have a `Headers` member. It is never null. It is empty when there are none. See [Observing what entities do](observing-what-entities-do.md).
 
 ## What does not carry headers
 
-- **Timers, by default.** A command that a timer delivers has no headers, even when the command that set the timer had some. An event decided from a timer has none, and neither has an effect that decision issues. Nothing about a reminder or its stored payload changes. A propagator can give the timer's decision headers with `InjectForTimer`. They are never the headers of the command that set the timer. `TimerObserved` has the headers of the decision that set or cancelled the timer, and for a timer that fired, the ones `InjectForTimer` added.
+- **Timers.** A timer delivers its command with no headers, not even those of the command that set it. See "Marked at a timer" above.
 - **Replies, over the wire.** A reply does not carry headers back. The entity remembers its own: the decision on the reply to its own `Send` keeps the headers of the decision that issued the `Send`, while the entity lives. After a restart the reply is lost anyway, so nothing is stored.
 - **State reads.** `GetStateAsync`, `WaitForStateAsync` and `WatchStateAsync` carry none.
 - **A workflow's work after a restart.** See the next section.
@@ -94,8 +91,6 @@ Registering a propagator is what makes a node send the carrying message. Do it i
 A node that has an older version can not read the message. Its serializer fails with `Unknown generated serializer manifest [durable-carried-v1]`, so the command does not arrive and an `Ask` to that entity times out.
 
 What is stored is safe in both directions. `EffectIssued` and `PendingEffect` each have one new, last field for the headers. A record written before the field existed is read with no headers. A build from before the field reads a record that has it and skips the field, so rolling a node back keeps stored effects readable. Those effects then run without headers.
-
-Every recorded effect now has the field in its stored bytes, with no value when there are no headers. That adds two bytes to the record.
 
 ## Example: a request id from the web request to a second entity
 
@@ -162,23 +157,9 @@ public sealed class VerifyRecipientHandler(IEntityRefs<RecipientCommand> recipie
 }
 ```
 
-Before the handler runs, `Restore` puts the request id back. The `Ask` inside it asks `Inject` for headers, and the second entity gets the same id. The same holds after a restart, for a retry, and for the invoice's own decision on the answer.
+Before the handler runs, `Restore` puts the request id back. The `Ask` inside it asks `Inject` for headers, and the second entity gets the same id.
 
-An observer reads the id. It hands the row to a queue, because an observer must be quick:
-
-```csharp
-public sealed class RequestAuditObserver(IAuditQueue queue) : IDurableObserver
-{
-    public void EventSaved(in EventSaved saved) =>
-        queue.Enqueue(new AuditRow(
-            saved.Headers.GetValueOrDefault(RequestIdPropagator.Key),
-            saved.EntityType.Value, saved.EntityId.Value, saved.SequenceNr, saved.Event.GetType().Name, saved.At));
-}
-
-builder.Services.AddDurableObserver<RequestAuditObserver>();
-```
-
-Each row has the request id, the entity and the event. A request that causes events in two entities shows the same id on both. An event that a timer decides has no id, unless a propagator marks the timer with `InjectForTimer`.
+An observer reads the id from `saved.Headers`. See the audit trail in [Observing what entities do](observing-what-entities-do.md#example-an-audit-trail). A request that causes events in two entities shows the same id on both.
 
 ---
 

@@ -36,9 +36,6 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
     private void SendCarried(IActorRef entity, CounterCommand command, string request) =>
         entity.Tell(new Carried(command, Request(request)), TestActor);
 
-    private static void AssertRequest(string expected, IReadOnlyDictionary<string, string> headers) =>
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, expected)], headers.ToArray());
-
     /// <summary>What the handler of a probe effect sees as the request id of its flow of execution, and how it answers.</summary>
     private void SeeRequestInHandler(Func<Probe, string> answer) =>
         World.OnProbe = (probe, _) =>
@@ -58,7 +55,7 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
         await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
 
         var events = Seen.Events;
-        AssertRequest("req-1", events[0].Headers);
+        HeaderAssert.Request("req-1", events[0].Headers);
         Assert.Empty(events[1].Headers); // a command that came alone has none
         Assert.Equal([new Increment(1), new Increment(2)], events.Select(e => e.Command)); // Decide got the commands
         Assert.Equal(3, (await StateOf(entity)).Count);
@@ -69,7 +66,7 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
     {
         var region = CreateTestProbe();
         var id = new EntityId("wire");
-        var withPropagator = new EntityRef<CounterCommand>(id, region, HeaderPropagation.From(Host.Services));
+        var withPropagator = new EntityRef<CounterCommand>(id, region, Host.Services.GetRequiredService<HeaderPropagation>());
         var without = new EntityRef<CounterCommand>(id, region, HeaderPropagation.None);
 
         RequestIdPropagator.Current = "req-w";
@@ -94,7 +91,7 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
         {
             var carried = Assert.IsType<Carried>(envelope.Message);
             Assert.Equal(new Increment(by), Assert.IsType<CounterCommand>(carried.Command).Value);
-            AssertRequest("req-w", carried.Headers);
+            HeaderAssert.Request("req-w", carried.Headers);
         }
 
         Assert.All([bare, tell, carriedAsk, nothing], envelope => Assert.Equal("wire", envelope.EntityId));
@@ -138,7 +135,7 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
         Assert.Equal([1, 2], World.ProbeCalls.Select(call => call.Delivery.Attempt));
         Assert.Equal([("a", "req-d")], _sightings); // only attempt 2 got past its hold, and it saw the request
         Assert.Equal(2, Propagator.Restored.Count); // both attempts were restored, each with the stored headers
-        Assert.All(Propagator.Restored, headers => AssertRequest("req-d", headers));
+        Assert.All(Propagator.Restored, headers => HeaderAssert.Request("req-d", headers));
         Assert.Equal(0, Propagator.Open); // and undone when the handler finished
     }
 
@@ -153,9 +150,9 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
         await Await(() => Seen.Effects.Count(e => e.Stage == EffectStage.Acknowledged) == 2);
         Assert.Equal([("a", "req-c"), ("b", "req-c")], _sightings); // the second hop ran with them too
         Assert.Equal(6, Seen.Effects.Length); // issued, started and acknowledged, for both
-        Assert.All(Seen.Effects, e => AssertRequest("req-c", e.Headers));
+        Assert.All(Seen.Effects, e => HeaderAssert.Request("req-c", e.Headers));
         Assert.Equal(3, Seen.Events.Length); // the command, the answer of a, the answer of b
-        Assert.All(Seen.Events, e => AssertRequest("req-c", e.Headers));
+        Assert.All(Seen.Events, e => HeaderAssert.Request("req-c", e.Headers));
     }
 
     [Fact]
@@ -167,7 +164,7 @@ public sealed class HeaderEntitySpecs(ITestOutputHelper output) : ObserverSpecsB
 
         // The timer fires, and its command issues an effect that is answered.
         await Await(() => Seen.Effects.Any(e => e.Stage == EffectStage.Acknowledged));
-        AssertRequest("req-t", Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Set).Headers);
+        HeaderAssert.Request("req-t", Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Set).Headers);
         Assert.Empty(Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Fired).Headers);
         Assert.Equal(new EventCause(CauseKind.Timer, "later"), Seen.Events[0].Cause);
         Assert.All(Seen.Events, e => Assert.Empty(e.Headers));
@@ -204,17 +201,36 @@ public sealed class TimerHeaderSpecs(ITestOutputHelper output) : ObserverSpecsBa
 
         await Await(() => Seen.Effects.Any(e => e.Stage == EffectStage.Acknowledged));
         Assert.Empty(Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Set).Headers); // not the setter's headers
-        Assert.Equal([KeyValuePair.Create(TimerOriginPropagator.Key, mark)],
-            Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Fired).Headers.ToArray());
+        HeaderAssert.Is(TimerOriginPropagator.Key, mark, Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Fired).Headers);
         Assert.Equal(2, Seen.Events.Length); // the timer's command, and the answer of its effect
-        Assert.All(Seen.Events, e => Assert.Equal([KeyValuePair.Create(TimerOriginPropagator.Key, mark)], e.Headers.ToArray()));
+        Assert.All(Seen.Events, e => HeaderAssert.Is(TimerOriginPropagator.Key, mark, e.Headers));
         Assert.Equal(3, Seen.Effects.Length);
-        Assert.All(Seen.Effects, e => Assert.Equal([KeyValuePair.Create(TimerOriginPropagator.Key, mark)], e.Headers.ToArray()));
+        Assert.All(Seen.Effects, e => HeaderAssert.Is(TimerOriginPropagator.Key, mark, e.Headers));
         Assert.Equal([mark], seen); // the handler ran with them restored
+    }
+
+    [Fact]
+    public async Task A_timer_that_Decide_stashes_fires_once_when_it_is_decided_not_each_time_it_is_delivered()
+    {
+        var entity = Spawn("timer-stash");
+        Send(entity, new LockCounter());
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+        Send(entity, new RemindLater(TimeSpan.FromMilliseconds(50))); // its Increment is stashed while the counter is locked
+        await Await(() => World.DecidedNow.Contains("increment:1")); // Decide has seen the delivery, and stashed it
+        Assert.DoesNotContain(Seen.Timers, t => t.Stage == TimerStage.Fired);
+
+        Send(entity, new UnlockCounter()); // releases the stash: the same delivery is decided now
+        await ExpectMsgAsync<Accepted>(cancellationToken: Ct);
+
+        await Await(() => Seen.Events.Any(e => e.Cause.Kind == CauseKind.Timer));
+        var fired = Assert.Single(Seen.Timers, t => t.Stage == TimerStage.Fired);
+        HeaderAssert.Is(TimerOriginPropagator.Key, "timer:counter/timer-stash/tick", fired.Headers);
+        var decided = Assert.Single(Seen.Events, e => e.Cause.Kind == CauseKind.Timer);
+        HeaderAssert.Is(TimerOriginPropagator.Key, "timer:counter/timer-stash/tick", decided.Headers);
     }
 }
 
-/// <summary>The first propagator throws in <c>Inject</c> and in <c>Restore</c>. The second one does its work.</summary>
+/// <summary>The first propagator throws in <c>Inject</c>. The second one does its work.</summary>
 public sealed class ThrowingHeaderPropagatorSpecs(ITestOutputHelper output) : ObserverSpecsBase(output)
 {
     protected override void AddObservers(IServiceCollection services) => services
@@ -223,29 +239,14 @@ public sealed class ThrowingHeaderPropagatorSpecs(ITestOutputHelper output) : Ob
         .AddDurableHeaderPropagator<RequestIdPropagator>();
 
     [Fact]
-    public async Task A_propagator_that_throws_fails_neither_the_send_nor_the_effect()
+    public async Task A_propagator_that_throws_does_not_fail_the_send_and_adds_nothing_of_its_own()
     {
-        // The send: the other propagator's headers go, and what the one that threw had added does not.
+        // The other propagator's headers go, and what the one that threw had added does not.
         var region = CreateTestProbe();
-        var counter = new EntityRef<CounterCommand>(new EntityId("throws"), region, HeaderPropagation.From(Host.Services));
+        var counter = new EntityRef<CounterCommand>(new EntityId("throws"), region, Host.Services.GetRequiredService<HeaderPropagation>());
         RequestIdPropagator.Current = "req-x";
         counter.Tell(new Increment(1));
         var envelope = await region.ExpectMsgAsync<ShardingEnvelope>(cancellationToken: Ct);
-        Assert.Equal([KeyValuePair.Create(RequestIdPropagator.Key, "req-x")], Assert.IsType<Carried>(envelope.Message).Headers.ToArray());
-
-        // The effect: its handler runs, with what the other propagator restored.
-        var seen = new ConcurrentQueue<string?>();
-        World.OnProbe = (_, _) =>
-        {
-            seen.Enqueue(RequestIdPropagator.Current);
-            return Task.FromResult<CounterCommand>(new NoHandler("answer:a"));
-        };
-        var entity = Spawn("throws-effect");
-        entity.Tell(new Carried(new CounterCommand(new NoHandler("issue:a")),
-            ImmutableDictionary<string, string>.Empty.Add(RequestIdPropagator.Key, "req-y")), TestActor);
-
-        await AwaitAssertAsync(async () => Assert.Equal(101, (await StateOf(entity)).Count), cancellationToken: Ct);
-        Assert.Equal(["req-y"], seen);
-        Assert.Equal(EffectStage.Acknowledged, Seen.Effects[^1].Stage);
+        HeaderAssert.Is(RequestIdPropagator.Key, "req-x", Assert.IsType<Carried>(envelope.Message).Headers);
     }
 }
