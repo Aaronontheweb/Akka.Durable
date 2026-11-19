@@ -1,3 +1,18 @@
+#### 0.1.0-alpha.11 November 19th 2026 ####
+
+**Headers beside a command.** A few opaque strings travel beside a command, so an application can say which request a chain of work belongs to without putting that into its command and event types. Akka.Durable is still a proof of concept, not an official Akka.NET project.
+
+* **`IHeaderPropagator`.** `Inject` adds headers at every send. The library carries them, stores them with each recorded effect, and calls `Restore` before an effect handler runs, also for a retry and after a restart. `InjectForTimer` lets an application mark a chain that one of an entity's own timers started. Register one with `AddDurableHeaderPropagator<T>()`. `Decide`, `Evolve` and effect handlers never see headers.
+* **`Headers` on the observations.** `EventSaved`, `EffectObserved` and `TimerObserved` have a new `Headers` member.
+* **Fix: a timer whose command `Decide` stashed was reported as `Fired` twice.** It is now reported once, when its command is decided.
+* **New guide page,** "Headers beside a command".
+
+**What you change from 0.1.0-alpha.10:** three things.
+
+1. Code that constructs `EventSaved`, `EffectObserved` or `TimerObserved` itself (tests, usually) passes the new `Headers` member. Observers that only read them need no change.
+2. Roll out in two steps if you use headers in a cluster. First run this version on every node. Only then register a propagator, because a node on an older version cannot read a command that carries headers.
+3. Nothing to migrate in storage. Each recorded effect gains one new field. Records written before it still read, and an older version skips the field.
+
 #### 0.1.0-alpha.10 November 19th 2026 ####
 
 **A read-only observer for what entities do.** `IDurableObserver` sees what entities and workflows do. Akka.Durable is still a proof of concept, not an official Akka.NET project.
