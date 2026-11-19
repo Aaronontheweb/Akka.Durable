@@ -189,4 +189,5 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Workflows](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflows.md) | Finite processes that start once and end with an outcome: states, work, retry policies on work, the fact table, and workflow refs. |
 | [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
+| [Observing what entities do](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/observing-what-entities-do.md) | A read-only observer for telemetry and an audit trail, and the event stream publisher. |
 | [Status and direction](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/status.md) | What works today and what is not done yet. |
