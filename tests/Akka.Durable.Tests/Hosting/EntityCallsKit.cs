@@ -151,7 +151,8 @@ public abstract class EntityCallsKit(ITestOutputHelper output) : DurableEntityTe
         services.AddSingleton<CampaignRefs>(provider => new ControlledRefs(
             new WorkflowRefs<Invoice, CampaignState, CampaignFact, CampaignOutcome>(
                 provider.GetRequiredService<IRequiredActor<WorkflowRegion<Invoice, CampaignState, CampaignFact, CampaignOutcome>>>(),
-                provider.GetRequiredService<ActorSystem>()),
+                provider.GetRequiredService<ActorSystem>(),
+                HeaderPropagation.None),
             provider.GetRequiredService<CallControl>()));
     }
 
@@ -188,7 +189,7 @@ public abstract class EntityCallsKit(ITestOutputHelper output) : DurableEntityTe
 
     /// <summary>The campaign of a bill, reached without the control: the test acts as an outside caller.</summary>
     protected CampaignRef Campaigns(string bill) =>
-        new WorkflowRefs<Invoice, CampaignState, CampaignFact, CampaignOutcome>(RegionActor(), Sys).Get(Billing.CampaignOf(new EntityId(bill)));
+        new WorkflowRefs<Invoice, CampaignState, CampaignFact, CampaignOutcome>(RegionActor(), Sys, HeaderPropagation.None).Get(Billing.CampaignOf(new EntityId(bill)));
 
     protected async Task<WorkflowStatus<CampaignState, CampaignOutcome>> CampaignOf(string bill) =>
         (await Campaigns(bill).GetStateAsync(AskCancellation(FirstAsk))).State;

@@ -7,18 +7,18 @@ namespace Akka.Durable;
 /// Logical reference to one entity. Messages go through the entity type's shard region or local host,
 /// which create the entity on demand and buffer messages while it passivates.
 /// </summary>
-internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEntityRef<TCommand>
+internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region, HeaderPropagation headers) : IEntityRef<TCommand>
 {
     public EntityId Id => id;
 
     public void Tell(TCommand command, IActorRef? sender = null) =>
-        region.Tell(new ShardingEnvelope(id.Value, command!), sender!);
+        region.Tell(new ShardingEnvelope(id.Value, headers.Wrap(command!)), sender!);
 
     public Task<TReply> Ask<TReply>(IReplies<TCommand, TReply> command, CancellationToken cancellationToken = default)
         where TReply : notnull
     {
         ArgumentNullException.ThrowIfNull(command);
-        return region.Ask<TReply>(new ShardingEnvelope(id.Value, command.ToCommand()!), cancellationToken);
+        return region.Ask<TReply>(new ShardingEnvelope(id.Value, headers.Wrap(command.ToCommand()!)), cancellationToken);
     }
 }
 
@@ -28,10 +28,11 @@ internal sealed class EntityRef<TCommand>(EntityId id, IActorRef region) : IEnti
 /// <param name="id">The entity.</param>
 /// <param name="region">The entity type's shard region or local host.</param>
 /// <param name="system">The actor system this ref is used in. State subscriptions run a watcher actor in it.</param>
-internal sealed class EntityRef<TCommand, TState, TEvent>(EntityId id, IActorRef region, ActorSystem system)
+internal sealed class EntityRef<TCommand, TState, TEvent>(
+    EntityId id, IActorRef region, ActorSystem system, HeaderPropagation headers)
     : IDurableEntityRef<TCommand, TState, TEvent>
 {
-    private readonly EntityRef<TCommand> _ref = new(id, region);
+    private readonly EntityRef<TCommand> _ref = new(id, region, headers);
 
     public EntityId Id => id;
 

@@ -217,7 +217,7 @@ public interface IWorkflowRefs<in TInput, TState, in TFact, TOutcome>
 }
 
 internal sealed class WorkflowRefs<TInput, TState, TFact, TOutcome>(
-    IRequiredActor<WorkflowRegion<TInput, TState, TFact, TOutcome>> region, ActorSystem system)
+    IRequiredActor<WorkflowRegion<TInput, TState, TFact, TOutcome>> region, ActorSystem system, HeaderPropagation headers)
     : IWorkflowRefs<TInput, TState, TFact, TOutcome>
     where TInput : notnull
     where TState : notnull
@@ -241,18 +241,20 @@ internal sealed class WorkflowRefs<TInput, TState, TFact, TOutcome>(
                 error);
         }
 
-        return new WorkflowRef<TInput, TState, TFact, TOutcome>(id, actor, system);
+        return new WorkflowRef<TInput, TState, TFact, TOutcome>(id, actor, system, headers);
     }
 }
 
-internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(WorkflowId id, IActorRef region, ActorSystem system)
+internal sealed class WorkflowRef<TInput, TState, TFact, TOutcome>(
+    WorkflowId id, IActorRef region, ActorSystem system, HeaderPropagation headers)
     : IWorkflowRef<TInput, TState, TFact, TOutcome>
     where TInput : notnull
     where TState : notnull
     where TFact : notnull
     where TOutcome : notnull
 {
-    private EntityRef<WfCommand, WfState, WfEvent> Entity { get; } = new(new EntityId(id.Value), region, system);
+    // Start, Notify and Cancel go through the entity ref, so they carry headers like any other command.
+    private EntityRef<WfCommand, WfState, WfEvent> Entity { get; } = new(new EntityId(id.Value), region, system, headers);
 
     public WorkflowId Id => id;
 

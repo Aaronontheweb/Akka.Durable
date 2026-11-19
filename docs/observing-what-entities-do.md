@@ -19,7 +19,7 @@ public interface IDurableObserver
 }
 ```
 
-**`EventSaved`.** One call for each event that `Decide` persisted, in journal order. It has the entity type and id, the journal sequence number, the event, the command whose decision wrote it, and the time. It also has the cause of the decision (`EventCause`):
+**`EventSaved`.** One call for each event that `Decide` persisted, in journal order. It has the entity type and id, the journal sequence number, the event, the command whose decision wrote it, the time, and the [headers](headers-beside-a-command.md) of the decision, empty when there are none. It also has the cause of the decision (`EventCause`):
 
 | Kind | What started the decision | `Id` |
 | --- | --- | --- |
@@ -30,9 +30,9 @@ public interface IDurableObserver
 
 The library's own records are not events. An effect's issue, retry, acknowledgement and give-up are never reported as events. A union event or command is shown as the case it holds.
 
-**`EffectMoved`.** One call each time a recorded effect (`Execute`) reaches a stage: `Issued`, `AttemptStarted`, `Acknowledged` or `GaveUp`. It has the effect's id, the same text a handler gets in `EffectId`, the effect, the stage and the attempt number. A retry is a new `AttemptStarted` with the next number. `Run`, `Tell` and `Send` are not recorded, so they are not reported.
+**`EffectMoved`.** One call each time a recorded effect (`Execute`) reaches a stage: `Issued`, `AttemptStarted`, `Acknowledged` or `GaveUp`. It has the effect's id, the same text a handler gets in `EffectId`, the effect, the stage, the attempt number and the effect's `Headers`: the headers of the decision that issued it. A retry is a new `AttemptStarted` with the next number. `Run`, `Tell` and `Send` are not recorded, so they are not reported.
 
-**`TimerMoved`.** One call when a timer is `Set` (with its due time), `Cancelled` or `Fired`. It has the timer's key. A timer is reported only for the entity's own keys. The library's own reminders, whose keys start with `durable-`, are never reported. Observing writes nothing: a timer is still only a row in the reminder store.
+**`TimerMoved`.** One call when a timer is `Set` (with its due time), `Cancelled` or `Fired`. It has the timer's key. For `Set` and `Cancelled` it also has the `Headers` of the decision that set or cancelled the timer. For `Fired` it has the headers that a propagator added with `InjectForTimer`, which the decision the timer starts carries, or none. It never has the headers of the command that set the timer. A timer is reported only for the entity's own keys. The library's own reminders, whose keys start with `durable-`, are never reported. Observing writes nothing: a timer is still only a row in the reminder store.
 
 Every observation has the entity type, the entity id and a time, `At`. The time comes from the entity's clock, the one that gives `DecisionContext.UtcNow`. The three types share the marker interface `IDurableObservation`.
 
@@ -122,7 +122,8 @@ public sealed class AuditActor : ReceiveActor
 
         Receive<EventSaved>(saved => store.Add(new AuditRow(
             saved.EntityType.Value, saved.EntityId.Value, saved.SequenceNr, saved.Event.GetType().Name,
-            saved.Cause.Kind.ToString(), saved.Cause.Id, saved.At)));
+            saved.Cause.Kind.ToString(), saved.Cause.Id, saved.At,
+            saved.Headers.GetValueOrDefault("request-id"))));
     }
 }
 ```
@@ -133,10 +134,10 @@ This gives you what happened, to which entity, and when. It also gives you wheth
 
 Effects and timers can be recorded the same way, from `EffectObserved` and `TimerObserved`.
 
-It does not give you who asked. Nothing travels beside a command today, so the observation can not name the caller. That needs a separate change.
+Who asked is a header. A [header propagator](headers-beside-a-command.md) puts a request id beside each command, and the row above reads it from `saved.Headers`. Without a propagator, `Headers` is empty and the observation can not name the caller.
 
 The trail is as reliable as the event stream: local to one node, and it misses what happens while the subscriber is down. If the trail must be complete, read the journal.
 
 ---
 
-Next: [Status and direction](status.md)
+Next: [Headers beside a command](headers-beside-a-command.md)
