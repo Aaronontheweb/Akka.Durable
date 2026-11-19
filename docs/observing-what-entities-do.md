@@ -138,6 +138,8 @@ Who asked is a header. A [header propagator](headers-beside-a-command.md) puts a
 
 The trail is as reliable as the event stream: local to one node, and it misses what happens while the subscriber is down. If the trail must be complete, read the journal.
 
+The [audit trail sample](../samples/AuditTrail/README.md) is a small web application that runs this example across two entities and a timer.
+
 ---
 
 Next: [Headers beside a command](headers-beside-a-command.md)

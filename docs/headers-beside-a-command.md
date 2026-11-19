@@ -161,6 +161,8 @@ Before the handler runs, `Restore` puts the request id back. The `Ask` inside it
 
 An observer reads the id from `saved.Headers`. See the audit trail in [Observing what entities do](observing-what-entities-do.md#example-an-audit-trail). A request that causes events in two entities shows the same id on both.
 
+The [audit trail sample](../samples/AuditTrail/README.md) uses a propagator to record who did each thing, and marks the events that a timer starts as done by the system.
+
 ---
 
 Next: [Status and direction](status.md)
