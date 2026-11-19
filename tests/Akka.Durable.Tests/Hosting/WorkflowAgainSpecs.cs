@@ -76,12 +76,18 @@ public abstract class CampaignRetryKit(ITestOutputHelper output) : CampaignWorkf
         return await AwaitRunning(id, running => Assert.Equal(new Escalating(1), StateOf(running)), TimerFires);
     }
 
-    /// <summary>A campaign whose customer said they paid: in <see cref="Verifying"/>, with the grace period given.</summary>
-    private protected async Task<WfRunning> VerifyingWith(string id, TimeSpan grace)
+    /// <summary>Starts a campaign and tells it the customer said they paid. It does not read the campaign afterwards.</summary>
+    private protected async Task ClaimPayment(string id, TimeSpan grace)
     {
         var campaign = CampaignRef(id);
         await campaign.Start(new Invoice(id, DateTimeOffset.UtcNow + TimeSpan.FromDays(1), TimeSpan.FromHours(10), grace, Reminders: 2), AskCancellation());
         Assert.IsType<Delivered>((await campaign.Notify(new PaymentClaimed(), AskCancellation())).Value);
+    }
+
+    /// <summary>A campaign whose customer said they paid: in <see cref="Verifying"/>, with the grace period given.</summary>
+    private protected async Task<WfRunning> VerifyingWith(string id, TimeSpan grace)
+    {
+        await ClaimPayment(id, grace);
         return await AwaitRunning(id, running => Assert.Equal(new Verifying(0), StateOf(running)));
     }
 }
@@ -250,7 +256,9 @@ public sealed class WorkflowAgainAfterSpecs(ITestOutputHelper output) : Campaign
             ReminderStorage.Failing = true;
             return Task.FromResult<CampaignFact>(new NotYetPaid());
         };
-        await VerifyingWith("a5", grace: TimeSpan.FromHours(1));
+        // The workflow is not read before the storage works again: once the decision cannot store its reminder the workflow
+        // restarts, and it answers nothing until a recovery stores it. The test waits on the storage's own counter instead.
+        await ClaimPayment("a5", grace: TimeSpan.FromHours(1));
         await AwaitAssertAsync(() => Assert.True(ReminderStorage.FailedWrites >= 1), cancellationToken: TestCancellation);
         ReminderStorage.Failing = false;
 
