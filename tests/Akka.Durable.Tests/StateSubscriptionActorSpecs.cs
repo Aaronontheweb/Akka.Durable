@@ -56,10 +56,10 @@ public class StateSubscriptionActorSpecs(ITestOutputHelper output) : Persistence
         entity.Tell(command, sender ?? TestActor);
 
     private EntityRef<CounterCommand, CounterState, CounterEvent> CounterAt(IActorRef region, string id) =>
-        new(new EntityId(id), region, Sys);
+        new(new EntityId(id), region, Sys, HeaderPropagation.None);
 
     private WorkflowRef<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome> WorkflowAt(IActorRef region, string id) =>
-        new(new WorkflowId(id), region, Sys);
+        new(new WorkflowId(id), region, Sys, HeaderPropagation.None);
 
     /// <summary>Expects one subscribe. Returns the watcher that sent it: the probe answers it.</summary>
     private async Task<IActorRef> ExpectSubscribe(TestProbe region, string id)

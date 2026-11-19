@@ -27,6 +27,9 @@ public abstract class ObserverSpecsBase(ITestOutputHelper output) : PersistenceT
 
     protected abstract void AddObservers(IServiceCollection services);
 
+    /// <summary>The options of the entities this spec spawns.</summary>
+    protected virtual EntityOptions Options => EntityOptions.Default;
+
     protected sealed override void ConfigureServices(HostBuilderContext context, IServiceCollection services)
     {
         services.AddSingleton<Observations>()
@@ -48,9 +51,9 @@ public abstract class ObserverSpecsBase(ITestOutputHelper output) : PersistenceT
     protected Observations Seen => Host.Services.GetRequiredService<Observations>();
 
     // The probe counter, with one more command: it sets a timer and cancels it in the same decision.
-    private EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition()
+    private EntityDefinition<CounterState, CounterCommand, CounterEvent> Definition(EntityOptions options)
     {
-        var probe = ProbeEntity.Definition(World);
+        var probe = ProbeEntity.Definition(World, options);
         return probe with
         {
             Decide = (state, command, ctx) => command is { Value: NoHandler { Note: "set-and-cancel" } }
@@ -59,10 +62,12 @@ public abstract class ObserverSpecsBase(ITestOutputHelper output) : PersistenceT
         };
     }
 
-    protected IActorRef Spawn(string id)
+    protected IActorRef Spawn(string id) => Spawn(id, Options);
+
+    protected IActorRef Spawn(string id, EntityOptions options)
     {
         var entityId = new EntityId(id);
-        var definition = Definition();
+        var definition = Definition(options);
         var services = Host.Services;
         var time = Sys.Scheduler;
         var entity = Sys.ActorOf(Props.Create(() =>

@@ -80,6 +80,10 @@ public readonly record struct EventCause(CauseKind Kind, string? Id);
 /// </param>
 /// <param name="Cause">What started the decision.</param>
 /// <param name="At">The time.</param>
+/// <param name="Headers">
+/// The headers that travelled beside the command that started the decision, or the headers of the effect whose answer
+/// it is, or, for a timer, the headers that a propagator added for it. Empty when there were none. Never null.
+/// </param>
 public readonly record struct EventSaved(
     EntityTypeName EntityType,
     EntityId EntityId,
@@ -87,7 +91,18 @@ public readonly record struct EventSaved(
     object Event,
     object? Command,
     EventCause Cause,
-    DateTimeOffset At) : IDurableObservation;
+    DateTimeOffset At,
+    IReadOnlyDictionary<string, string> Headers) : IDurableObservation
+{
+    private readonly IReadOnlyDictionary<string, string>? _headers = Headers is { Count: > 0 } ? Headers : null;
+
+    /// <summary>The headers. Empty when there are none. Never null.</summary>
+    public IReadOnlyDictionary<string, string> Headers
+    {
+        get => _headers ?? DurableHeaders.None;
+        init => _headers = value is { Count: > 0 } ? value : null;
+    }
+}
 
 /// <summary>The stage of a recorded effect.</summary>
 public enum EffectStage
@@ -113,6 +128,10 @@ public enum EffectStage
 /// <param name="Stage">The stage it reached.</param>
 /// <param name="Attempt">The attempt: 1 when issued, the number of the attempt that started, or that settled the effect.</param>
 /// <param name="At">The time.</param>
+/// <param name="Headers">
+/// The headers of the decision that issued the effect, which every attempt runs with. Empty when there were none.
+/// Never null.
+/// </param>
 public readonly record struct EffectObserved(
     EntityTypeName EntityType,
     EntityId EntityId,
@@ -120,7 +139,18 @@ public readonly record struct EffectObserved(
     object Effect,
     EffectStage Stage,
     int Attempt,
-    DateTimeOffset At) : IDurableObservation;
+    DateTimeOffset At,
+    IReadOnlyDictionary<string, string> Headers) : IDurableObservation
+{
+    private readonly IReadOnlyDictionary<string, string>? _headers = Headers is { Count: > 0 } ? Headers : null;
+
+    /// <summary>The headers. Empty when there are none. Never null.</summary>
+    public IReadOnlyDictionary<string, string> Headers
+    {
+        get => _headers ?? DurableHeaders.None;
+        init => _headers = value is { Count: > 0 } ? value : null;
+    }
+}
 
 /// <summary>What happened to a timer.</summary>
 public enum TimerStage
@@ -142,13 +172,36 @@ public enum TimerStage
 /// <param name="Stage">What happened.</param>
 /// <param name="Due">When the timer is due, for <see cref="TimerStage.Set"/>. Otherwise null.</param>
 /// <param name="At">The time.</param>
+/// <param name="Headers">
+/// For <see cref="TimerStage.Set"/> and <see cref="TimerStage.Cancelled"/>: the headers of the decision that set or
+/// cancelled the timer. For <see cref="TimerStage.Fired"/>: the headers that a propagator added with
+/// <see cref="IHeaderPropagator.InjectForTimer"/>, which the decision the timer starts carries. Not those of the
+/// command that set the timer. Empty when there are none. Never null.
+/// </param>
 public readonly record struct TimerObserved(
     EntityTypeName EntityType,
     EntityId EntityId,
     string Key,
     TimerStage Stage,
     DateTimeOffset? Due,
-    DateTimeOffset At) : IDurableObservation;
+    DateTimeOffset At,
+    IReadOnlyDictionary<string, string> Headers) : IDurableObservation
+{
+    private readonly IReadOnlyDictionary<string, string>? _headers = Headers is { Count: > 0 } ? Headers : null;
+
+    /// <summary>The headers. Empty when there are none. Never null.</summary>
+    public IReadOnlyDictionary<string, string> Headers
+    {
+        get => _headers ?? DurableHeaders.None;
+        init => _headers = value is { Count: > 0 } ? value : null;
+    }
+}
+
+/// <summary>The one empty set of headers that observations share.</summary>
+internal static class DurableHeaders
+{
+    public static readonly IReadOnlyDictionary<string, string> None = System.Collections.Immutable.ImmutableDictionary<string, string>.Empty;
+}
 
 /// <summary>Registers observers of durable entities.</summary>
 public static class DurableObserverExtensions

@@ -190,4 +190,5 @@ The rest of the documentation is in [`docs/`](https://github.com/Aaronontheweb/A
 | [Workflow rules](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/workflow-rules.md) | Rules for writing a workflow that stays correct across restarts. |
 | [Testing](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/testing.md) | Decisions as plain functions, and the hosted TestKit. |
 | [Observing what entities do](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/observing-what-entities-do.md) | A read-only observer for telemetry and an audit trail, and the event stream publisher. |
+| [Headers beside a command](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/headers-beside-a-command.md) | Opaque headers that travel beside a command, are stored with recorded effects, and are restored before an effect handler runs: a request id for an audit trail or a trace. |
 | [Status and direction](https://github.com/Aaronontheweb/Akka.Durable/blob/dev/docs/status.md) | What works today and what is not done yet. |

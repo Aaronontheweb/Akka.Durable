@@ -372,7 +372,7 @@ public sealed class WorkflowHeldFactsSqlSpecs
         var region = host.Services.GetRequiredService<IRequiredActor<WorkflowRegion<PlaceOrder, CheckoutState, CheckoutFact, CheckoutOutcome>>>().ActorRef;
         while (true)
         {
-            var state = await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(Id), region, host.Services.GetRequiredService<ActorSystem>()).GetStateAsync(Soon);
+            var state = await new EntityRef<WfCommand, WfState, WfEvent>(new EntityId(Id), region, host.Services.GetRequiredService<ActorSystem>(), HeaderPropagation.None).GetStateAsync(Soon);
             if (state.State.Value is WfRunning { Held.Length: > 0 }) return;
             await Task.Yield();
         }

@@ -51,6 +51,9 @@ public static class DurableEntityHostingExtensions
         services.TryAddSingleton(typeof(IEntityRefs<>), typeof(EntityRefs<>));
         services.TryAddSingleton(typeof(IDurableEntityRefs<,,>), typeof(DurableEntityRefs<,,>));
         services.TryAddSingleton(typeof(IWorkflowRefs<,,,>), typeof(WorkflowRefs<,,,>));
+
+        // The propagators registered with AddDurableHeaderPropagator, found when the first ref is made.
+        services.TryAddSingleton(provider => HeaderPropagation.From(provider));
         AddEffectRoutes(services);
         return services;
     }
@@ -433,15 +436,16 @@ public static class DurableEntityHostingExtensions
     }
 }
 
-internal sealed class EntityRefs<TCommand>(IRequiredActor<EntityRegion<TCommand>> region) : IEntityRefs<TCommand>
+internal sealed class EntityRefs<TCommand>(IRequiredActor<EntityRegion<TCommand>> region, HeaderPropagation headers)
+    : IEntityRefs<TCommand>
 {
-    public IEntityRef<TCommand> Get(EntityId id) => new EntityRef<TCommand>(id, region.ActorRef);
+    public IEntityRef<TCommand> Get(EntityId id) => new EntityRef<TCommand>(id, region.ActorRef, headers);
 }
 
 internal sealed class DurableEntityRefs<TCommand, TState, TEvent>(
-    IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region, ActorSystem system)
+    IRequiredActor<EntityRegion<TCommand, TState, TEvent>> region, ActorSystem system, HeaderPropagation headers)
     : IDurableEntityRefs<TCommand, TState, TEvent>
 {
     public IDurableEntityRef<TCommand, TState, TEvent> Get(EntityId id) =>
-        new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef, system);
+        new EntityRef<TCommand, TState, TEvent>(id, region.ActorRef, system, headers);
 }
